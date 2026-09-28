@@ -2,12 +2,15 @@ import pytest
 
 from agenteval_core.states import (
     ALLOWED_TRANSITIONS,
+    COMPLETED_OUTCOMES,
+    FAILED_OUTCOMES,
     TERMINAL_STATUSES,
     IllegalTransition,
     Outcome,
     RunStatus,
     can_transition,
     check_transition,
+    sql_in_list,
     status_for,
 )
 
@@ -18,6 +21,11 @@ from agenteval_core.states import (
         (Outcome.SUCCESS, RunStatus.COMPLETED),
         (Outcome.NON_ZERO_EXIT, RunStatus.COMPLETED),
         (Outcome.TIMEOUT, RunStatus.COMPLETED),
+        (Outcome.AGENT_FINISHED, RunStatus.COMPLETED),
+        (Outcome.MAX_STEPS, RunStatus.COMPLETED),
+        (Outcome.BUDGET_EXCEEDED, RunStatus.COMPLETED),
+        (Outcome.MODEL_REFUSAL, RunStatus.COMPLETED),  # model behaviour, attributable to the agent
+        (Outcome.MODEL_ERROR, RunStatus.FAILED),  # provider fault: never fairly tested
         (Outcome.SANDBOX_ERROR, RunStatus.FAILED),
         (Outcome.INTERNAL_ERROR, RunStatus.FAILED),
     ],
@@ -61,3 +69,13 @@ def test_terminal_statuses_have_no_exits() -> None:
 
 def test_transition_table_covers_every_status() -> None:
     assert set(ALLOWED_TRANSITIONS) == set(RunStatus)
+
+
+def test_completed_and_failed_outcomes_partition_the_enum() -> None:
+    assert COMPLETED_OUTCOMES | FAILED_OUTCOMES == frozenset(Outcome)
+    assert COMPLETED_OUTCOMES & FAILED_OUTCOMES == frozenset()
+    assert FAILED_OUTCOMES == {Outcome.MODEL_ERROR, Outcome.SANDBOX_ERROR, Outcome.INTERNAL_ERROR}
+
+
+def test_sql_in_list_is_sorted_and_quoted() -> None:
+    assert sql_in_list(FAILED_OUTCOMES) == "'INTERNAL_ERROR','MODEL_ERROR','SANDBOX_ERROR'"
