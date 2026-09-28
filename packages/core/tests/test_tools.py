@@ -53,6 +53,9 @@ class FakeWorkspace:
         if self.reap_error:
             raise self.reap_error
 
+    async def abort(self) -> None:
+        pass
+
 
 class Clock:
     def __init__(self, now: float = 1000.0) -> None:
