@@ -1,4 +1,8 @@
-"""Executes one dispatched run: claim -> start attempt -> ack -> sandbox -> persist.
+"""Executes one dispatched run: claim -> start attempt -> ack -> execute -> persist.
+
+execute is the S1 sandbox command for command tasks, or the AgentRunner for
+agent tasks. Everything around it (claim, ack timing, fencing, persist) is
+shared.
 
 Postgres decides ownership. The Redis message is acked only after the attempt
 is durably RUNNING in Postgres; from then on Postgres (not the stream's
@@ -9,17 +13,23 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agenteval_core.agent.context import CancelToken
 from agenteval_core.logging import get_logger
-from agenteval_core.models import RunAttempt, Task
+from agenteval_core.models import AgentVersion, RunAttempt, Task
 from agenteval_core.queue.streams import DispatchMessage, RunQueue
+from agenteval_core.repositories.agents import AgentVersionRepository
 from agenteval_core.repositories.runs import RunRepository
 from agenteval_core.repositories.tasks import TaskRepository
 from agenteval_core.states import Outcome, status_for
 from agenteval_worker.sandbox.docker_sandbox import ExecutionResult, SandboxSpec
+
+if TYPE_CHECKING:
+    from agenteval_worker.agent_runner import AgentAttemptResult, AgentRunner
 
 log = get_logger(__name__)
 
@@ -37,11 +47,21 @@ class Executor:
         queue: RunQueue,
         run_sandbox: SandboxRunner,
         worker_id: str,
+        agent_runner: "AgentRunner | None" = None,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
         self._run_sandbox = run_sandbox
         self.worker_id = worker_id
+        self._agent_runner = agent_runner
+        # In-flight agent runs, so shutdown can cancel them cooperatively.
+        self._active: dict[uuid.UUID, CancelToken] = {}
+
+    def cancel_all(self, reason: str) -> int:
+        """Cancel every in-flight agent run. Returns how many were cancelled."""
+        for token in self._active.values():
+            token.cancel(reason)
+        return len(self._active)
 
     async def handle(self, msg: DispatchMessage) -> None:
         if msg.run_id is None:
@@ -54,14 +74,21 @@ class Executor:
             started = await self._claim_and_start(msg)
             if started is None:
                 return
-            task, attempt = started
+            task, attempt, version = started
             with structlog.contextvars.bound_contextvars(
-                task_id=str(task.id), attempt_no=attempt.attempt_no
+                task_id=str(task.id), attempt_no=attempt.attempt_no, task_type=task.task_type
             ):
-                result = await self._execute(task, attempt)
+                result: ExecutionResult | AgentAttemptResult
+                if task.task_type == "agent":
+                    assert version is not None
+                    result = await self._execute_agent(task, attempt, version)
+                else:
+                    result = await self._execute(task, attempt)
                 await self._persist(attempt, result)
 
-    async def _claim_and_start(self, msg: DispatchMessage) -> tuple[Task, RunAttempt] | None:
+    async def _claim_and_start(
+        self, msg: DispatchMessage
+    ) -> tuple[Task, RunAttempt, AgentVersion | None] | None:
         assert msg.run_id is not None
         async with self._sm() as s:
             runs = RunRepository(s)
@@ -80,8 +107,16 @@ class Executor:
             async with self._sm() as s:
                 runs = RunRepository(s)
                 task = await TaskRepository(s).get(run.task_id)
+                if task is None:
+                    raise RuntimeError("run or task changed underneath the claim")
+                version = None
+                if task.task_type == "agent":
+                    if run.agent_version_id is not None:
+                        version = await AgentVersionRepository(s).get(run.agent_version_id)
+                    if version is None:
+                        raise RuntimeError("agent task run has no agent version")
                 attempt = await runs.start_attempt(run.id, self.worker_id)
-                if task is None or attempt is None:
+                if attempt is None:
                     raise RuntimeError("run or task changed underneath the claim")
                 await s.commit()
         except Exception as exc:
@@ -92,7 +127,7 @@ class Executor:
 
         await self._queue.ack(msg.message_id)
         log.info("attempt_started", attempt_no=attempt.attempt_no)
-        return task, attempt
+        return task, attempt, version
 
     async def _execute(self, task: Task, attempt: RunAttempt) -> ExecutionResult:
         # Command tasks always have a command (ck_tasks_command).
@@ -118,7 +153,28 @@ class Executor:
             log.exception("sandbox_crashed")
             return _internal_error(f"{type(exc).__name__}: {exc}")
 
-    async def _persist(self, attempt: RunAttempt, result: ExecutionResult) -> None:
+    async def _execute_agent(
+        self, task: Task, attempt: RunAttempt, version: AgentVersion
+    ) -> "ExecutionResult | AgentAttemptResult":
+        if self._agent_runner is None:
+            return _internal_error("agent tasks are not enabled on this worker")
+        token = CancelToken()
+        self._active[attempt.run_id] = token
+        try:
+            # Backstop only: the runtime enforces task.timeout_s itself.
+            async with asyncio.timeout(task.timeout_s + SANDBOX_GRACE_S):
+                return await self._agent_runner.run(task, attempt, version, token)
+        except TimeoutError:
+            return _internal_error("agent run did not return within timeout + grace")
+        except Exception as exc:
+            log.exception("agent_run_crashed")
+            return _internal_error(f"{type(exc).__name__}: {exc}")
+        finally:
+            self._active.pop(attempt.run_id, None)
+
+    async def _persist(
+        self, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
+    ) -> None:
         fields = asdict(result)
         try:
             async with self._sm() as s:

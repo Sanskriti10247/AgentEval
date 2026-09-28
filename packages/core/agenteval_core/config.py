@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     worker_concurrency: int = 2
     worker_block_ms: int = 5000
     worker_drain_timeout_s: int = 330
+    # At drain_timeout - cancel_grace, in-flight agent runs are cancelled
+    # (reason worker_shutdown) and get cancel_grace to record and persist.
+    worker_cancel_grace_s: int = 20
+
+    # Agent runtime. The scripted fake provider is the default for dev, CI and
+    # tests; real providers are opt-in.
+    enable_fake_provider: bool = True
 
     log_level: str = "INFO"
     log_json: bool = True
