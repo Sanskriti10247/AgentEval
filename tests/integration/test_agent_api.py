@@ -396,3 +396,44 @@ async def test_create_run_and_inspect_an_agent_over_http(
     events = (await client.get(f"{API}/runs/{run['id']}/attempts/1/events")).json()
     assert [e["event_type"] for e in events["events"]][-1] == "run_finished"
     assert [e["tool"] for e in events["events"] if e["tool"]] == ["write_file", "run_tests"]
+
+
+async def test_anthropic_versions_when_enabled(settings: Settings) -> None:
+    """The API validates Anthropic configs without the SDK (and without a key)."""
+    app = create_app(settings.model_copy(update={"enable_anthropic_provider": True}))
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            agent_id = await new_agent(c)
+            base = {"model_provider": "anthropic", "tools": ["read_file"]}
+
+            opus = await c.post(
+                f"{API}/agents/{agent_id}/versions", json={**base, "model": "claude-opus-5"}
+            )
+            assert opus.status_code == 201, opus.text
+            assert opus.json()["model_settings"] == {"effort": "high"}  # explicit default
+
+            same = await c.post(
+                f"{API}/agents/{agent_id}/versions",
+                json={**base, "model": "claude-opus-5", "model_settings": {"effort": "high"}},
+            )
+            assert same.status_code == 200 and same.json()["id"] == opus.json()["id"]
+
+            haiku = await c.post(
+                f"{API}/agents/{agent_id}/versions", json={**base, "model": "claude-haiku-4-5"}
+            )
+            assert haiku.status_code == 201 and haiku.json()["model_settings"] == {"effort": None}
+
+            for bad, fragment in [
+                (
+                    {"model": "claude-haiku-4-5", "model_settings": {"effort": "high"}},
+                    "does not support the effort",
+                ),
+                (
+                    {"model": "claude-opus-5", "model_settings": {"fallbacks": "default"}},
+                    "invalid Anthropic settings",
+                ),
+                ({"model": "claude-opus-5-20260401"}, "no price"),
+            ]:
+                resp = await c.post(f"{API}/agents/{agent_id}/versions", json={**base, **bad})
+                assert resp.status_code == 422 and fragment in resp.json()["detail"], resp.text

@@ -24,6 +24,7 @@ from agenteval_core.agent.pricing import is_priced
 from agenteval_core.config import Settings
 from agenteval_core.models import Agent, AgentVersion
 from agenteval_core.models.base import new_id
+from agenteval_core.providers.anthropic_settings import normalise_anthropic_settings
 from agenteval_core.providers.fake import FakeScript
 from agenteval_core.schemas.agent import AgentCreate, AgentVersionCreate
 from agenteval_core.services.errors import Conflict, InvalidAgentVersion, NotFound
@@ -164,6 +165,15 @@ class AgentService:
                 settings = FakeScript.model_validate(settings).model_dump(mode="json")
             except ValidationError as exc:
                 raise InvalidAgentVersion(f"invalid fake script: {_errors(exc)}") from exc
+        elif data.model_provider == "anthropic":
+            try:
+                settings = normalise_anthropic_settings(data.model, settings).model_dump(
+                    mode="json"
+                )
+            except ValidationError as exc:
+                raise InvalidAgentVersion(f"invalid Anthropic settings: {_errors(exc)}") from exc
+            except ValueError as exc:
+                raise InvalidAgentVersion(f"invalid Anthropic settings: {exc}") from exc
 
         return {
             "model_provider": data.model_provider,
