@@ -95,6 +95,8 @@ class Executor:
         return task, attempt
 
     async def _execute(self, task: Task, attempt: RunAttempt) -> ExecutionResult:
+        # Command tasks always have a command (ck_tasks_command).
+        assert task.command is not None
         spec = SandboxSpec(
             image=task.image,
             command=list(task.command),

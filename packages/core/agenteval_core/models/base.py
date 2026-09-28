@@ -3,6 +3,7 @@ from datetime import datetime
 
 import uuid_utils.compat
 from sqlalchemy import DateTime, MetaData, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 NAMING_CONVENTION = {
@@ -12,6 +13,12 @@ NAMING_CONVENTION = {
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
 }
+
+
+# For nullable JSONB columns: store Python None as SQL NULL. The default
+# (none_as_null=False) stores the JSON value `null`, which is NOT NULL to
+# Postgres and silently defeats `IS NULL` checks such as ck_tasks_command.
+NullableJSONB = JSONB(none_as_null=True)
 
 
 def new_id() -> uuid.UUID:
