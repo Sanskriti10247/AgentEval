@@ -7,6 +7,7 @@ Repositories flush but never commit; services/executors own transactions.
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -114,11 +115,18 @@ class RunRepository:
         duration_ms: int,
         error_message: str | None,
         finished_at: datetime | None = None,
+        steps: int | None = None,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        cost_usd: Decimal | None = None,
+        final_answer: str | None = None,
     ) -> bool:
         """Finish attempt N and move the run RUNNING -> status_for(outcome).
 
         Fenced on (worker_id, attempt_no): a worker that no longer owns the
         run can't overwrite it. Returns False (caller rolls back) if fenced.
+        The agent aggregates default to None (NULL), which is what command
+        tasks write.
         """
         final = status_for(outcome)
         check_transition(RunStatus.RUNNING, final)
@@ -138,6 +146,11 @@ class RunRepository:
                 duration_ms=duration_ms,
                 error_message=error_message,
                 finished_at=done_at,
+                steps=steps,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                cost_usd=cost_usd,
+                final_answer=final_answer,
             )
             .returning(RunAttempt.id)
             .execution_options(synchronize_session=False)
