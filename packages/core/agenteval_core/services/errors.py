@@ -22,3 +22,15 @@ class DispatchUnavailable(ServiceError):
             f"run {run_id} is queued but dispatch failed; retry with the same Idempotency-Key"
         )
         self.run_id = run_id
+
+
+class InvalidAgentVersion(ServiceError):
+    """The agent version config is invalid or not runnable here."""
+
+
+class InvalidRun(ServiceError):
+    """The run request is inconsistent (e.g. agent task without an agent version)."""
+
+
+class Conflict(ServiceError):
+    """A uniqueness rule was violated (e.g. agent name taken)."""
