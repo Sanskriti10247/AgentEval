@@ -5,6 +5,8 @@ x-app-env: &app-env
   AGENTEVAL_REDIS_URL: redis://redis:6379/0
   AGENTEVAL_IMAGE_ALLOWLIST: '["agenteval-sandbox:py312"]'
   AGENTEVAL_LOG_LEVEL: ${AGENTEVAL_LOG_LEVEL:-INFO}
+  # Real model calls are opt-in (the API validates, the worker calls).
+  AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER: ${AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER:-false}
 
 services:
   postgres:
@@ -59,6 +61,8 @@ services:
     environment:
       <<: *app-env
       AGENTEVAL_WORKER_CONCURRENCY: ${AGENTEVAL_WORKER_CONCURRENCY:-2}
+      # Worker only: the key never reaches the API or any sandbox container.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     # watchfiles restarts on code changes; SIGINT triggers the worker's graceful drain.
     command: ["watchfiles", "--filter", "python", "--sigint-timeout", "330",
               "python -m agenteval_worker.main",
