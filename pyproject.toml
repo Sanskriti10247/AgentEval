@@ -1,0 +1,38 @@
+# Virtual uv workspace root: holds workspace definition, dev tools and tool config only.
+[tool.uv.workspace]
+members = ["packages/core", "apps/api", "apps/worker"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "testcontainers[postgres,redis]>=4.8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+addopts = "--import-mode=importlib"
+testpaths = ["packages/core/tests", "apps/api/tests", "apps/worker/tests", "tests/integration"]
+markers = [
+    "docker: needs a Docker daemon",
+    "e2e: needs the compose stack running",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agenteval_core", "agenteval_api", "agenteval_worker"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
