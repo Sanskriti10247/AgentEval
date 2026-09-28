@@ -15,12 +15,11 @@ import docker
 from agenteval_core.config import get_settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.logging import configure_logging, get_logger
-from agenteval_core.providers.base import ModelProvider
-from agenteval_core.providers.fake import FakeProvider
 from agenteval_core.queue.streams import RunQueue, redis_for_blocking_reads
 from agenteval_worker.agent_runner import AgentRunner
 from agenteval_worker.consumer import Consumer
 from agenteval_worker.executor import Executor
+from agenteval_worker.providers import build_providers
 from agenteval_worker.sandbox.docker_sandbox import DockerSandbox
 
 log = get_logger(__name__)
@@ -43,10 +42,7 @@ async def main() -> None:
     swept = await asyncio.to_thread(sandbox.sweep_orphans)
     queue = RunQueue(redis, settings.dispatch_stream, settings.consumer_group)
     sessionmaker = create_sessionmaker(engine)
-    # FakeProvider is the default; real providers are opt-in (none wired yet).
-    providers: dict[str, ModelProvider] = {}
-    if settings.enable_fake_provider:
-        providers["fake"] = FakeProvider()
+    providers = build_providers(settings)
     agent_runner = AgentRunner(
         sessionmaker=sessionmaker,
         docker_client=docker_client,
