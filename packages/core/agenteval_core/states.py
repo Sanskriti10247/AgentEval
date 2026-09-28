@@ -21,9 +21,19 @@ class RunStatus(StrEnum):
 
 
 class Outcome(StrEnum):
+    # Command tasks (S1)
     SUCCESS = "SUCCESS"
     NON_ZERO_EXIT = "NON_ZERO_EXIT"
+    # Both task types: wall-clock limit hit
     TIMEOUT = "TIMEOUT"
+    # Agent tasks (Phase 3): how the agent's run ended. Whether it *solved*
+    # the task is Phase 4's evaluator, not the outcome.
+    AGENT_FINISHED = "AGENT_FINISHED"
+    MAX_STEPS = "MAX_STEPS"
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
+    MODEL_REFUSAL = "MODEL_REFUSAL"
+    # Platform faults: the task was never fairly tested
+    MODEL_ERROR = "MODEL_ERROR"
     SANDBOX_ERROR = "SANDBOX_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
@@ -45,7 +55,20 @@ ALLOWED_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.FAILED: frozenset(),
 }
 
-_TASK_OUTCOMES = frozenset({Outcome.SUCCESS, Outcome.NON_ZERO_EXIT, Outcome.TIMEOUT})
+# Outcomes that are trustworthy results about the task/agent -> COMPLETED.
+# Everything else is a platform fault -> FAILED (retryable in Phase 5).
+COMPLETED_OUTCOMES: frozenset[Outcome] = frozenset(
+    {
+        Outcome.SUCCESS,
+        Outcome.NON_ZERO_EXIT,
+        Outcome.TIMEOUT,
+        Outcome.AGENT_FINISHED,
+        Outcome.MAX_STEPS,
+        Outcome.BUDGET_EXCEEDED,
+        Outcome.MODEL_REFUSAL,
+    }
+)
+FAILED_OUTCOMES: frozenset[Outcome] = frozenset(Outcome) - COMPLETED_OUTCOMES
 
 
 class IllegalTransition(Exception):
@@ -66,7 +89,13 @@ def check_transition(src: RunStatus, dst: RunStatus) -> None:
 def status_for(outcome: Outcome) -> RunStatus:
     """Map an execution outcome to the terminal run status it produces.
 
-    Task-caused outcomes (including TIMEOUT and NON_ZERO_EXIT) are definitive
-    results -> COMPLETED. Platform faults -> FAILED (retryable in Phase 5).
+    Task- and agent-caused outcomes (including TIMEOUT, NON_ZERO_EXIT,
+    MAX_STEPS and MODEL_REFUSAL) are definitive results -> COMPLETED.
+    Platform faults (MODEL_ERROR, SANDBOX_ERROR, INTERNAL_ERROR) -> FAILED.
     """
-    return RunStatus.COMPLETED if outcome in _TASK_OUTCOMES else RunStatus.FAILED
+    return RunStatus.COMPLETED if outcome in COMPLETED_OUTCOMES else RunStatus.FAILED
+
+
+def sql_in_list(values: frozenset[Outcome] | type[Outcome]) -> str:
+    """Render enum values as a sorted SQL IN-list body, e.g. "'A','B'"."""
+    return ",".join(f"'{v.value}'" for v in sorted(values, key=lambda o: o.value))
