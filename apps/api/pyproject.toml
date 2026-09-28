@@ -1,0 +1,13 @@
+[project]
+name = "agenteval-api"
+version = "0.1.0"
+description = "AgentEval HTTP API"
+requires-python = ">=3.12,<3.13"
+dependencies = ["agenteval-core", "fastapi>=0.111", "uvicorn[standard]>=0.30"]
+
+[tool.uv.sources]
+agenteval-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
