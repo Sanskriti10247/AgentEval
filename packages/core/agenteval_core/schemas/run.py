@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -10,6 +11,7 @@ class RunCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_id: uuid.UUID
+    agent_version_id: uuid.UUID | None = None
 
 
 class RunRead(BaseModel):
@@ -17,6 +19,7 @@ class RunRead(BaseModel):
 
     id: uuid.UUID
     task_id: uuid.UUID
+    agent_version_id: uuid.UUID | None
     status: RunStatus
     outcome: Outcome | None
     idempotency_key: str | None
@@ -46,5 +49,11 @@ class RunAttemptRead(BaseModel):
     stderr_truncated: bool
     duration_ms: int | None
     error_message: str | None
+    # Agent attempts only (null for command tasks).
+    steps: int | None
+    tokens_in: int | None
+    tokens_out: int | None
+    cost_usd: Decimal | None
+    final_answer: str | None
     started_at: datetime
     finished_at: datetime | None

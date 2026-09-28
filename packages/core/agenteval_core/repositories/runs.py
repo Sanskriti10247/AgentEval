@@ -29,7 +29,12 @@ class RunRepository:
         result = await self._s.execute(select(Run).where(Run.idempotency_key == key))
         return result.scalar_one_or_none()
 
-    async def create_queued(self, task_id: uuid.UUID, idempotency_key: str | None) -> Run | None:
+    async def create_queued(
+        self,
+        task_id: uuid.UUID,
+        idempotency_key: str | None,
+        agent_version_id: uuid.UUID | None = None,
+    ) -> Run | None:
         """Insert a QUEUED run. Returns None if the idempotency key already exists.
 
         ON CONFLICT DO NOTHING makes concurrent duplicate submissions safe
@@ -40,6 +45,7 @@ class RunRepository:
             .values(
                 id=new_id(),
                 task_id=task_id,
+                agent_version_id=agent_version_id,
                 status=RunStatus.QUEUED,
                 idempotency_key=idempotency_key,
                 attempt_count=0,
