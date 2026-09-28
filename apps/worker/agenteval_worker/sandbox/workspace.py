@@ -32,6 +32,10 @@ class DockerWorkspace:
     async def reap(self) -> None:
         await self._call(self.session.reap)
 
+    async def abort(self) -> None:
+        # SandboxSession.kill swallows Docker errors: the container may be gone.
+        await asyncio.to_thread(self.session.kill)
+
     def _write(self, files: dict[str, str]) -> ExecResult:
         return self.session.write_files_result(files, mtime=time.time())
 

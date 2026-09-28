@@ -44,3 +44,8 @@ class Workspace(Protocol):
     async def reap(self) -> None:
         """Kill every process a tool call left behind. Raises WorkspaceUnavailable."""
         ...
+
+    async def abort(self) -> None:
+        """Make any in-flight exec end now (used for cancellation). The
+        workspace is unusable afterwards. Never raises."""
+        ...
