@@ -1,9 +1,10 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Response, status
+from fastapi import APIRouter, Header, Query, Response, status
 
 from agenteval_api.deps import RunServiceDep
+from agenteval_core.schemas.agent import TrajectoryEventRead, TrajectoryPage
 from agenteval_core.schemas.run import RunAttemptRead, RunCreate, RunRead
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -21,8 +22,11 @@ async def submit_run(
     response: Response,
     idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
 ) -> RunRead:
-    """Queue a run of a task. 202 for a new run, 200 when the key is replayed."""
-    result = await runs.submit(body.task_id, idempotency_key)
+    """Queue a run of a task. 202 for a new run, 200 when the key is replayed.
+
+    Agent tasks need `agent_version_id`; command tasks must not have one.
+    """
+    result = await runs.submit(body.task_id, idempotency_key, body.agent_version_id)
     if not result.created:
         response.status_code = status.HTTP_200_OK
     return RunRead.model_validate(result.run)
@@ -36,3 +40,20 @@ async def get_run(run_id: uuid.UUID, runs: RunServiceDep) -> RunRead:
 @router.get("/{run_id}/attempts", response_model=list[RunAttemptRead])
 async def list_attempts(run_id: uuid.UUID, runs: RunServiceDep) -> list[RunAttemptRead]:
     return [RunAttemptRead.model_validate(a) for a in await runs.list_attempts(run_id)]
+
+
+@router.get("/{run_id}/attempts/{attempt_no}/events", response_model=TrajectoryPage)
+async def list_events(
+    run_id: uuid.UUID,
+    attempt_no: int,
+    runs: RunServiceDep,
+    after_seq: Annotated[int, Query(ge=-1)] = -1,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> TrajectoryPage:
+    """An attempt's trajectory in seq order, paged by `after_seq`."""
+    events, next_after = await runs.list_events(
+        run_id, attempt_no, after_seq=after_seq, limit=limit
+    )
+    return TrajectoryPage(
+        events=[TrajectoryEventRead.model_validate(e) for e in events], next_after_seq=next_after
+    )
