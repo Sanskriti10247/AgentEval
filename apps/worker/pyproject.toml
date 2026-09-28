@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "AgentEval worker: consumes runs and executes them in Docker sandboxes"
 requires-python = ">=3.12,<3.13"
 # watchfiles: dev hot-reload of the worker process in docker compose.
-dependencies = ["agenteval-core", "docker>=7.1", "watchfiles>=0.21"]
+dependencies = [
+    "agenteval-core",
+    "anthropic>=1.0",
+    "docker>=7.1",
+    "watchfiles>=0.21",
+]
 
 [tool.uv.sources]
 agenteval-core = { workspace = true }
