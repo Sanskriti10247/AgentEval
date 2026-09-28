@@ -76,7 +76,9 @@ async def redis(settings: Settings) -> AsyncIterator[Redis]:
 @pytest.fixture(autouse=True)
 async def clean_state(engine: AsyncEngine, settings: Settings) -> AsyncIterator[None]:
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE run_attempts, runs, tasks"))
+        await conn.execute(
+            text("TRUNCATE trajectory_events, run_attempts, runs, tasks, agent_versions, agents")
+        )
     r = Redis.from_url(settings.redis_url)
     await r.flushall()
     await r.aclose()
