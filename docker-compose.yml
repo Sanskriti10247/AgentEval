@@ -1,0 +1,79 @@
+# Local development stack. Sandbox containers are NOT compose services: the
+# worker creates them on demand as siblings through the mounted Docker socket.
+x-app-env: &app-env
+  AGENTEVAL_DATABASE_URL: postgresql+asyncpg://agenteval:agenteval@postgres:5432/agenteval
+  AGENTEVAL_REDIS_URL: redis://redis:6379/0
+  AGENTEVAL_IMAGE_ALLOWLIST: '["agenteval-sandbox:py312"]'
+  AGENTEVAL_LOG_LEVEL: ${AGENTEVAL_LOG_LEVEL:-INFO}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: agenteval
+      POSTGRES_PASSWORD: agenteval
+      POSTGRES_DB: agenteval
+    ports:
+      - "127.0.0.1:${AGENTEVAL_PG_HOST_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agenteval -d agenteval"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${AGENTEVAL_REDIS_HOST_PORT:-56379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    environment: *app-env
+    command: ["uvicorn", "agenteval_api.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--reload", "--reload-dir", "/app/packages/core", "--reload-dir", "/app/apps/api"]
+    ports:
+      - "127.0.0.1:${AGENTEVAL_API_HOST_PORT:-8000}:8000"
+    volumes:
+      - ./packages/core:/app/packages/core
+      - ./apps/api:/app/apps/api
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/worker.Dockerfile
+    environment:
+      <<: *app-env
+      AGENTEVAL_WORKER_CONCURRENCY: ${AGENTEVAL_WORKER_CONCURRENCY:-2}
+    # watchfiles restarts on code changes; SIGINT triggers the worker's graceful drain.
+    command: ["watchfiles", "--filter", "python", "--sigint-timeout", "330",
+              "python -m agenteval_worker.main",
+              "/app/packages/core", "/app/apps/worker"]
+    volumes:
+      - ./packages/core:/app/packages/core
+      - ./apps/worker:/app/apps/worker
+      # Host-root equivalent: see README "Security model".
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Let in-flight runs (max timeout 300s) drain on `docker compose stop`.
+    stop_grace_period: 340s
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:
