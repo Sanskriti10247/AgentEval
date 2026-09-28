@@ -1,5 +1,6 @@
 """Typed settings loaded from environment variables (see .env.example)."""
 
+from decimal import Decimal
 from functools import lru_cache
 
 from pydantic import Field
@@ -34,6 +35,16 @@ class Settings(BaseSettings):
     # Agent runtime. The scripted fake provider is the default for dev, CI and
     # tests; real providers are opt-in.
     enable_fake_provider: bool = True
+    # Global caps on agent-version limits. Versions above a cap are rejected
+    # (422), never silently clamped: a version runs with exactly its config.
+    agent_max_steps_cap: int = 100
+    agent_max_total_tokens_cap: int = 2_000_000
+    agent_max_cost_usd_cap: Decimal = Decimal("5.00")
+
+    def enabled_providers(self) -> set[str]:
+        """Providers agent versions may use. Shared by API (validation) and
+        worker (wiring). No real provider is wired yet."""
+        return {"fake"} if self.enable_fake_provider else set()
 
     log_level: str = "INFO"
     log_json: bool = True
