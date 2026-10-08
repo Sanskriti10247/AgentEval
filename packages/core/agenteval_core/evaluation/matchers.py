@@ -13,8 +13,8 @@ from typing import Any
 MAX_ACTUAL_CHARS = 64 * 1024
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
-# (summary when it matches, summary when it doesn't). Public text: never the
-# expected value itself (D11).
+# (summary when it matches, summary when it doesn't). Internal summaries that
+# never contain the expected value itself (D11).
 _REASONS = {
     "exact": ("exact match", "differs from the expected value"),
     "normalized": (

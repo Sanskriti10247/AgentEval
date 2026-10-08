@@ -1,10 +1,16 @@
-"""Evaluation data structures. Everything here is safe to persist in
-attempt_evaluations and to return from the API - by construction:
+"""Evaluation data structures.
 
-D11: no field ever holds hidden evaluation data. Expected values appear only
-as fixed-template summaries, and executing checks (python_tests, io,
-command) never record process output: a failing hidden test's traceback
-quotes the hidden test file, and a candidate can echo its hidden stdin.
+INTERNAL evaluator records (D11). CheckResult, IntegrityResult, ExecPlan and
+FileEvidence may carry evaluator-only configuration - check names, paths,
+expected test counts, match modes, argv, stdin - so they are persisted for
+the evaluator but are NEVER returned by the API or shown to the model.
+public.public_view() is the only projection allowed out.
+
+Defence in depth even internally: no field ever holds hidden file contents or
+expected values verbatim (expected values appear only as fixed-template
+summaries), and executing checks never record process output - a failing
+hidden test's traceback quotes the hidden test file, and a candidate can echo
+its hidden stdin.
 """
 
 from __future__ import annotations
@@ -17,8 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from agenteval_core.evaluation.taxonomy import FailureCategory
 from agenteval_core.states import Outcome
 
-SUMMARY_CHARS = 500  # public summaries
-ANSWER_CHARS = 2000  # agent-produced text shown back (it never saw hidden data)
+SUMMARY_CHARS = 500  # internal summaries
+ANSWER_CHARS = 2000  # agent-produced text kept in the internal record
 
 
 def clip(text: str, limit: int = SUMMARY_CHARS) -> str:
@@ -34,8 +40,8 @@ class CheckResult(BaseModel):
     weight: float
     passed: bool | None  # None: the check could not run (see error)
     score: float | None = Field(default=None, ge=0, le=1)
-    expected: str | None = None  # public summary only (D11)
-    actual: str | None = None  # agent-produced or derived facts only (D11)
+    expected: str | None = None  # internal template summary, never the value itself
+    actual: str | None = None  # agent-produced or derived facts; no process output
     detail: str = ""
     error: str | None = None  # the evaluator failed to run this check
     # Which task-result category a failure of this check means (classifier input).

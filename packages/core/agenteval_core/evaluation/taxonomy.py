@@ -59,6 +59,23 @@ PLATFORM_CATEGORIES: frozenset[FailureCategory] = frozenset(
 )
 
 
+class DiagnosticTag(StrEnum):
+    """How the agent worked; tags only, never a primary category."""
+
+    LOOP_DETECTED = "loop_detected"
+    HIGH_TOOL_ERROR_RATE = "high_tool_error_rate"
+    NEVER_RAN_TESTS = "never_ran_tests"
+    MODEL_RETRIES = "model_retries"
+    PERMISSIONS_NORMALIZED = "permissions_normalized"
+
+
+# Every tag a verdict may carry: secondary categories plus diagnostics. A closed
+# vocabulary, so nothing free-form can travel through tags (D11).
+TAG_VOCABULARY: frozenset[str] = frozenset(
+    {c.value for c in FailureCategory} | {d.value for d in DiagnosticTag}
+)
+
+
 class ArtifactKind(StrEnum):
     WORKSPACE = "workspace"  # tar.gz of /workspace after the agent finished (D3)
 

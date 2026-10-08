@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from agenteval_core.evaluation.metrics import TrajectoryMetrics
 from agenteval_core.evaluation.results import AttemptFacts, CheckResult, IntegrityResult
-from agenteval_core.evaluation.taxonomy import EvaluationStatus, FailureCategory
+from agenteval_core.evaluation.taxonomy import DiagnosticTag, EvaluationStatus, FailureCategory
 from agenteval_core.states import Outcome
 
 # Agent-task outcomes only (D4: command tasks are not evaluated).
@@ -42,7 +42,9 @@ class Verdict:
     status: EvaluationStatus
     task_success: bool | None
     category: FailureCategory | None
-    tags: tuple[str, ...]
+    tags: tuple[str, ...]  # values from TAG_VOCABULARY only
+    # INTERNAL (D11): may name checks and protected paths. Never API- or
+    # model-visible; public.public_view() is the only outward projection.
     detail: str
 
 
@@ -136,23 +138,23 @@ def classify(
 def _diagnostics(
     metrics: TrajectoryMetrics | None, integrity: IntegrityResult | None
 ) -> tuple[str, ...]:
-    tags: set[str] = set()
+    tags: set[DiagnosticTag] = set()
     if metrics is not None:
         if metrics.loop_detected:
-            tags.add("loop_detected")
+            tags.add(DiagnosticTag.LOOP_DETECTED)
         if (
             metrics.tool_error_rate is not None
             and metrics.tool_calls >= HIGH_TOOL_ERROR_MIN_CALLS
             and metrics.tool_error_rate >= HIGH_TOOL_ERROR_RATE
         ):
-            tags.add("high_tool_error_rate")
+            tags.add(DiagnosticTag.HIGH_TOOL_ERROR_RATE)
         if not metrics.ran_tests:
-            tags.add("never_ran_tests")
+            tags.add(DiagnosticTag.NEVER_RAN_TESTS)
         if metrics.model_errors:
-            tags.add("model_retries")
+            tags.add(DiagnosticTag.MODEL_RETRIES)
     if integrity is not None and integrity.normalized_paths:
-        tags.add("permissions_normalized")
-    return tuple(sorted(tags))
+        tags.add(DiagnosticTag.PERMISSIONS_NORMALIZED)
+    return tuple(sorted(t.value for t in tags))
 
 
 def _detail(
