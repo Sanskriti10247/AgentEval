@@ -243,6 +243,9 @@ class Shell(Tool):
 
 # -- run_tests ----------------------------------------------------------------------
 
+# First line of a passing run_tests result (trajectory metrics rely on it).
+TESTS_PASSED = "Tests passed."
+
 
 class RunTestsInput(ToolInput):
     pass
@@ -263,7 +266,7 @@ class RunTests(Tool):
         body = format_exec(out, timeout_s=ctx.tool_timeout_s)
         if out.timed_out:
             return ToolOutput(f"Tests timed out.\n{body}", ToolStatus.TIMEOUT, out.exit_code)
-        verdict = "Tests passed." if out.exit_code == 0 else f"Tests failed (exit {out.exit_code})."
+        verdict = TESTS_PASSED if out.exit_code == 0 else f"Tests failed (exit {out.exit_code})."
         return ToolOutput(f"{verdict}\n{body}", exit_code=out.exit_code)
 
 
