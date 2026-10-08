@@ -8,8 +8,6 @@ and hashed: submitting an equivalent config returns the existing version.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agenteval_core.agent.limits import AgentLimits
 from agenteval_core.agent.pricing import is_priced
 from agenteval_core.config import Settings
+from agenteval_core.hashing import config_hash_of
 from agenteval_core.models import Agent, AgentVersion
 from agenteval_core.models.base import new_id
 from agenteval_core.providers.anthropic_settings import normalise_anthropic_settings
@@ -30,6 +29,8 @@ from agenteval_core.schemas.agent import AgentCreate, AgentVersionCreate
 from agenteval_core.services.errors import Conflict, InvalidAgentVersion, NotFound
 from agenteval_core.tools.builtin import Shell
 from agenteval_core.tools.registry import unknown_tool_names
+
+__all__ = ["AgentService", "VersionResult", "config_hash_of"]
 
 
 @dataclass(frozen=True)
@@ -184,11 +185,6 @@ class AgentService:
             "limits": limits.model_dump(mode="json"),
             "model_settings": settings,
         }
-
-
-def config_hash_of(config: dict[str, Any]) -> str:
-    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _errors(exc: ValidationError) -> str:
