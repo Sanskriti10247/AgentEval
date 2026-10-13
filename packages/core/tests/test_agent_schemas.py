@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from agenteval_core.schemas.agent import AgentCreate, AgentVersionCreate
-from agenteval_core.schemas.task import TaskCreate
+from agenteval_core.schemas.task_api import TaskCreate
 from agenteval_core.services.agents import config_hash_of
 
 AGENT = {"name": "t", "task_type": "agent", "image": "i", "instructions": "do it"}
