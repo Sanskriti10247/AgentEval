@@ -4,6 +4,10 @@ execute is the S1 sandbox command for command tasks, or the AgentRunner for
 agent tasks. Everything around it (claim, ack timing, fencing, persist) is
 shared.
 
+Phase 4: once an agent attempt is durably finished (committed), the
+EvaluationRunner grades it in separate transactions (D1, A1). Evaluation can
+never change or roll back the attempt; its failures end in its own record.
+
 Postgres decides ownership. The Redis message is acked only after the attempt
 is durably RUNNING in Postgres; from then on Postgres (not the stream's
 pending list) is what future recovery (Phase 5 leases) works from.
@@ -12,8 +16,8 @@ pending list) is what future recovery (Phase 5 leases) works from.
 import asyncio
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict
-from typing import TYPE_CHECKING
+from dataclasses import fields
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -30,6 +34,7 @@ from agenteval_worker.sandbox.docker_sandbox import ExecutionResult, SandboxSpec
 
 if TYPE_CHECKING:
     from agenteval_worker.agent_runner import AgentAttemptResult, AgentRunner
+    from agenteval_worker.evaluation_runner import EvaluationRunner
 
 log = get_logger(__name__)
 
@@ -48,12 +53,14 @@ class Executor:
         run_sandbox: SandboxRunner,
         worker_id: str,
         agent_runner: "AgentRunner | None" = None,
+        evaluation_runner: "EvaluationRunner | None" = None,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
         self._run_sandbox = run_sandbox
         self.worker_id = worker_id
         self._agent_runner = agent_runner
+        self._evaluation_runner = evaluation_runner
         # In-flight agent runs, so shutdown can cancel them cooperatively.
         self._active: dict[uuid.UUID, CancelToken] = {}
 
@@ -84,7 +91,9 @@ class Executor:
                     result = await self._execute_agent(task, attempt, version)
                 else:
                     result = await self._execute(task, attempt)
-                await self._persist(attempt, result)
+                persisted = await self._persist(attempt, result)
+                if persisted and task.task_type == "agent":
+                    await self._evaluate(task, attempt, result)
 
     async def _claim_and_start(
         self, msg: DispatchMessage
@@ -174,21 +183,21 @@ class Executor:
 
     async def _persist(
         self, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
-    ) -> None:
-        fields = asdict(result)
+    ) -> bool:
+        """True once the attempt's outcome is committed."""
         try:
             async with self._sm() as s:
-                ok = await RunRepository(s).finish_attempt(attempt, **fields)
+                ok = await RunRepository(s).finish_attempt(attempt, **_finish_fields(result))
                 if not ok:
                     await s.rollback()
                     log.warning("finish_fenced", outcome=result.outcome)
-                    return
+                    return False
                 await s.commit()
         except Exception:
             # Result is lost and the run stays RUNNING until Phase 5 lease
             # recovery. Log what we had so it's at least observable.
             log.exception("persist_failed", outcome=result.outcome, exit_code=result.exit_code)
-            return
+            return False
         log.info(
             "run_finished",
             status=status_for(result.outcome),
@@ -197,6 +206,21 @@ class Executor:
             duration_ms=result.duration_ms,
             oom_killed=result.oom_killed,
         )
+        return True
+
+    async def _evaluate(
+        self, task: Task, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
+    ) -> None:
+        """Never raises: the attempt is already durable, and nothing about
+        evaluation may affect it. The runner records its own failures."""
+        if self._evaluation_runner is None:
+            return
+        try:
+            await self._evaluation_runner.evaluate(
+                task, attempt, getattr(result, "workspace", None)
+            )
+        except Exception as exc:
+            log.exception("evaluation_crashed", error_type=type(exc).__name__)
 
     async def _fail_claimed(self, run_id: uuid.UUID, error: str) -> None:
         try:
@@ -205,6 +229,12 @@ class Executor:
                 await s.commit()
         except Exception:
             log.exception("fail_claimed_failed")
+
+
+def _finish_fields(result: "ExecutionResult | AgentAttemptResult") -> dict[str, Any]:
+    """The finish_attempt columns: every field except the evaluator's
+    workspace capture (shallow, so a snapshot's bytes are never copied)."""
+    return {f.name: getattr(result, f.name) for f in fields(result) if f.name != "workspace"}
 
 
 def _internal_error(message: str) -> ExecutionResult:

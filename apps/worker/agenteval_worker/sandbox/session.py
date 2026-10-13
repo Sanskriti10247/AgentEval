@@ -282,6 +282,14 @@ class SandboxSession:
         except docker.errors.DockerException as exc:
             log.warning("sandbox_remove_failed", container_id=self.container.id, error=str(exc))
 
+    @property
+    def image_id(self) -> str | None:
+        """The ID (content digest) of the image this container actually runs,
+        resolved by Docker - stored for reproducibility. A tag can later point
+        elsewhere; this ID can't."""
+        self.container.reload()
+        return self.container.attrs.get("Image")
+
     def oom_killed(self) -> bool:
         self.container.reload()
         return bool(self.container.attrs.get("State", {}).get("OOMKilled", False))

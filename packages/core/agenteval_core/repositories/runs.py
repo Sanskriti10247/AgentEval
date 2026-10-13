@@ -126,13 +126,14 @@ class RunRepository:
         tokens_out: int | None = None,
         cost_usd: Decimal | None = None,
         final_answer: str | None = None,
+        sandbox_image_id: str | None = None,
     ) -> bool:
         """Finish attempt N and move the run RUNNING -> status_for(outcome).
 
         Fenced on (worker_id, attempt_no): a worker that no longer owns the
         run can't overwrite it. Returns False (caller rolls back) if fenced.
-        The agent aggregates default to None (NULL), which is what command
-        tasks write.
+        The agent aggregates and sandbox_image_id default to None (NULL),
+        which is what command tasks write.
         """
         final = status_for(outcome)
         check_transition(RunStatus.RUNNING, final)
@@ -157,6 +158,7 @@ class RunRepository:
                 tokens_out=tokens_out,
                 cost_usd=cost_usd,
                 final_answer=final_answer,
+                sandbox_image_id=sandbox_image_id,
             )
             .returning(RunAttempt.id)
             .execution_options(synchronize_session=False)
