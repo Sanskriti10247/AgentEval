@@ -67,7 +67,7 @@ run_finished
 | `SANDBOX_ERROR` | the sandbox could not be opened, or was lost mid-run (including reaper failure) | FAILED |
 | `INTERNAL_ERROR` | cancellation (reason recorded, e.g. `cancelled: worker_shutdown`), an invalid or unsupported config at run time, a bug | FAILED |
 
-Whether the agent actually *solved* the task is Phase 4's evaluator, not the outcome.
+Whether the agent actually *solved* the task is Phase 4's evaluator, not the outcome (see ADR-006).
 
 ### Model providers
 
