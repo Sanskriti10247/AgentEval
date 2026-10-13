@@ -270,12 +270,6 @@ class EvaluationSession(SandboxSession):
             raise
         return session
 
-    @property
-    def image_id(self) -> str | None:
-        """The image digest actually running (stored for reproducibility)."""
-        self.container.reload()
-        return self.container.attrs.get("Image")
-
     # -- workspace state --------------------------------------------------------------
 
     def restore_workspace(self) -> None:
