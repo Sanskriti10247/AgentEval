@@ -1,7 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from agenteval_core.schemas.task import MAX_FILES_BYTES, TaskCreate
+from agenteval_core.schemas.task import MAX_FILES_BYTES
+from agenteval_core.schemas.task_api import TaskCreate
 
 BASE = {"name": "t", "image": "agenteval-sandbox:py312", "command": ["python", "main.py"]}
 

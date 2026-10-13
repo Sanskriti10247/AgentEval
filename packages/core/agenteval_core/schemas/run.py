@@ -20,6 +20,9 @@ class RunRead(BaseModel):
     id: uuid.UUID
     task_id: uuid.UUID
     agent_version_id: uuid.UUID | None
+    # Phase 4: set for runs created by an evaluation batch.
+    evaluation_id: uuid.UUID | None
+    repetition: int | None
     status: RunStatus
     outcome: Outcome | None
     idempotency_key: str | None
@@ -55,5 +58,7 @@ class RunAttemptRead(BaseModel):
     tokens_out: int | None
     cost_usd: Decimal | None
     final_answer: str | None
+    # The image ID the agent's sandbox actually ran (agent attempts).
+    sandbox_image_id: str | None
     started_at: datetime
     finished_at: datetime | None
