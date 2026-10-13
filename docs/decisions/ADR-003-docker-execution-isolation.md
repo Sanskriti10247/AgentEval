@@ -2,6 +2,8 @@
 
 **Status:** Accepted (vertical slice)
 
+Related: ADR-006 adds the hardened evaluation container (noexec mounts, read-only `/eval`).
+
 ## Context
 Tasks (and, in Phase 3, agents) run commands that must be treated as untrusted. They must never run inside the API process or directly on the host.
 
