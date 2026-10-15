@@ -21,6 +21,7 @@ testpaths = ["packages/core/tests", "apps/api/tests", "apps/worker/tests", "test
 markers = [
     "docker: needs a Docker daemon",
     "e2e: needs the compose stack running",
+    "live: calls a real model API (opt-in, costs money; never in the standard suite)",
 ]
 
 [tool.ruff]
