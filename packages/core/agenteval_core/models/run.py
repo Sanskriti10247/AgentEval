@@ -48,12 +48,29 @@ class Run(UUIDPk, CreatedAt, Base):
         Index("ix_runs_status_created_at", "status", "created_at"),
         Index("ix_runs_task_id", "task_id"),
         Index("ix_runs_agent_version_id", "agent_version_id"),
+        Index("ix_runs_evaluation_id", "evaluation_id"),
+        # A batch run carries its repetition number; ad-hoc runs carry neither.
+        CheckConstraint(
+            "(evaluation_id IS NULL) = (repetition IS NULL)", name="evaluation_repetition"
+        ),
+        CheckConstraint("repetition >= 1", name="repetition"),
+        # Exactly one run per (evaluation, task, repetition) cell, whatever the
+        # idempotency keys say: concurrent batch creation can't double-book.
+        UniqueConstraint(
+            "evaluation_id",
+            "task_id",
+            "repetition",
+            name="uq_runs_evaluation_id_task_id_repetition",
+        ),
     )
 
     task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"), nullable=False)
     # Set for agent tasks, NULL for command tasks. The pairing rule spans two
     # tables, so the service enforces it (a CHECK can't see tasks.task_type).
     agent_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agent_versions.id"))
+    # Phase 4: set for runs created by an evaluation batch.
+    evaluation_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("evaluations.id"))
+    repetition: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     outcome: Mapped[str | None] = mapped_column(String(32))
     idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True)
@@ -101,5 +118,7 @@ class RunAttempt(UUIDPk, Base):
     tokens_out: Mapped[int | None] = mapped_column(BigInteger)
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
     final_answer: Mapped[str | None] = mapped_column(Text)
+    # Phase 4: the image ID (digest) the sandbox actually ran, for reproducibility.
+    sandbox_image_id: Mapped[str | None] = mapped_column(String(128))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

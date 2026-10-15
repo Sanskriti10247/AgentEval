@@ -6,14 +6,14 @@ but not CHECK-constraint text, and 0002 is mostly CHECK changes.
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -29,30 +29,12 @@ def alembic_cfg(url: str) -> Config:
     return cfg
 
 
+HEAD = ScriptDirectory.from_config(alembic_cfg("unused")).get_current_head()
+
+
 async def migrate(url: str, fn: str, rev: str) -> None:
     # env.py calls asyncio.run(); run it off the test's event loop.
     await asyncio.to_thread(getattr(command, fn), alembic_cfg(url), rev)
-
-
-@pytest.fixture
-async def make_db(pg_url: str) -> AsyncIterator[Callable[[], Awaitable[str]]]:
-    """Factory: each call creates an empty database and returns its URL.
-    All of them are dropped when the test ends."""
-    admin = create_async_engine(pg_url, isolation_level="AUTOCOMMIT")
-    created: list[str] = []
-
-    async def create() -> str:
-        name = f"mig_{uuid.uuid4().hex[:12]}"
-        async with admin.connect() as conn:
-            await conn.execute(text(f'CREATE DATABASE "{name}"'))
-        created.append(name)
-        return make_url(pg_url).set(database=name).render_as_string(hide_password=False)
-
-    yield create
-    async with admin.connect() as conn:
-        for name in created:
-            await conn.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
-    await admin.dispose()
 
 
 @pytest.fixture
@@ -177,8 +159,9 @@ async def test_downgrade_refuses_while_agent_data_exists(fresh_db: str) -> None:
             )
         with pytest.raises((IntegrityError, DBAPIError)):
             await migrate(fresh_db, "downgrade", "0001")
-        # Transactional DDL: the failed downgrade left 0002 fully in place.
-        assert await _version(engine) == "0002"
+        # Transactional DDL: the whole multi-step downgrade rolled back, so the
+        # schema is still at head.
+        assert await _version(engine) == HEAD
         async with engine.connect() as conn:
             kept = await conn.execute(text("SELECT count(*) FROM trajectory_events"))
             assert kept.scalar_one() == 0  # table still exists
@@ -188,6 +171,6 @@ async def test_downgrade_refuses_while_agent_data_exists(fresh_db: str) -> None:
         await migrate(fresh_db, "downgrade", "0001")
         assert await _version(engine) == "0001"
         await migrate(fresh_db, "upgrade", "head")
-        assert await _version(engine) == "0002"
+        assert await _version(engine) == HEAD
     finally:
         await engine.dispose()

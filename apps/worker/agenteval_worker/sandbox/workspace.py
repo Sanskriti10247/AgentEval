@@ -13,7 +13,9 @@ from typing import TypeVar
 
 import docker.errors
 
+from agenteval_core.evaluation.results import ExecPlan, FileEvidence
 from agenteval_core.tools.workspace import ExecOutput, WorkspaceUnavailable
+from agenteval_worker.sandbox.evaluation import EvaluationSession
 from agenteval_worker.sandbox.session import ExecResult, SandboxError, SandboxSession
 
 T = TypeVar("T")
@@ -47,6 +49,24 @@ class DockerWorkspace:
             raise WorkspaceUnavailable(str(exc)) from exc
         except docker.errors.DockerException as exc:
             raise WorkspaceUnavailable(f"docker error: {exc}") from exc
+
+
+class EvaluationWorkspace:
+    """Async adapter for an EvaluationSession, with DockerWorkspace's error
+    contract (sandbox failures become WorkspaceUnavailable). The Step 5
+    runner drives Step 3 ExecPlans and evidence collection through it."""
+
+    def __init__(self, session: EvaluationSession) -> None:
+        self.session = session
+
+    async def run_plan(self, plan: ExecPlan) -> ExecOutput:
+        return _to_output(await DockerWorkspace._call(self.session.run_plan, plan))
+
+    async def collect_evidence(self, paths: list[str]) -> dict[str, FileEvidence]:
+        return await DockerWorkspace._call(self.session.collect_evidence, paths)
+
+    async def abort(self) -> None:
+        await asyncio.to_thread(self.session.kill)
 
 
 def _to_output(r: ExecResult) -> ExecOutput:

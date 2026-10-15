@@ -1,5 +1,7 @@
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
+from enum import StrEnum
 
 import uuid_utils.compat
 from sqlalchemy import DateTime, MetaData, func
@@ -19,6 +21,11 @@ NAMING_CONVENTION = {
 # (none_as_null=False) stores the JSON value `null`, which is NOT NULL to
 # Postgres and silently defeats `IS NULL` checks such as ck_tasks_command.
 NullableJSONB = JSONB(none_as_null=True)
+
+
+def sql_values(values: Iterable[StrEnum]) -> str:
+    """Enum values as a sorted SQL IN-list body, so CHECKs can't drift from code."""
+    return ",".join(f"'{v.value}'" for v in sorted(values, key=lambda v: v.value))
 
 
 def new_id() -> uuid.UUID:

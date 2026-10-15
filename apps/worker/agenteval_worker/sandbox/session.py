@@ -118,6 +118,28 @@ class BoundedBuffer:
         # char at the limit) becomes U+FFFD.
         return self._buf.decode("utf-8", errors="replace").replace("\x00", "�")
 
+    def data(self) -> bytes:
+        """The raw bytes kept (for binary streams such as a snapshot)."""
+        return bytes(self._buf)
+
+
+class _FrameDemuxer:
+    """Incremental version of demux_stream for a live attach socket."""
+
+    def __init__(self, stdout: BoundedBuffer, stderr: BoundedBuffer) -> None:
+        self._pending = bytearray()
+        self._out, self._err = stdout, stderr
+
+    def feed(self, chunk: bytes) -> None:
+        self._pending += chunk
+        while len(self._pending) >= 8:
+            size = struct.unpack(">I", self._pending[4:8])[0]
+            if len(self._pending) < 8 + size:
+                return
+            payload = bytes(self._pending[8 : 8 + size])
+            (self._err if self._pending[0] == 2 else self._out).append(payload)
+            del self._pending[: 8 + size]
+
 
 def build_tar(files: dict[str, str], *, mtime: float = 0) -> bytes:
     """mtime=0 (1970) is the S1 behaviour for task files, kept unchanged.
@@ -231,7 +253,10 @@ class SandboxSession:
         try:
             session.start()
             if files:
-                session.write_files(files)
+                # C8: agent-task files get the real time, so mtime-based tools
+                # (make, test caches) see later edits as edits. S1 command
+                # tasks (DockerSandbox.run) keep their original mtime 0.
+                session.write_files(files, mtime=time.time())
             session._record_keepalive()
         except BaseException:
             session.close()
@@ -257,6 +282,14 @@ class SandboxSession:
         except docker.errors.DockerException as exc:
             log.warning("sandbox_remove_failed", container_id=self.container.id, error=str(exc))
 
+    @property
+    def image_id(self) -> str | None:
+        """The ID (content digest) of the image this container actually runs,
+        resolved by Docker - stored for reproducibility. A tag can later point
+        elsewhere; this ID can't."""
+        self.container.reload()
+        return self.container.attrs.get("Image")
+
     def oom_killed(self) -> bool:
         self.container.reload()
         return bool(self.container.attrs.get("State", {}).get("OOMKilled", False))
@@ -268,14 +301,23 @@ class SandboxSession:
         (put_archive is rejected on a read-only rootfs). A non-zero tar exit is
         returned, not raised: for a tool it's the agent's problem (e.g. the
         path is a directory). Transport failures raise SandboxError."""
+        return self._tar_in(build_tar(files, mtime=mtime), WORKSPACE, SANDBOX_USER)
+
+    def _tar_in(
+        self, archive: bytes, dest: str, user: str, *, compressed: bool = False
+    ) -> ExecResult:
+        """Stream an archive into `tar -x` at dest, run as user. GNU tar's own
+        protections apply (leading '/' and '..' stripped, no write-through
+        symlinks); see the Phase 4 spike. Transport failures raise SandboxError."""
         started = time.monotonic()
         api = self._client.api
+        flags = "-xz" if compressed else "-x"
         try:
             exec_id = api.exec_create(
                 self.container.id,
-                ["tar", "-x", "--no-same-owner", "-C", WORKSPACE, "-f", "-"],
+                ["tar", flags, "--no-same-owner", "-C", dest, "-f", "-"],
                 stdin=True,
-                user=SANDBOX_USER,
+                user=user,
             )["Id"]
             conn: Any = api.exec_start(exec_id, socket=True)
         except docker.errors.DockerException as exc:
@@ -284,7 +326,7 @@ class SandboxSession:
         output = bytearray()
         try:
             raw.settimeout(FILE_COPY_TIMEOUT_S)
-            raw.sendall(build_tar(files, mtime=mtime))
+            raw.sendall(archive)
             raw.shutdown(socket.SHUT_WR)
             while chunk := raw.recv(65536):
                 if len(output) < 65536:
@@ -304,10 +346,10 @@ class SandboxSession:
             duration_ms=_elapsed_ms(started),
         )
 
-    def write_files(self, files: dict[str, str]) -> None:
+    def write_files(self, files: dict[str, str], *, mtime: float = 0) -> None:
         """As write_files_result, but any failure is a SandboxError (task files
         are platform input: if they can't be written the task wasn't tested)."""
-        result = self.write_files_result(files)
+        result = self.write_files_result(files, mtime=mtime)
         if result.exit_code != 0:
             raise SandboxError(
                 f"extracting task files failed (exit {result.exit_code}): {result.stderr[-500:]!r}"
@@ -325,12 +367,27 @@ class SandboxSession:
         The in-container `timeout` enforces timeout_s; the host backstop only
         exists in case that somehow fails, and turns it into a SandboxError.
         """
+        return self._exec_wrapped(argv, timeout_s, environment=TOOL_EXEC_ENV)
+
+    def _exec_wrapped(
+        self,
+        argv: list[str],
+        timeout_s: float,
+        *,
+        environment: dict[str, str],
+        stdin: bytes | None = None,
+    ) -> ExecResult:
+        """The timeout-wrapped exec shared by tool calls and evaluation plans."""
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
         wrapped = ["timeout", f"--kill-after={TOOL_KILL_AFTER_S}", _seconds(timeout_s), *argv]
         backstop = timeout_s + TOOL_KILL_AFTER_S + TOOL_BACKSTOP_MARGIN_S
-        result = self._exec(
-            wrapped, deadline_s=backstop, on_deadline=self.kill, environment=TOOL_EXEC_ENV
+        result, _ = self._run(
+            wrapped,
+            deadline_s=backstop,
+            on_deadline=self.kill,
+            environment=environment,
+            stdin=stdin,
         )
         if result.timed_out:  # the backstop fired: the container is gone
             raise SandboxError(f"tool exec overran its {backstop:.0f}s backstop; container killed")
@@ -398,10 +455,27 @@ class SandboxSession:
     ) -> ExecResult:
         """Exec and stream output into bounded buffers. If the stream is still
         open at deadline_s, on_deadline() runs (it must end the stream)."""
+        return self._run(
+            argv, deadline_s=deadline_s, on_deadline=on_deadline, environment=environment
+        )[0]
+
+    def _run(
+        self,
+        argv: list[str],
+        *,
+        deadline_s: float,
+        on_deadline: Any,
+        environment: dict[str, str] | None = None,
+        user: str = SANDBOX_USER,
+        stdin: bytes | None = None,
+        stdout_limit: int | None = None,
+    ) -> tuple[ExecResult, BoundedBuffer]:
+        """_exec plus: run as another user, feed stdin, and return the raw
+        stdout buffer (stdout_limit overrides the text cap, for binary output)."""
         started = time.monotonic()
         api = self._client.api
         exec_id = api.exec_create(
-            self.container.id, argv, user=SANDBOX_USER, environment=environment
+            self.container.id, argv, user=user, environment=environment, stdin=stdin is not None
         )["Id"]
 
         # Whoever takes the lock first decides: the watchdog or the normal end
@@ -419,18 +493,22 @@ class SandboxSession:
 
         timer = threading.Timer(deadline_s, watchdog)
         timer.daemon = True
-        stdout, stderr = BoundedBuffer(self._max_output), BoundedBuffer(self._max_output)
+        stdout = BoundedBuffer(stdout_limit if stdout_limit is not None else self._max_output)
+        stderr = BoundedBuffer(self._max_output)
         timer.start()
         try:
-            for out_chunk, err_chunk in api.exec_start(exec_id, stream=True, demux=True):
-                stdout.append(out_chunk)
-                stderr.append(err_chunk)
+            if stdin is None:
+                for out_chunk, err_chunk in api.exec_start(exec_id, stream=True, demux=True):
+                    stdout.append(out_chunk)
+                    stderr.append(err_chunk)
+            else:
+                self._stream_with_stdin(exec_id, stdin, stdout, stderr)
         finally:
             with lock:
                 state["finished"] = True
             timer.cancel()
 
-        return ExecResult(
+        result = ExecResult(
             exit_code=self._wait_exec_exit(exec_id),
             stdout=stdout.text(),
             stderr=stderr.text(),
@@ -439,6 +517,35 @@ class SandboxSession:
             timed_out=state["timed_out"],
             duration_ms=_elapsed_ms(started),
         )
+        return result, stdout
+
+    def _stream_with_stdin(
+        self, exec_id: str, data: bytes, stdout: BoundedBuffer, stderr: BoundedBuffer
+    ) -> None:
+        """Attach a socket, send stdin from a thread (a process that writes
+        before reading can't deadlock us), and demux output as it arrives. The
+        caller's watchdog ends the stream by killing the container."""
+        conn: Any = self._client.api.exec_start(exec_id, socket=True)
+        raw: socket.socket = conn._sock
+
+        def send() -> None:
+            try:
+                raw.sendall(data)
+                raw.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass  # the process exited or was killed before reading it all
+
+        sender = threading.Thread(target=send, daemon=True)
+        sender.start()
+        demux = _FrameDemuxer(stdout, stderr)
+        try:
+            while chunk := raw.recv(65536):
+                demux.feed(chunk)
+        except OSError:
+            pass  # stream ended by the watchdog's kill
+        finally:
+            sender.join(timeout=1)
+            conn.close()
 
     def _wait_exec_exit(self, exec_id: str) -> int | None:
         # The stream can close a moment before Docker records the exit code.

@@ -5,7 +5,7 @@ from fastapi import APIRouter, FastAPI
 from redis.asyncio import Redis
 
 from agenteval_api.errors import install_error_handlers
-from agenteval_api.routes import agents, health, runs, tasks
+from agenteval_api.routes import agents, datasets, evaluations, health, runs, tasks
 from agenteval_core.config import Settings, get_settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.logging import configure_logging, get_logger
@@ -41,6 +41,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(agents.router)
     v1.include_router(tasks.router)
     v1.include_router(runs.router)
+    v1.include_router(datasets.router)
+    v1.include_router(evaluations.router)
     app.include_router(v1)
     return app
 

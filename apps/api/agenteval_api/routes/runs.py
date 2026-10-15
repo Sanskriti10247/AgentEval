@@ -3,8 +3,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, Query, Response, status
 
-from agenteval_api.deps import RunServiceDep
+from agenteval_api.deps import EvaluationServiceDep, RunServiceDep
 from agenteval_core.schemas.agent import TrajectoryEventRead, TrajectoryPage
+from agenteval_core.schemas.evaluation import AttemptEvaluationRead
 from agenteval_core.schemas.run import RunAttemptRead, RunCreate, RunRead
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -57,3 +58,12 @@ async def list_events(
     return TrajectoryPage(
         events=[TrajectoryEventRead.model_validate(e) for e in events], next_after_seq=next_after
     )
+
+
+@router.get("/{run_id}/attempts/{attempt_no}/evaluation", response_model=AttemptEvaluationRead)
+async def get_attempt_evaluation(
+    run_id: uuid.UUID, attempt_no: int, evaluations: EvaluationServiceDep
+) -> AttemptEvaluationRead:
+    """The attempt's evaluation as its public projection only (D11). 404 if
+    none is recorded (command tasks, or not yet evaluated)."""
+    return await evaluations.attempt_evaluation(run_id, attempt_no)

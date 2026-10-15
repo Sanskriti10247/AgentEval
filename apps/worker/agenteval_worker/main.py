@@ -18,6 +18,7 @@ from agenteval_core.logging import configure_logging, get_logger
 from agenteval_core.queue.streams import RunQueue, redis_for_blocking_reads
 from agenteval_worker.agent_runner import AgentRunner
 from agenteval_worker.consumer import Consumer
+from agenteval_worker.evaluation_runner import EvaluationRunner
 from agenteval_worker.executor import Executor
 from agenteval_worker.providers import build_providers
 from agenteval_worker.sandbox.docker_sandbox import DockerSandbox
@@ -51,7 +52,16 @@ async def main() -> None:
         workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
         pids_limit=settings.pids_limit,
     )
-    executor = Executor(sessionmaker, queue, sandbox.run, worker_id, agent_runner)
+    evaluation_runner = EvaluationRunner(
+        sessionmaker=sessionmaker,
+        docker_client=docker_client,
+        max_output_bytes=settings.max_output_bytes,
+        workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
+        pids_limit=settings.pids_limit,
+    )
+    executor = Executor(
+        sessionmaker, queue, sandbox.run, worker_id, agent_runner, evaluation_runner
+    )
     consumer = Consumer(
         queue,
         executor,

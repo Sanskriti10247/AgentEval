@@ -4,7 +4,8 @@ The schema is created by running the real Alembic migrations (not create_all),
 so the migration itself is under test.
 """
 
-from collections.abc import AsyncIterator, Iterator
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 
 import httpx
@@ -13,7 +14,13 @@ from alembic import command
 from alembic.config import Config
 from redis.asyncio import Redis
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
 
@@ -77,7 +84,10 @@ async def redis(settings: Settings) -> AsyncIterator[Redis]:
 async def clean_state(engine: AsyncEngine, settings: Settings) -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.execute(
-            text("TRUNCATE trajectory_events, run_attempts, runs, tasks, agent_versions, agents")
+            text(
+                "TRUNCATE scores, attempt_evaluations, attempt_artifacts, trajectory_events, "
+                "run_attempts, runs, evaluations, tasks, datasets, agent_versions, agents"
+            )
         )
     r = Redis.from_url(settings.redis_url)
     await r.flushall()
@@ -117,3 +127,24 @@ async def create_task(client: httpx.AsyncClient, **overrides: object) -> str:
     resp = await client.post("/api/v1/tasks", json=task_body(**overrides))
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
+
+
+@pytest.fixture
+async def make_db(pg_url: str) -> AsyncIterator[Callable[[], Awaitable[str]]]:
+    """Factory: each call creates an empty database and returns its URL.
+    All of them are dropped when the test ends."""
+    admin = create_async_engine(pg_url, isolation_level="AUTOCOMMIT")
+    created: list[str] = []
+
+    async def create() -> str:
+        name = f"mig_{uuid.uuid4().hex[:12]}"
+        async with admin.connect() as conn:
+            await conn.execute(text(f'CREATE DATABASE "{name}"'))
+        created.append(name)
+        return make_url(pg_url).set(database=name).render_as_string(hide_password=False)
+
+    yield create
+    async with admin.connect() as conn:
+        for name in created:
+            await conn.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
+    await admin.dispose()
