@@ -2,6 +2,8 @@
 
 **Status:** Accepted (Phase 4, implemented)
 
+> **Proposed change:** [ADR-008](ADR-008-artifact-storage-and-trajectory-fence.md) would move snapshot bytes (D3) out of Postgres onto an artifact volume, keeping the metadata row. Until it is accepted, D3 stands.
+
 Related: ADR-003 (sandbox isolation), ADR-005 (agent runtime), ADR-007 (evaluation secrecy). The full reference is [docs/architecture/evaluation.md](../architecture/evaluation.md); the API is in [docs/api/evaluations.md](../api/evaluations.md).
 
 ## Context
