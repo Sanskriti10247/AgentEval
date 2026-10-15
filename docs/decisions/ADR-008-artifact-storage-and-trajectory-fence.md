@@ -88,6 +88,47 @@ On a shared single host, the API, heartbeat process, worker and Postgres need CP
 - A stale owner cannot save, append, heartbeat or finish. Its attempt row no longer matches (`status`, `lease_epoch`), and a statement that was waiting re-checks the latest row version once the lock is released.
 - Artifacts on `ABANDONED` attempts may remain; they are never graded.
 
+## Timeouts and grace period (proposed values)
+
+| Setting | Proposed | Bounds |
+|---|---|---|
+| Artifact statement timeout (`AGENTEVAL_ARTIFACT_INSERT_TIMEOUT_S`) | **10 s** | the metadata `INSERT`, including any wait for the attempt-row lock |
+| `SAVE_DEADLINE` | **15 s** | from the file rename to the start of the metadata statement; checked by the writer |
+| Sweeper grace period | **120 s** | the minimum age, by file mtime, before an unreferenced file or `.tmp` may be deleted |
+
+**How the values follow from the measurements.** Three runs under the validation load, 1,162 saves in total:
+
+- **Statement timeout, 10 s.**
+  - The metadata statement took p50 47–94 ms, p99 0.4–1.0 s, and **max 2.0 s**.
+  - Its only waits are short lock waits: finish/cancel holds the attempt row for at most about 0.1 s inside Postgres (decision C), and trajectory appends are short.
+  - 10 s gives five times the worst observed value. Cancellation overshot the timeout by at most 35 ms.
+  - 10 s also sits well inside the 30 s lease, so a stuck statement fails and frees its lock long before recovery would act.
+- **`SAVE_DEADLINE`, 15 s.**
+  - Nothing runs between the rename and the statement except the worker's own scheduling.
+  - The worst worker event-loop stall measured in any run was **5.3 s**; 15 s is about three times that.
+  - A save that misses the deadline inserts no row, removes its file and fails as retryable. Missing the deadline costs a retry, never correctness.
+- **Sweeper grace, 120 s.**
+  - Safety needs grace > `SAVE_DEADLINE` + statement timeout + the timeout overshoot, i.e. about 25 s. At that age, no save can still insert a row pointing at the file.
+  - 120 s is about five times that bound. It also covers a `.tmp` whose writer is alive but slow: every write refreshes the mtime, and the slowest write measured was 8.1 s for a whole 16 MiB file.
+  - Sweeps keep running on the existing 300 s orphan-sweep interval.
+- Whole saves (file plus row) took p50 0.5–1.2 s, with a max of **21 s** in the soak with 8 concurrent owners. The file write is not timed out separately: it holds no database lock, and the task's wall-clock timeout bounds a hung disk.
+- These exact values have not been run under load yet. The deadline and grace mechanism itself was tested deterministically with small values. The implementation's tests will re-check the values.
+
+**How the failure cases are handled:**
+
+- **Timeout:** Postgres cancels the statement and rolls back, so no row exists. The writer removes its file. The save fails with a retryable platform error, and the attempt is retried within its pinned budget.
+- **Partial file writes:** bytes only ever go to `<key>.tmp`. The final name appears only after `fsync` and rename, so a reader can never see a partial file. A crash leaves at most a `.tmp`, which the sweeper removes after the grace period. If the sweeper removes a `.tmp` whose writer was stalled for more than 120 s, the writer's rename fails and the save fails as retryable. Every read checks size and SHA-256.
+- **Orphan cleanup:** unreferenced files come from three places: a crash between the rename and the row, a fenced save whose own delete failed, and a crash between the CANCEL commit and the unlink. All are swept after the grace period. Rows on `ABANDONED` attempts keep their files; they are never graded, and garbage collection stays out of scope.
+- **Cancellation:**
+  - Once the flag is visible, the save statement inserts nothing.
+  - A save already holding the attempt row makes CANCEL wait for it, then CANCEL deletes the row.
+  - The CANCEL call deletes the rows and changes the state in one round trip; the files are unlinked afterwards.
+  - A `CANCELLED` attempt never has a row.
+- **Stale workers:**
+  - Every write is guarded by the attempt's `status` and `lease_epoch`. After recovery, a stale save inserts 0 rows and removes its own file, and a stale heartbeat or finish changes nothing.
+  - A statement that was waiting re-checks the latest row version once the lock is released.
+  - None of this depends on timeouts.
+
 ## Failure semantics
 
 | Crash or failure point | Result | Cleanup |
@@ -96,11 +137,12 @@ On a shared single host, the API, heartbeat process, worker and Postgres need CP
 | After the rename, before the metadata row | file with no row | sweeper removes unreferenced files older than the grace period |
 | Metadata statement fenced (cancelled, recovered, stale epoch) | 0 rows; the writer removes its file | sweeper, if the removal itself fails |
 | After the metadata row commits | row and file; the attempt is later `ABANDONED` by recovery | kept (never graded); garbage collection is out of scope |
-| During CANCEL-mode delete (before commit) | rollback: row and file intact; recovery later finishes the cancellation | none |
+| Metadata statement times out or misses `SAVE_DEADLINE` | no row; the writer removes its file; retryable failure | sweeper, if the removal itself fails |
+| Worker killed during the CANCEL call | the server finishes the call atomically (decision C): `CANCELLED`, no row | sweeper removes the files |
 | After CANCEL commits, before the unlink | `CANCELLED`, no row; file left behind | sweeper |
 | Row present, file missing or wrong hash | evaluation becomes a platform error (`artifact_missing`) | none; the row is the evidence |
 
-**The sweeper** runs in the reconciler. It deletes only files that no row references and that are older than a grace period. The grace period is longer than the longest possible save. It never deletes a file a row points to.
+**The sweeper** runs in the reconciler. It deletes only files that no row references and that are older than the grace period. It lists files before reading the keys, and it never deletes a file a row points to.
 
 ## Consequences
 
@@ -157,4 +199,4 @@ The checks:
 5. A 10-minute randomized soak with zero deadlocks, no cancellation-invariant violation, and no row whose file is missing.
 6. SIGKILL before, during and after the file write, the metadata statement and the CANCEL delete. Locks must release, recovery must proceed, and only the outcomes in the failure table may appear.
 
-Saves under this load took p50 1.0 s and max 4.8 s (file write p50 0.9 s, metadata statement p50 59 ms). The artifact statement timeout is chosen from these measurements. Lease values (TTL 30 s, heartbeat 10 s, self-fence margin 10 s) do not change.
+Saves under this load took p50 1.0 s and max 4.8 s (file write p50 0.9 s, metadata statement p50 59 ms). The proposed timeout, deadline and grace values above follow from these measurements. Lease values (TTL 30 s, heartbeat 10 s, self-fence margin 10 s) do not change.
