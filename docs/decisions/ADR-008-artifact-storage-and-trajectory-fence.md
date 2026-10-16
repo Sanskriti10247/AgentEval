@@ -72,7 +72,53 @@ Each T-terminal mode is a single plpgsql function call, and it commits in the sa
 
 ### D. Heartbeats run in their own process
 
-Each worker renews its leases from a separate process with its own database connection. Sandbox streaming and file I/O in the worker process cannot delay lease renewal.
+Each worker renews its leases from a separate process, the **lease keeper**, which has its own database connection. Sandbox streaming and file I/O in the worker process cannot delay lease renewal. The worker still decides when it must stop; the keeper only renews and reports.
+
+**Process.**
+- The worker starts one keeper per worker process at startup (`spawn` start method, so no event-loop state is inherited).
+- The keeper has its own asyncpg connection, `application_name = agenteval-keeper-<worker_id>`.
+- The two talk over one duplex pipe.
+
+**Messages, worker → keeper.**
+- `hold(kind, id, epoch)`: start renewing a lease. `kind` is `run` or `evaluation`; `epoch` is the token the claim returned.
+- `release(kind, id, epoch)`: stop renewing it. Sent after the final transition, or after a fence or a self-stop.
+- `ping(t)`: sent every second from the worker's event loop, to prove the worker is alive and making progress.
+- `stop`: shutdown.
+
+**Messages, keeper → worker.**
+- `beat(kind, id, epoch, t_sent, result)`. `t_sent` is the keeper's `time.monotonic()` taken just before the renewal was sent (CLOCK_MONOTONIC is system-wide, so both processes share it). `result` is one of:
+  - `ok(cancel_requested)`;
+  - `fenced`: the guarded update matched 0 rows;
+  - `error(kind)`: database or connection failure.
+- `alive(t)`, every second.
+
+**Renewal.** Every `heartbeat_s` (10 s), the keeper renews everything it holds in one round trip per table. For example:
+`UPDATE runs SET lease_expires_at = now() + ttl, heartbeat_at = now() WHERE (id, lease_epoch) IN (…) AND status IN ('CLAIMED','RUNNING') RETURNING id, cancel_requested_at`
+plus the same for `attempt_evaluations`. A held lease missing from `RETURNING` is reported as `fenced`. After an `error`, the keeper retries after 1 s and keeps reconnecting with backoff.
+
+**Self-stop deadline (worker side).**
+- For each lease, `fence_at = t_sent + ttl − margin`, using the `t_sent` of the last `ok` beat. At claim time it is seeded from the claim's own send time.
+- Only an `ok` beat moves `fence_at` forward. Errors, a silent keeper or a dead keeper never extend it.
+- At `fence_at`, the worker cancels with reason `lease_lost`, kills the sandbox and makes no further writes. The runtime guard checks `fence_at` before every model and tool call.
+- `fenced` means `lease_lost` immediately.
+- `ok(cancel_requested = true)` cancels with the stored `cancel_reason`.
+
+**Worker liveness gate (keeper side).**
+- The keeper renews only while the worker's last `ping` is younger than `worker_liveness_timeout_s` (**15 s**: about three times the worst event-loop stall measured, 5.3 s, and below `ttl − margin` = 20 s).
+- A worker that is alive but stuck therefore stops being renewed: its leases expire and recovery takes over.
+- Once unstuck, the worker sees no new `ok` beats, reaches `fence_at` and stops itself.
+
+**Process death.**
+- **Keeper dies** (pipe EOF, or no `alive` for 3 s):
+  - the worker keeps working on its existing `fence_at` deadlines;
+  - it starts a new keeper and re-sends `hold` for every current lease with its epoch;
+  - if the restart fails, every lease simply self-stops at its `fence_at`.
+- **Worker dies** (pipe EOF, or `os.getppid()` changes): the keeper exits at once without renewing anything, so the leases expire and recovery runs.
+- **Both die:** the leases expire and recovery runs.
+
+**Shutdown.** The worker releases each lease after its final transition and sends `stop`. The keeper is also a daemon process, so it never outlives the worker.
+
+**Setting.** `AGENTEVAL_WORKER_LIVENESS_TIMEOUT_S` (15). Startup refuses a value that is not below `ttl − margin`.
 
 ### E. Writer deadline protects against the sweeper
 
