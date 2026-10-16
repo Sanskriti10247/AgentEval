@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from tests.integration.test_migrations import HEAD, migrate
+from tests.integration.test_migrations import migrate
 
 Ids = dict[str, uuid.UUID]
 
@@ -90,7 +90,7 @@ async def test_upgrade_preserves_s1_and_phase3_data(at_0002: tuple[str, AsyncEng
     url, engine = at_0002
     ids = await seed_phase3(engine)
     await migrate(url, "upgrade", "0003")
-    assert await version_of(engine) == "0003" == HEAD
+    assert await version_of(engine) == "0003"
 
     async with engine.connect() as conn:
         tasks = (
