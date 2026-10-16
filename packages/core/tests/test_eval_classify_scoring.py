@@ -19,6 +19,7 @@ from agenteval_core.evaluation.scoring import (
 from agenteval_core.evaluation.stats import success_stats, wilson_interval
 from agenteval_core.evaluation.taxonomy import EvaluationStatus as S
 from agenteval_core.evaluation.taxonomy import FailureCategory as C
+from agenteval_core.reliability.taxonomy import FailureReason as FR
 from agenteval_core.states import Outcome as O
 
 CLEAN = IntegrityResult(ok=True)
@@ -68,8 +69,36 @@ ROWS: list[tuple[str, AttemptFacts, dict[str, Any], S, C | None, bool | None]] =
         None,
     ),
     (
-        "cancelled",
+        "cancelled",  # legacy fallback: no reason yet, driven by the error_message string
         facts(O.INTERNAL_ERROR, error_message="cancelled: worker_shutdown"),
+        {},
+        S.SKIPPED,
+        C.PLATFORM_CANCELLED,
+        None,
+    ),
+    (
+        "cancelled by reason",  # Step 3: driven by failure_reason, not the message
+        facts(O.INTERNAL_ERROR, error_message="irrelevant", failure_reason=FR.WORKER_SHUTDOWN),
+        {},
+        S.SKIPPED,
+        C.PLATFORM_CANCELLED,
+        None,
+    ),
+    (
+        "sandbox error by reason",  # a non-cancellation reason doesn't change the category
+        facts(O.SANDBOX_ERROR, failure_reason=FR.SANDBOX_CREATE_FAILED),
+        {},
+        S.SKIPPED,
+        C.PLATFORM_SANDBOX,
+        None,
+    ),
+    (
+        "unclassified legacy row still falls back to the message",
+        facts(
+            O.INTERNAL_ERROR,
+            error_message="cancelled: worker_shutdown",
+            failure_reason=FR.UNCLASSIFIED,
+        ),
         {},
         S.SKIPPED,
         C.PLATFORM_CANCELLED,

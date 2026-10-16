@@ -4,6 +4,7 @@ rows and attempt aggregates. No network, no API key."""
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -69,6 +70,7 @@ async def make_agent_run(
     image: str = SANDBOX_IMAGE,
     provider: str = "fake",
     with_version: bool = True,
+    max_attempts: int = 1,
 ) -> uuid.UUID:
     async with sm() as s:
         agent = Agent(name=f"agent-{uuid.uuid4().hex[:8]}")
@@ -105,6 +107,7 @@ async def make_agent_run(
             agent_version_id=version.id if with_version else None,
             status="QUEUED",
             attempt_count=0,
+            max_attempts=max_attempts,
         )
         s.add(run)
         await s.commit()
@@ -209,9 +212,46 @@ async def test_agent_outcomes_are_persisted(
     if status == "FAILED":
         assert "retries_exhausted" in (run.error_message or "")
         assert [e.error_class for e in events if e.error_class] == ["overloaded"] * 4
+        assert (attempt.failure_reason, attempt.retryable) == ("model_overloaded", True)
+        assert run.dead_letter_reason == "retries_exhausted"
     else:
         assert run.error_message is None
+        assert (attempt.failure_reason, attempt.retryable) == (None, None)
     assert leftover_containers(run_id) == []
+
+
+async def test_a_permanent_model_error_is_dead_lettered_non_retryable(
+    sessionmaker: SM, queue: RunQueue
+) -> None:
+    script = [{"type": "error", "kind": "authentication", "status": 401}]
+    run_id = await make_agent_run(sessionmaker, queue, script)
+    await handle_next(executor(sessionmaker, queue), queue)
+    run, [attempt], _ = await load(sessionmaker, run_id)
+    assert (run.status, run.outcome, run.dead_letter_reason) == ("FAILED", "MODEL_ERROR",
+                                                                 "non_retryable")  # fmt: skip
+    assert (attempt.failure_reason, attempt.retryable) == ("model_authentication", False)
+
+
+async def test_a_transient_error_retries_when_the_budget_allows_it(
+    sessionmaker: SM, queue: RunQueue
+) -> None:
+    """max_attempts=3, pinned on the run before dispatch: a transient failure
+    becomes RETRYING (not FAILED), with the run's outcome/error_message left
+    NULL (R8) and next_attempt_at inside the backoff bounds for attempt 1."""
+    script = [{"type": "error", "kind": "overloaded"} for _ in range(4)]
+    run_id = await make_agent_run(sessionmaker, queue, script, max_attempts=3)
+    before = datetime.now(UTC)
+    await handle_next(executor(sessionmaker, queue), queue)
+    run, [attempt], _ = await load(sessionmaker, run_id)
+    assert (run.status, run.outcome, run.error_message) == ("RETRYING", None, None)
+    assert (attempt.status, attempt.failure_reason, attempt.retryable) == (
+        "FINISHED", "model_overloaded", True,
+    )  # fmt: skip
+    assert run.next_attempt_at is not None
+    # backoff_delay(1) = min(2 * 2**0, 60) * U(0.8, 1.2) = 1.6..2.4s from the finish,
+    # which itself happens shortly after `before`; a loose upper bound keeps this
+    # robust to execution time without losing the "roughly one backoff away" check.
+    assert before + timedelta(seconds=1) < run.next_attempt_at < before + timedelta(seconds=10)
 
 
 async def test_missing_image_is_a_sandbox_error(sessionmaker: SM, queue: RunQueue) -> None:
@@ -221,6 +261,8 @@ async def test_missing_image_is_a_sandbox_error(sessionmaker: SM, queue: RunQueu
     run, [attempt], events = await load(sessionmaker, run_id)
     assert (run.status, run.outcome) == ("FAILED", "SANDBOX_ERROR")
     assert "image not found" in (attempt.error_message or "")
+    assert (attempt.failure_reason, attempt.retryable) == ("sandbox_image_not_found", False)
+    assert run.dead_letter_reason == "non_retryable"
     assert events == []  # nothing ran
 
 
@@ -240,6 +282,11 @@ async def test_agent_run_without_a_version_fails_before_an_attempt(
     run, attempts, _ = await load(sessionmaker, run_id)
     assert (run.status, run.outcome, attempts) == ("FAILED", "INTERNAL_ERROR", [])
     assert "no agent version" in (run.error_message or "")
+    # fail_claimed (R6): the run-level reason and dead-letter, no attempt at all.
+    assert (run.failure_reason, run.dead_letter_reason) == (
+        "internal_inconsistent",
+        "non_retryable",
+    )
 
 
 async def test_worker_without_agent_runner_fails_agent_tasks(
@@ -313,7 +360,11 @@ async def test_writer_is_idempotent_on_retries(sessionmaker: SM, queue: RunQueue
 async def test_writer_is_fenced_to_the_owning_worker(sessionmaker: SM, queue: RunQueue) -> None:
     attempt = await running_attempt(sessionmaker, queue)
     async with sessionmaker() as s:
-        await s.execute(update(Run).where(Run.id == attempt.run_id).values(worker_id="w2"))
+        await s.execute(
+            update(Run)
+            .where(Run.id == attempt.run_id)
+            .values(worker_id="w2", lease_epoch=Run.lease_epoch + 1)
+        )
         await s.commit()
     with pytest.raises(TrajectoryFenced):
         await TrajectoryWriter(sessionmaker, attempt).append(batch(0))
@@ -366,7 +417,11 @@ async def test_losing_ownership_mid_run_stops_the_agent(sessionmaker: SM, queue:
         while not await first_tool_call_recorded():  # noqa: ASYNC110 - polling Postgres
             await asyncio.sleep(0.05)
     async with sessionmaker() as s:  # ownership moves (what Phase 5 recovery will do)
-        await s.execute(update(Run).where(Run.id == run_id).values(worker_id="w-other"))
+        await s.execute(
+            update(Run)
+            .where(Run.id == run_id)
+            .values(worker_id="w-other", lease_epoch=Run.lease_epoch + 1)
+        )
         await s.commit()
     await asyncio.wait_for(task, 20)
 

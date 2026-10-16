@@ -43,6 +43,7 @@ from agenteval_core.models import (
 )
 from agenteval_core.providers.fake import FakeProvider, FakeSession
 from agenteval_core.queue.streams import RunQueue
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.repositories.runs import RunRepository
 from agenteval_worker.agent_runner import AgentRunner
 from agenteval_worker.evaluation_runner import EvaluationRunner, WorkspaceCapture
@@ -408,7 +409,7 @@ async def test_evaluation_container_failure_is_an_evaluator_error(
     sessionmaker: SM, queue: RunQueue, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def broken(*a: Any, **kw: Any) -> Any:
-        raise SandboxError("docker error: boom")
+        raise SandboxError("docker error: boom", reason=FailureReason.SANDBOX_CREATE_FAILED)
 
     monkeypatch.setattr(eval_sandbox.EvaluationSession, "open", broken)
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG)
@@ -509,7 +510,11 @@ async def test_a_fenced_attempt_is_never_evaluated(sessionmaker: SM, queue: RunQ
         while not (await durable_state(sessionmaker, run_id))["events"]:  # noqa: ASYNC110
             await asyncio.sleep(0.05)
     async with sessionmaker() as s:  # ownership moves: finish_attempt will be fenced
-        await s.execute(update(Run).where(Run.id == run_id).values(worker_id="w-other"))
+        await s.execute(
+            update(Run)
+            .where(Run.id == run_id)
+            .values(worker_id="w-other", lease_epoch=Run.lease_epoch + 1)
+        )
         await s.commit()
     await asyncio.wait_for(task, 30)
 

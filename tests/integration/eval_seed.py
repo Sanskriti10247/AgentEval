@@ -162,8 +162,13 @@ async def finish(
     evaluation: dict[str, Any] | None,
     score: tuple[dict[str, Any], str] | None = None,
     scoring_hash: str = DEFAULT_SCORING_CONFIG.config_hash(),
+    failure_reason: str | None = None,
 ) -> None:
-    """Write what the executor and the EvaluationRunner would have written."""
+    """Write what the executor and the EvaluationRunner would have written.
+
+    `failure_reason` is Step 3's attempt reason: required (by
+    ck_run_attempts_reason) exactly when duration_ms is not None (an attempt
+    is created) and the outcome is a failed one."""
     async with sm() as s:
         error = f"{outcome.lower()}: {MARKER}" if status == "FAILED" else None
         await s.execute(
@@ -194,6 +199,8 @@ async def finish(
                 error_message=error,
                 started_at=NOW,
                 finished_at=NOW,
+                failure_reason=failure_reason,
+                retryable=None if failure_reason is None else False,
             )
             s.add(attempt)
             await s.flush()
@@ -292,6 +299,7 @@ async def seed(client: httpx.AsyncClient, sm: SM) -> Seeded:
         outcome="SANDBOX_ERROR",
         status="FAILED",
         duration_ms=400,
+        failure_reason="sandbox_lost",
         evaluation={
             "status": "SKIPPED",
             "failure_category": "platform_sandbox",

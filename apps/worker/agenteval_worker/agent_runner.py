@@ -38,6 +38,7 @@ from agenteval_core.evaluation.taxonomy import MAX_SNAPSHOT_BYTES
 from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, RunAttempt, Task
 from agenteval_core.providers.base import ModelProvider
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.states import COMPLETED_OUTCOMES, FAILED_OUTCOMES, Outcome
 from agenteval_core.tools.base import ToolContext
 from agenteval_core.tools.registry import ToolSet
@@ -74,13 +75,17 @@ class AgentAttemptResult:
     cost_usd: Decimal | None = None
     final_answer: str | None = None
     sandbox_image_id: str | None = None
+    # Set exactly for a failed outcome; never inferred from error_message.
+    failure_reason: FailureReason | None = None
     # Not a finish_attempt field: handed to the EvaluationRunner after the
     # attempt is durable (the executor excludes it when persisting).
     workspace: WorkspaceCapture | None = field(default=None, repr=False, compare=False)
 
 
 class _SetupError(Exception):
-    pass
+    def __init__(self, message: str, *, reason: FailureReason) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -121,7 +126,7 @@ class AgentRunner:
         try:
             setup = self._prepare(task, version)
         except _SetupError as exc:
-            return _failed(Outcome.INTERNAL_ERROR, str(exc), started)
+            return _failed(Outcome.INTERNAL_ERROR, str(exc), started, reason=exc.reason)
 
         try:
             session = await asyncio.to_thread(
@@ -143,7 +148,7 @@ class AgentRunner:
                 pids_limit=self._pids_limit,
             )
         except SandboxError as exc:
-            return _failed(Outcome.SANDBOX_ERROR, str(exc), started)
+            return _failed(Outcome.SANDBOX_ERROR, str(exc), started, reason=exc.reason)
 
         image_id = await asyncio.to_thread(_image_id, session)
         try:
@@ -184,11 +189,21 @@ class AgentRunner:
             return result
         except SinkFailed as exc:
             log.error("trajectory_unrecordable", error=str(exc))
-            return _failed(Outcome.INTERNAL_ERROR, str(exc), started, image_id)
+            return _failed(
+                Outcome.INTERNAL_ERROR,
+                str(exc),
+                started,
+                image_id,
+                reason=FailureReason.PERSISTENCE_TRAJECTORY,
+            )
         except Exception as exc:
             log.exception("agent_runner_error")
             return _failed(
-                Outcome.INTERNAL_ERROR, f"{type(exc).__name__}: {exc}", started, image_id
+                Outcome.INTERNAL_ERROR,
+                f"{type(exc).__name__}: {exc}",
+                started,
+                image_id,
+                reason=FailureReason.INTERNAL_UNEXPECTED,
             )
         finally:
             # Shielded: the container must go even if this task is being cancelled.
@@ -226,15 +241,23 @@ class AgentRunner:
     def _prepare(self, task: Task, version: AgentVersion) -> _Setup:
         provider = self._providers.get(version.model_provider)
         if provider is None:
-            raise _SetupError(f"model provider '{version.model_provider}' is not enabled")
+            raise _SetupError(
+                f"model provider '{version.model_provider}' is not enabled",
+                reason=FailureReason.CONFIG_PROVIDER_DISABLED,
+            )
         price = price_for(version.model_provider, version.model)
         if price is None:
-            raise _SetupError(f"no price for {version.model_provider}/{version.model}")
+            raise _SetupError(
+                f"no price for {version.model_provider}/{version.model}",
+                reason=FailureReason.CONFIG_MODEL_UNPRICED,
+            )
         try:
             limits = AgentLimits.model_validate(version.limits)
             toolset = ToolSet.build(list(version.tools), has_test_command=bool(task.test_command))
         except (ValidationError, ValueError) as exc:
-            raise _SetupError(f"invalid agent version config: {exc}") from exc
+            raise _SetupError(
+                f"invalid agent version config: {exc}", reason=FailureReason.CONFIG_INVALID
+            ) from exc
         return _Setup(provider, price, limits, toolset)
 
 
@@ -270,15 +293,22 @@ def _from_agent_result(r: AgentResult, image_id: str | None) -> AgentAttemptResu
         cost_usd=r.cost_usd,
         final_answer=r.final_answer,
         sandbox_image_id=image_id,
+        failure_reason=r.failure_reason if r.outcome in FAILED_OUTCOMES else None,
     )
 
 
 def _failed(
-    outcome: Outcome, message: str, started: float, image_id: str | None = None
+    outcome: Outcome,
+    message: str,
+    started: float,
+    image_id: str | None = None,
+    *,
+    reason: FailureReason,
 ) -> AgentAttemptResult:
     return AgentAttemptResult(
         outcome=outcome,
         duration_ms=int((time.monotonic() - started) * 1000),
         error_message=message,
         sandbox_image_id=image_id,
+        failure_reason=reason,
     )

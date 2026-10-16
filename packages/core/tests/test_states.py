@@ -1,10 +1,12 @@
 import pytest
 
+from agenteval_core.reliability.transitions import RUN_TRANSITIONS, RunState
 from agenteval_core.states import (
     ALLOWED_TRANSITIONS,
     COMPLETED_OUTCOMES,
     FAILED_OUTCOMES,
     TERMINAL_STATUSES,
+    AttemptStatus,
     IllegalTransition,
     Outcome,
     RunStatus,
@@ -50,10 +52,10 @@ def test_happy_path_is_allowed() -> None:
     [
         (RunStatus.QUEUED, RunStatus.RUNNING),  # must be claimed first
         (RunStatus.QUEUED, RunStatus.COMPLETED),
-        (RunStatus.CLAIMED, RunStatus.QUEUED),
-        (RunStatus.RUNNING, RunStatus.QUEUED),  # no retries in the slice
+        (RunStatus.CLAIMED, RunStatus.COMPLETED),
+        (RunStatus.RUNNING, RunStatus.QUEUED),  # only through RETRYING
         (RunStatus.COMPLETED, RunStatus.RUNNING),
-        (RunStatus.FAILED, RunStatus.QUEUED),
+        (RunStatus.CANCELLED, RunStatus.QUEUED),  # only FAILED can be replayed
     ],
 )
 def test_illegal_transitions_rejected(src: RunStatus, dst: RunStatus) -> None:
@@ -62,13 +64,32 @@ def test_illegal_transitions_rejected(src: RunStatus, dst: RunStatus) -> None:
         check_transition(src, dst)
 
 
-def test_terminal_statuses_have_no_exits() -> None:
+def test_terminal_statuses_have_no_exits_except_failed_replay() -> None:
     for status in TERMINAL_STATUSES:
-        assert ALLOWED_TRANSITIONS[status] == frozenset()
+        if status is RunStatus.FAILED:
+            assert ALLOWED_TRANSITIONS[status] == frozenset({RunStatus.QUEUED})
+        else:
+            assert ALLOWED_TRANSITIONS[status] == frozenset()
 
 
 def test_transition_table_covers_every_status() -> None:
     assert set(ALLOWED_TRANSITIONS) == set(RunStatus)
+
+
+def test_allowed_transitions_equal_the_reliability_transition_tables() -> None:
+    """states.py gains RETRYING/CANCELLED/ABANDONED in this step (deferred
+    from Step 2); ALLOWED_TRANSITIONS must now equal reliability.transitions'
+    RUN_TRANSITIONS exactly, not merely extend the Phase 4 subset."""
+    assert {s.value for s in RunStatus} == {s.value for s in RunState}
+    expected: dict[str, set[str]] = {s.value: set() for s in RunState}
+    for t in RUN_TRANSITIONS:
+        expected[t.src.value].add(t.dst.value)
+    actual = {src.value: {dst.value for dst in dsts} for src, dsts in ALLOWED_TRANSITIONS.items()}
+    assert actual == expected
+
+
+def test_attempt_status_gains_abandoned_and_cancelled() -> None:
+    assert {AttemptStatus.ABANDONED, AttemptStatus.CANCELLED} <= set(AttemptStatus)
 
 
 def test_completed_and_failed_outcomes_partition_the_enum() -> None:

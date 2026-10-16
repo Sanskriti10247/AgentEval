@@ -10,13 +10,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from agenteval_core.reliability.taxonomy import FailureReason
+
 
 class WorkspaceUnavailable(Exception):
     """The sandbox itself failed (daemon error, container gone, reaper failed).
 
     A platform fault: the runtime ends the attempt as SANDBOX_ERROR. Tools
-    never catch it.
+    never catch it. `reason` carries the worker's SandboxError.reason when
+    the failure came from one (never inferred from the message); it is None
+    only for a raw Docker daemon error that never went through SandboxError.
     """
+
+    def __init__(self, message: str, *, reason: FailureReason | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)

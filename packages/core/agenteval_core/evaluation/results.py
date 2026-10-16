@@ -21,6 +21,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
 
 from agenteval_core.evaluation.taxonomy import FailureCategory
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.states import Outcome
 
 SUMMARY_CHARS = 500  # internal summaries
@@ -83,6 +84,10 @@ class AttemptFacts:
     cost_usd: Decimal | None = None
     max_steps: int | None = None
     max_cost_usd: Decimal | None = None
+    # Step 3: drives platform_category() for a failed outcome. None for a
+    # run-level failure (no attempt exists yet) or a legacy row predating the
+    # taxonomy; platform_category() falls back to error_message for those.
+    failure_reason: FailureReason | None = None
 
 
 @dataclass(frozen=True)

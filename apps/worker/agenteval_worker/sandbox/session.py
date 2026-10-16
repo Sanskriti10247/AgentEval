@@ -34,6 +34,7 @@ import docker.errors
 from docker.models.containers import Container
 
 from agenteval_core.logging import get_logger
+from agenteval_core.reliability.taxonomy import FailureReason
 
 log = get_logger(__name__)
 
@@ -69,7 +70,15 @@ REAPER_SCRIPT = (
 
 
 class SandboxError(Exception):
-    """The platform could not set up or drive the sandbox (-> SANDBOX_ERROR)."""
+    """The platform could not set up or drive the sandbox (-> SANDBOX_ERROR).
+
+    `reason` is a closed FailureReason (never inferred from the message), set
+    at each raise site below so the attempt's stored failure_reason is exact.
+    """
+
+    def __init__(self, message: str, *, reason: FailureReason) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -247,9 +256,14 @@ class SandboxSession:
                 pids_limit=pids_limit,
             )
         except docker.errors.ImageNotFound as exc:
-            raise SandboxError(f"image not found: {spec.image} ({exc.explanation})") from exc
+            raise SandboxError(
+                f"image not found: {spec.image} ({exc.explanation})",
+                reason=FailureReason.SANDBOX_IMAGE_NOT_FOUND,
+            ) from exc
         except docker.errors.DockerException as exc:
-            raise SandboxError(f"docker error: {exc}") from exc
+            raise SandboxError(
+                f"docker error: {exc}", reason=FailureReason.SANDBOX_CREATE_FAILED
+            ) from exc
         try:
             session.start()
             if files:
@@ -321,7 +335,9 @@ class SandboxSession:
             )["Id"]
             conn: Any = api.exec_start(exec_id, socket=True)
         except docker.errors.DockerException as exc:
-            raise SandboxError(f"copying files failed: {exc}") from exc
+            raise SandboxError(
+                f"copying files failed: {exc}", reason=FailureReason.SANDBOX_EXEC_FAILED
+            ) from exc
         raw: socket.socket = conn._sock
         output = bytearray()
         try:
@@ -332,7 +348,9 @@ class SandboxSession:
                 if len(output) < 65536:
                     output += chunk
         except OSError as exc:
-            raise SandboxError(f"copying files failed: {exc}") from exc
+            raise SandboxError(
+                f"copying files failed: {exc}", reason=FailureReason.SANDBOX_EXEC_FAILED
+            ) from exc
         finally:
             conn.close()
         out, err = demux_stream(bytes(output))
@@ -352,7 +370,8 @@ class SandboxSession:
         result = self.write_files_result(files, mtime=mtime)
         if result.exit_code != 0:
             raise SandboxError(
-                f"extracting task files failed (exit {result.exit_code}): {result.stderr[-500:]!r}"
+                f"extracting task files failed (exit {result.exit_code}): {result.stderr[-500:]!r}",
+                reason=FailureReason.SANDBOX_EXEC_FAILED,
             )
 
     # -- execs -------------------------------------------------------------------
@@ -390,7 +409,10 @@ class SandboxSession:
             stdin=stdin,
         )
         if result.timed_out:  # the backstop fired: the container is gone
-            raise SandboxError(f"tool exec overran its {backstop:.0f}s backstop; container killed")
+            raise SandboxError(
+                f"tool exec overran its {backstop:.0f}s backstop; container killed",
+                reason=FailureReason.SANDBOX_EXEC_FAILED,
+            )
         # `timeout` exits 124 (TERM worked) or 137 (needed KILL) when it fired.
         timed_out = result.exit_code in (124, 137) and result.duration_ms >= timeout_s * 1000
         return ExecResult(
@@ -408,7 +430,10 @@ class SandboxSession:
         Any failure is a SandboxError: we can no longer promise a clean
         workspace for the next tool call."""
         if self._keepalive_pid is None:
-            raise SandboxError("reap() called before the keepalive was recorded")
+            raise SandboxError(
+                "reap() called before the keepalive was recorded",
+                reason=FailureReason.SANDBOX_REAPER_FAILED,
+            )
         try:
             result = self._exec(
                 ["sh", "-c", REAPER_SCRIPT, "reaper", self._keepalive_pid],
@@ -416,11 +441,14 @@ class SandboxSession:
                 on_deadline=self.kill,
             )
         except docker.errors.DockerException as exc:
-            raise SandboxError(f"reaper failed: {exc}") from exc
+            raise SandboxError(
+                f"reaper failed: {exc}", reason=FailureReason.SANDBOX_REAPER_FAILED
+            ) from exc
         if result.timed_out or result.exit_code != 0:
             raise SandboxError(
                 f"reaper failed (exit {result.exit_code}, timed_out={result.timed_out}): "
-                f"{result.stderr[-300:]!r}"
+                f"{result.stderr[-300:]!r}",
+                reason=FailureReason.SANDBOX_REAPER_FAILED,
             )
 
     # -- internals ---------------------------------------------------------------
@@ -433,16 +461,24 @@ class SandboxSession:
                 ["cat", "/proc/1/task/1/children"], deadline_s=REAP_TIMEOUT_S, on_deadline=self.kill
             ).stdout.split()
             if len(children) != 1:
-                raise SandboxError(f"expected one child of PID 1, found {children}")
+                raise SandboxError(
+                    f"expected one child of PID 1, found {children}",
+                    reason=FailureReason.SANDBOX_LOST,
+                )
             cmdline = self._exec(
                 ["sh", "-c", "tr '\\0' ' ' < /proc/$1/cmdline", "cmdline", children[0]],
                 deadline_s=REAP_TIMEOUT_S,
                 on_deadline=self.kill,
             ).stdout
         except docker.errors.DockerException as exc:
-            raise SandboxError(f"could not inspect the sandbox processes: {exc}") from exc
+            raise SandboxError(
+                f"could not inspect the sandbox processes: {exc}", reason=FailureReason.SANDBOX_LOST
+            ) from exc
         if cmdline != KEEPALIVE_CMDLINE:
-            raise SandboxError(f"PID 1's child is not the keepalive: {cmdline!r}")
+            raise SandboxError(
+                f"PID 1's child is not the keepalive: {cmdline!r}",
+                reason=FailureReason.SANDBOX_LOST,
+            )
         self._keepalive_pid = children[0]
 
     def _exec(

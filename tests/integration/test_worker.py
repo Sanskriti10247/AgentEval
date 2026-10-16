@@ -9,9 +9,10 @@ from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from agenteval_core.models import Run
+from agenteval_core.models import Run, RunAttempt
 from agenteval_core.queue.streams import DispatchMessage, RunQueue
-from agenteval_core.repositories.runs import RunRepository
+from agenteval_core.reliability.taxonomy import FailureReason
+from agenteval_core.repositories.runs import FinishOutcome, RunRepository
 from agenteval_core.states import Outcome, RunStatus
 from agenteval_worker.consumer import Consumer
 from agenteval_worker.executor import Executor
@@ -21,7 +22,12 @@ from tests.integration.conftest import create_task
 SM = async_sessionmaker[AsyncSession]
 
 
-def fake_result(outcome: Outcome = Outcome.SUCCESS, exit_code: int | None = 0) -> ExecutionResult:
+def fake_result(
+    outcome: Outcome = Outcome.SUCCESS,
+    exit_code: int | None = 0,
+    *,
+    failure_reason: FailureReason | None = None,
+) -> ExecutionResult:
     return ExecutionResult(
         outcome=outcome,
         exit_code=exit_code,
@@ -31,6 +37,7 @@ def fake_result(outcome: Outcome = Outcome.SUCCESS, exit_code: int | None = 0) -
         stdout_truncated=False,
         stderr_truncated=False,
         duration_ms=5,
+        failure_reason=failure_reason,
     )
 
 
@@ -146,7 +153,15 @@ async def test_malformed_message_is_acked(queue: RunQueue) -> None:
     ("result", "status", "outcome"),
     [
         (fake_result(Outcome.TIMEOUT, exit_code=137), "COMPLETED", "TIMEOUT"),
-        (fake_result(Outcome.SANDBOX_ERROR, exit_code=None), "FAILED", "SANDBOX_ERROR"),
+        (
+            fake_result(
+                Outcome.SANDBOX_ERROR,
+                exit_code=None,
+                failure_reason=FailureReason.SANDBOX_EXEC_FAILED,
+            ),
+            "FAILED",
+            "SANDBOX_ERROR",
+        ),
         (RuntimeError("boom"), "FAILED", "INTERNAL_ERROR"),
     ],
 )
@@ -178,17 +193,56 @@ async def test_finish_is_fenced_to_the_owning_worker(
         attempt = await repo.start_attempt(run_id, "w1")
         assert attempt is not None
         await s.commit()
-    # Simulate ownership moving away (what Phase 5 lease recovery will do).
+    # Simulate ownership moving away (what Phase 5 lease recovery will do):
+    # a takeover is an epoch bump, on both the run and its RUNNING attempt.
     async with sessionmaker() as s:
-        await s.execute(update(Run).where(Run.id == run_id).values(worker_id="w2"))
+        await s.execute(
+            update(Run)
+            .where(Run.id == run_id)
+            .values(worker_id="w2", lease_epoch=Run.lease_epoch + 1)
+        )
+        await s.execute(
+            update(RunAttempt)
+            .where(RunAttempt.id == attempt.id)
+            .values(lease_epoch=RunAttempt.lease_epoch + 1)
+        )
         await s.commit()
     async with sessionmaker() as s:
         fields = {k: v for k, v in fake_result().__dict__.items()}
-        assert await RunRepository(s).finish_attempt(attempt, **fields) is False
+        assert await RunRepository(s).finish_attempt(attempt, **fields) is FinishOutcome.FENCED
         await s.rollback()
     async with sessionmaker() as s:
         run = await RunRepository(s).get(run_id)
         assert run is not None and run.status == RunStatus.RUNNING
+
+
+async def test_a_lost_acknowledgement_of_our_own_commit_is_classified_as_success(
+    client: httpx.AsyncClient, sessionmaker: SM
+) -> None:
+    """Rule 6 (fencing §6): finish_attempt's SQL call commits, but the caller
+    never sees the result (a dropped connection). A retry with the same
+    (stale) attempt object sees 'fenced' from p5_finish - because the attempt
+    is no longer RUNNING - but the re-read finds FINISHED at our own epoch
+    with our own outcome, so it reports success instead of a false loss."""
+    run_id = uuid.UUID(await submit(client))
+    async with sessionmaker() as s:
+        repo = RunRepository(s)
+        await repo.claim(run_id, "w1")
+        attempt = await repo.start_attempt(run_id, "w1")
+        assert attempt is not None
+        await s.commit()
+
+    fields = {k: v for k, v in fake_result().__dict__.items()}
+    async with sessionmaker() as s:
+        assert await RunRepository(s).finish_attempt(attempt, **fields) is FinishOutcome.FINISHED
+        await s.commit()
+    # The retry: same stale `attempt` (unaware its own write already landed).
+    async with sessionmaker() as s:
+        assert await RunRepository(s).finish_attempt(attempt, **fields) is FinishOutcome.FINISHED
+        await s.rollback()  # the retry itself writes nothing new
+    async with sessionmaker() as s:
+        run = await RunRepository(s).get(run_id)
+        assert run is not None and run.status == RunStatus.COMPLETED
 
 
 async def test_start_attempt_requires_the_claiming_worker(

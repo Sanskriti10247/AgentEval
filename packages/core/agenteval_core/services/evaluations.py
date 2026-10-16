@@ -35,6 +35,7 @@ from agenteval_core.evaluation.taxonomy import DatasetStatus, EvaluationStatus, 
 from agenteval_core.logging import get_logger
 from agenteval_core.models import Evaluation, Run
 from agenteval_core.queue.streams import RunQueue
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.repositories.agents import AgentVersionRepository
 from agenteval_core.repositories.batches import BatchRepository, ResultRecord, TaskMeta
 from agenteval_core.repositories.datasets import DatasetRepository
@@ -71,6 +72,18 @@ log = get_logger(__name__)
 
 TERMINAL = frozenset({RunStatus.COMPLETED, RunStatus.FAILED})
 _UNFINISHED_EVAL = frozenset({EvaluationStatus.PENDING, EvaluationStatus.RUNNING})
+# RunStatus gained RETRYING and CANCELLED in Step 3 (reliability.transitions),
+# but the Progress.runs_by_status key set is a Phase 4 API contract: it must
+# not change until F13 (Step 9) teaches summaries/progress about retries and
+# cancellation. Direct runs still default to max_attempts=1, so RETRYING is
+# unreachable here regardless; this just keeps the response shape frozen.
+_PHASE4_RUN_STATUSES = (
+    RunStatus.QUEUED,
+    RunStatus.CLAIMED,
+    RunStatus.RUNNING,
+    RunStatus.COMPLETED,
+    RunStatus.FAILED,
+)
 
 
 @dataclass(frozen=True)
@@ -123,7 +136,9 @@ def _result_of(r: ResultRecord) -> tuple[EvaluationStatus, FailureCategory | Non
         category = FailureCategory(r.failure_category) if r.failure_category else None
         return status, category
     if r.run_status == RunStatus.FAILED and r.attempt_no is None and r.run_outcome:
-        category = platform_category(AttemptFacts(Outcome(r.run_outcome), r.run_error_message))
+        reason = FailureReason(r.attempt_failure_reason) if r.attempt_failure_reason else None
+        facts = AttemptFacts(Outcome(r.run_outcome), r.run_error_message, failure_reason=reason)
+        category = platform_category(facts)
         if category is not None:
             return EvaluationStatus.SKIPPED, category
     return None
@@ -416,7 +431,7 @@ class EvaluationService:
             created_at=batch.created_at,
             progress=Progress(
                 runs_total=total,
-                runs_by_status={RunStatus(s): runs.get(s, 0) for s in RunStatus},
+                runs_by_status={RunStatus(s): runs.get(s, 0) for s in _PHASE4_RUN_STATUSES},
                 evaluations_by_status={s.value: evals.get(s.value, 0) for s in EvaluationStatus},
                 awaiting_evaluation=awaiting,
                 complete=terminal == total and awaiting == 0,

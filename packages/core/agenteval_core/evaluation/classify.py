@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from agenteval_core.evaluation.metrics import TrajectoryMetrics
 from agenteval_core.evaluation.results import AttemptFacts, CheckResult, IntegrityResult
 from agenteval_core.evaluation.taxonomy import DiagnosticTag, EvaluationStatus, FailureCategory
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.states import Outcome
 
 # Agent-task outcomes only (D4: command tasks are not evaluated).
@@ -49,7 +50,19 @@ class Verdict:
 
 
 def platform_category(facts: AttemptFacts) -> FailureCategory | None:
+    """The platform failure category for a FAILED-outcome attempt, driven by
+    its failure_reason (worker_shutdown -> platform_cancelled). A legacy row
+    with no reason yet (NULL or 'unclassified' - pre-Step-3, or a run-level
+    failure with no attempt at all) falls back to the old "cancelled:"
+    error_message check, so those rows keep classifying exactly as before."""
     category = _PLATFORM.get(facts.outcome)
+    if category is None:
+        return None
+    reason = facts.failure_reason
+    if reason is not None and reason is not FailureReason.UNCLASSIFIED:
+        if reason is FailureReason.WORKER_SHUTDOWN:
+            return FailureCategory.PLATFORM_CANCELLED
+        return category
     if category is FailureCategory.PLATFORM_INTERNAL and (facts.error_message or "").startswith(
         "cancelled:"
     ):

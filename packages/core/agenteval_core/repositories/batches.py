@@ -41,7 +41,8 @@ class ResultRecord:
     repetition: int
     run_status: str
     run_outcome: str | None
-    run_error_message: str | None  # only for platform_category() ("cancelled:")
+    run_error_message: str | None  # legacy platform_category() fallback ("cancelled:")
+    attempt_failure_reason: str | None  # Step 3: drives platform_category() when present
     attempt_no: int | None
     duration_ms: int | None
     steps: int | None
@@ -144,6 +145,7 @@ class BatchRepository:
                 Run.status.label("run_status"),
                 Run.outcome.label("run_outcome"),
                 Run.error_message.label("run_error_message"),
+                RunAttempt.failure_reason.label("attempt_failure_reason"),
                 RunAttempt.attempt_no,
                 RunAttempt.duration_ms,
                 RunAttempt.steps,
@@ -195,6 +197,7 @@ class BatchRepository:
                 Run.status.label("run_status"),
                 Run.outcome.label("run_outcome"),
                 Run.error_message.label("run_error_message"),
+                RunAttempt.failure_reason.label("attempt_failure_reason"),
                 RunAttempt.attempt_no,
                 RunAttempt.duration_ms,
                 RunAttempt.steps,

@@ -15,19 +15,21 @@ pending list) is what future recovery (Phase 5 leases) works from.
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import fields
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agenteval_core.agent.context import CancelToken
 from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, RunAttempt, Task
 from agenteval_core.queue.streams import DispatchMessage, RunQueue
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.repositories.agents import AgentVersionRepository
-from agenteval_core.repositories.runs import RunRepository
+from agenteval_core.repositories.runs import FinishOutcome, RunRepository
 from agenteval_core.repositories.tasks import TaskRepository
 from agenteval_core.states import Outcome, status_for
 from agenteval_worker.sandbox.docker_sandbox import ExecutionResult, SandboxSpec
@@ -42,6 +44,12 @@ log = get_logger(__name__)
 # the sandbox thread (the sandbox's own watchdog should always fire first).
 SANDBOX_GRACE_S = 60
 
+# T-finish persist retry (Step 3): a transient DB error (connection or
+# operational - never a CHECK violation) is retried with this backoff before
+# giving up and leaving the run for Phase 5 lease recovery.
+TRANSIENT_DB_ERRORS = (OperationalError, InterfaceError, OSError, TimeoutError)
+FINISH_RETRY_BACKOFF_S = (0.2, 0.5, 1.0, 2.0)
+
 SandboxRunner = Callable[[SandboxSpec], ExecutionResult]
 
 
@@ -54,6 +62,9 @@ class Executor:
         worker_id: str,
         agent_runner: "AgentRunner | None" = None,
         evaluation_runner: "EvaluationRunner | None" = None,
+        *,
+        finish_backoff_s: Sequence[float] = FINISH_RETRY_BACKOFF_S,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
@@ -61,6 +72,8 @@ class Executor:
         self.worker_id = worker_id
         self._agent_runner = agent_runner
         self._evaluation_runner = evaluation_runner
+        self._finish_backoff_s = tuple(finish_backoff_s)
+        self._sleep = sleep
         # In-flight agent runs, so shutdown can cancel them cooperatively.
         self._active: dict[uuid.UUID, CancelToken] = {}
 
@@ -91,8 +104,8 @@ class Executor:
                     result = await self._execute_agent(task, attempt, version)
                 else:
                     result = await self._execute(task, attempt)
-                persisted = await self._persist(attempt, result)
-                if persisted and task.task_type == "agent":
+                outcome = await self._persist(attempt, result)
+                if outcome is FinishOutcome.FINISHED and task.task_type == "agent":
                     await self._evaluate(task, attempt, result)
 
     async def _claim_and_start(
@@ -157,16 +170,22 @@ class Executor:
             async with asyncio.timeout(task.timeout_s + SANDBOX_GRACE_S):
                 return await asyncio.to_thread(self._run_sandbox, spec)
         except TimeoutError:
-            return _internal_error("sandbox did not return within timeout + grace")
+            return _internal_error(
+                "sandbox did not return within timeout + grace", FailureReason.WORKER_BACKSTOP
+            )
         except Exception as exc:
             log.exception("sandbox_crashed")
-            return _internal_error(f"{type(exc).__name__}: {exc}")
+            return _internal_error(
+                f"{type(exc).__name__}: {exc}", FailureReason.INTERNAL_UNEXPECTED
+            )
 
     async def _execute_agent(
         self, task: Task, attempt: RunAttempt, version: AgentVersion
     ) -> "ExecutionResult | AgentAttemptResult":
         if self._agent_runner is None:
-            return _internal_error("agent tasks are not enabled on this worker")
+            return _internal_error(
+                "agent tasks are not enabled on this worker", FailureReason.WORKER_CAPABILITY
+            )
         token = CancelToken()
         self._active[attempt.run_id] = token
         try:
@@ -174,39 +193,59 @@ class Executor:
             async with asyncio.timeout(task.timeout_s + SANDBOX_GRACE_S):
                 return await self._agent_runner.run(task, attempt, version, token)
         except TimeoutError:
-            return _internal_error("agent run did not return within timeout + grace")
+            return _internal_error(
+                "agent run did not return within timeout + grace", FailureReason.WORKER_BACKSTOP
+            )
         except Exception as exc:
             log.exception("agent_run_crashed")
-            return _internal_error(f"{type(exc).__name__}: {exc}")
+            return _internal_error(
+                f"{type(exc).__name__}: {exc}", FailureReason.INTERNAL_UNEXPECTED
+            )
         finally:
             self._active.pop(attempt.run_id, None)
 
     async def _persist(
         self, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
-    ) -> bool:
-        """True once the attempt's outcome is committed."""
-        try:
-            async with self._sm() as s:
-                ok = await RunRepository(s).finish_attempt(attempt, **_finish_fields(result))
-                if not ok:
-                    await s.rollback()
-                    log.warning("finish_fenced", outcome=result.outcome)
-                    return False
-                await s.commit()
-        except Exception:
-            # Result is lost and the run stays RUNNING until Phase 5 lease
-            # recovery. Log what we had so it's at least observable.
-            log.exception("persist_failed", outcome=result.outcome, exit_code=result.exit_code)
-            return False
+    ) -> FinishOutcome:
+        """T-finish (Step 3): calls finish_attempt (p5_finish), retrying a
+        transient DB error with backoff - a CHECK violation or any other
+        unexpected error is not retried, and leaves the run RUNNING for Phase
+        5 lease recovery to pick up."""
+        for try_no in range(len(self._finish_backoff_s) + 1):
+            try:
+                async with self._sm() as s:
+                    outcome = await RunRepository(s).finish_attempt(
+                        attempt, **_finish_fields(result)
+                    )
+                    if outcome is FinishOutcome.FENCED:
+                        await s.rollback()
+                        return outcome
+                    await s.commit()
+                break
+            except TRANSIENT_DB_ERRORS as exc:
+                if try_no == len(self._finish_backoff_s):
+                    log.exception(
+                        "persist_failed", outcome=result.outcome, exit_code=result.exit_code
+                    )
+                    return FinishOutcome.FENCED
+                delay = self._finish_backoff_s[try_no]
+                log.warning("finish_retry", try_no=try_no, delay_s=delay, error=str(exc))
+                await self._sleep(delay)
+            except Exception:
+                # Result is lost and the run stays RUNNING until Phase 5 lease
+                # recovery. Log what we had so it's at least observable.
+                log.exception("persist_failed", outcome=result.outcome, exit_code=result.exit_code)
+                return FinishOutcome.FENCED
         log.info(
             "run_finished",
-            status=status_for(result.outcome),
+            finish_outcome=outcome,
+            status=status_for(result.outcome) if outcome is FinishOutcome.FINISHED else None,
             outcome=result.outcome,
             exit_code=result.exit_code,
             duration_ms=result.duration_ms,
             oom_killed=result.oom_killed,
         )
-        return True
+        return outcome
 
     async def _evaluate(
         self, task: Task, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
@@ -237,7 +276,7 @@ def _finish_fields(result: "ExecutionResult | AgentAttemptResult") -> dict[str, 
     return {f.name: getattr(result, f.name) for f in fields(result) if f.name != "workspace"}
 
 
-def _internal_error(message: str) -> ExecutionResult:
+def _internal_error(message: str, reason: FailureReason) -> ExecutionResult:
     return ExecutionResult(
         outcome=Outcome.INTERNAL_ERROR,
         exit_code=None,
@@ -248,4 +287,5 @@ def _internal_error(message: str) -> ExecutionResult:
         stderr_truncated=False,
         duration_ms=0,
         error_message=message,
+        failure_reason=reason,
     )

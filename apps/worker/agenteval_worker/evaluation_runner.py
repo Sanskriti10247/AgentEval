@@ -69,6 +69,7 @@ from agenteval_core.evaluation.spec import EvaluationSpec
 from agenteval_core.evaluation.taxonomy import EvaluationStatus, FailureCategory
 from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, Evaluation, Run, RunAttempt, Task, TrajectoryEvent
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.repositories.evaluations import EvaluationRepository
 from agenteval_core.repositories.trajectory import TrajectoryRepository
 from agenteval_core.states import AttemptStatus, Outcome
@@ -359,6 +360,7 @@ class EvaluationRunner:
             cost_usd=row.cost_usd,
             max_steps=limits.max_steps if limits else None,
             max_cost_usd=limits.max_cost_usd if limits else None,
+            failure_reason=FailureReason(row.failure_reason) if row.failure_reason else None,
         )
         return _Loaded(row.id, row.run_id, facts, compute(events), config)
 

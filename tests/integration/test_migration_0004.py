@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from tests.integration.test_migration_0003 import scalar, seed_phase3, version_of
-from tests.integration.test_migrations import HEAD, migrate
+from tests.integration.test_migrations import migrate
 
 Ids = dict[str, uuid.UUID]
 
@@ -84,7 +84,9 @@ async def test_upgrade_backfills_legacy_rows(at_0003: tuple[str, AsyncEngine]) -
     url, engine = at_0003
     ids = await seed_legacy(engine)
     await migrate(url, "upgrade", "0004")
-    assert await version_of(engine) == "0004" == HEAD
+    # 0004 is no longer head (0005 added the attempt failure_reason presence
+    # rule); drift against head is test_migrations.test_migrations_match_models_exactly.
+    assert await version_of(engine) == "0004"
 
     # New run columns take their defaults; stuck claims and runs get an expired-now lease.
     run = await row(

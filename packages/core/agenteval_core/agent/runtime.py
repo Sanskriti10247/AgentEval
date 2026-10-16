@@ -47,6 +47,7 @@ from agenteval_core.providers.base import (
     ToolResultMsg,
     Usage,
 )
+from agenteval_core.reliability.taxonomy import FailureReason, reason_for_model_error
 from agenteval_core.states import Outcome
 from agenteval_core.tools.base import ToolStatus
 from agenteval_core.tools.registry import (
@@ -76,10 +77,13 @@ _LIMIT_OUTCOME = {
 class _Stop(Exception):
     """Internal: the attempt ends with this outcome."""
 
-    def __init__(self, outcome: Outcome, reason: str | None) -> None:
+    def __init__(
+        self, outcome: Outcome, reason: str | None, *, failure_reason: FailureReason | None = None
+    ) -> None:
         super().__init__(reason)
         self.outcome = outcome
         self.reason = reason
+        self.failure_reason = failure_reason
 
 
 class AgentRuntime:
@@ -111,18 +115,20 @@ class AgentRuntime:
         started = ctx.clock()
         budget = BudgetTracker(ctx.limits)
         final_answer: str | None = None
+        failure_reason: FailureReason | None = None
         try:
             self._emit(EventType.RUN_STARTED, input=self._run_started_payload(ctx))
             await self._flush()
             final_answer = await self._loop(ctx, budget)
             outcome, reason = Outcome.AGENT_FINISHED, None
         except _Stop as stop:
-            outcome, reason = stop.outcome, stop.reason
+            outcome, reason, failure_reason = stop.outcome, stop.reason, stop.failure_reason
         except SinkFailed:
             raise
         except Exception as exc:  # a bug, a broken fixture, an unexpected provider failure
             log.exception("agent_runtime_error", step=self._step)
             outcome, reason = Outcome.INTERNAL_ERROR, f"{type(exc).__name__}: {exc}"
+            failure_reason = FailureReason.INTERNAL_UNEXPECTED
 
         result = AgentResult(
             outcome=outcome,
@@ -132,6 +138,7 @@ class AgentRuntime:
             usage=budget.usage,
             cost_usd=budget.cost_usd,
             duration_ms=int((ctx.clock() - started) * 1000),
+            failure_reason=failure_reason,
         )
         self._emit(
             EventType.RUN_FINISHED,
@@ -176,7 +183,11 @@ class AgentRuntime:
             if turn.stop is StopReason.REFUSAL:
                 raise _Stop(Outcome.MODEL_REFUSAL, f"refusal: {turn.stop_detail or 'unspecified'}")
             if turn.stop is StopReason.OTHER:
-                raise _Stop(Outcome.MODEL_ERROR, f"unexpected stop reason: {turn.stop_detail}")
+                raise _Stop(
+                    Outcome.MODEL_ERROR,
+                    f"unexpected stop reason: {turn.stop_detail}",
+                    failure_reason=FailureReason.MODEL_PROTOCOL,
+                )
             if turn.tool_calls:
                 results = await self._run_tools(ctx, turn)
                 self._session.add_tool_results(results)
@@ -212,7 +223,9 @@ class AgentRuntime:
                 await self._flush()
                 if isinstance(decision, GiveUp):
                     raise _Stop(
-                        Outcome.MODEL_ERROR, f"{err.kind} ({decision.reason}): {err.message}"
+                        Outcome.MODEL_ERROR,
+                        f"{err.kind} ({decision.reason}): {err.message}",
+                        failure_reason=reason_for_model_error(err.kind),
                     ) from err
                 await self._race(ctx, self._sleep(decision.delay_s), timeout_s=None)
                 retries += 1
@@ -248,7 +261,11 @@ class AgentRuntime:
             except WorkspaceUnavailable as exc:
                 self._emit_tool_call(_not_run(call, ToolStatus.ERROR, str(exc)),
                                      error_class="WorkspaceUnavailable")  # fmt: skip
-                raise _Stop(Outcome.SANDBOX_ERROR, str(exc)) from exc
+                raise _Stop(
+                    Outcome.SANDBOX_ERROR,
+                    str(exc),
+                    failure_reason=exc.reason or FailureReason.SANDBOX_EXEC_FAILED,
+                ) from exc
 
         # Cancelled, or the call overran the deadline: kill the sandbox so the
         # exec ends, give it a moment to unwind, and record what happened.
@@ -258,7 +275,8 @@ class AgentRuntime:
         self._emit_tool_call(_not_run(call, ToolStatus.ERROR, f"interrupted ({why})"),
                              error_class="Interrupted")  # fmt: skip
         if ctx.cancel.cancelled:
-            raise _Stop(Outcome.INTERNAL_ERROR, why)
+            # Phase 3's only trigger is worker shutdown (see _stop_if_interrupted).
+            raise _Stop(Outcome.INTERNAL_ERROR, why, failure_reason=FailureReason.WORKER_SHUTDOWN)
         raise _Stop(Outcome.TIMEOUT, "deadline")
 
     # -- interruption ------------------------------------------------------------------
@@ -267,7 +285,11 @@ class AgentRuntime:
         if ctx.cancel.cancelled:
             # Phase 3's only trigger is worker shutdown: a platform
             # interruption, not the agent's doing.
-            raise _Stop(Outcome.INTERNAL_ERROR, f"cancelled: {ctx.cancel.reason}")
+            raise _Stop(
+                Outcome.INTERNAL_ERROR,
+                f"cancelled: {ctx.cancel.reason}",
+                failure_reason=FailureReason.WORKER_SHUTDOWN,
+            )
         if ctx.time_left_s() <= 0:
             await self._limit_reached("deadline", None)
             raise _Stop(Outcome.TIMEOUT, "deadline")
