@@ -32,10 +32,9 @@ from agenteval_core.reliability.taxonomy import (
     WorkspaceCapture,
 )
 from agenteval_core.reliability.transitions import AttemptState, RunState
-from agenteval_core.states import COMPLETED_OUTCOMES, Outcome, sql_in_list
+from agenteval_core.states import COMPLETED_OUTCOMES, FAILED_OUTCOMES, Outcome, sql_in_list
 
-# Phase 5 lifecycles (reliability.transitions); states.py gains them when the
-# transitions are wired in.
+# Phase 5 lifecycles, now also states.py's own RunStatus/AttemptStatus (Step 3).
 _STATUSES = sql_values(RunState)
 _ATTEMPT_STATUSES = sql_values(AttemptState)
 # Derived from states.py so the DB constraints can't drift from status_for().
@@ -49,6 +48,15 @@ _REASON_OUTCOME = (
     " OR (failure_reason LIKE 'cancelled\\_%' AND outcome IS NULL)"
     " OR (failure_reason NOT LIKE 'model\\_%' AND failure_reason NOT LIKE 'sandbox\\_%'"
     " AND failure_reason NOT LIKE 'cancelled\\_%' AND outcome = 'INTERNAL_ERROR')"
+)
+# Step 3 / migration 0005: every FINISHED attempt with a failed outcome, plus
+# every ABANDONED or CANCELLED attempt, must carry a reason - and no other
+# attempt may.
+_FAILED_OUTCOMES = sql_in_list(FAILED_OUTCOMES)
+_REASON_PRESENCE = (
+    "(failure_reason IS NOT NULL) = ("
+    "status IN ('ABANDONED','CANCELLED') "
+    f"OR (status = 'FINISHED' AND outcome IN ({_FAILED_OUTCOMES})))"
 )
 
 
@@ -193,6 +201,9 @@ class RunAttempt(UUIDPk, Base):
         ),
         CheckConstraint("(retryable IS NULL) = (failure_reason IS NULL)", name="retryable"),
         CheckConstraint(_REASON_OUTCOME, name="reason_outcome"),
+        # Step 3 / migration 0005: the reason is present exactly for a FINISHED
+        # attempt with a failed outcome, or an ABANDONED/CANCELLED one.
+        CheckConstraint(_REASON_PRESENCE, name="reason"),
         # A capture value only on a FINISHED attempt with a completed outcome (G10).
         CheckConstraint(
             "workspace_capture IS NULL OR "

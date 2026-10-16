@@ -28,6 +28,7 @@ from agenteval_core.agent.retry import RetryPolicy
 from agenteval_core.agent.runtime import AgentRuntime
 from agenteval_core.providers.base import Usage
 from agenteval_core.providers.fake import FakeProvider, FakeSession
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.states import Outcome, status_for
 from agenteval_core.tools.base import ToolContext
 from agenteval_core.tools.registry import REGISTRY, ToolSet
@@ -329,6 +330,7 @@ async def test_cancel_during_a_model_call() -> None:
     h.ctx.cancel.cancel("worker_shutdown")
     r = await asyncio.wait_for(task, 2)
     assert (r.outcome, r.reason) == (Outcome.INTERNAL_ERROR, "cancelled: worker_shutdown")
+    assert r.failure_reason is FailureReason.WORKER_SHUTDOWN
     assert status_for(r.outcome).value == "FAILED"
     assert finished_output(h)["reason"] == "cancelled: worker_shutdown"
 
@@ -381,6 +383,7 @@ async def test_unexpected_stop_reason_is_a_model_error() -> None:
     h = harness(turn(stop="other", stop_detail="pause_turn"))
     r = await h.run()
     assert (r.outcome, r.reason) == (Outcome.MODEL_ERROR, "unexpected stop reason: pause_turn")
+    assert r.failure_reason is FailureReason.MODEL_PROTOCOL
 
 
 async def test_truncated_text_gets_a_continue_nudge() -> None:
@@ -433,6 +436,7 @@ async def test_retries_exhausted_is_a_model_error() -> None:
     h = harness(*[err("server_error", status=500) for _ in range(4)])
     r = await h.run()
     assert r.outcome is Outcome.MODEL_ERROR and "retries_exhausted" in (r.reason or "")
+    assert r.failure_reason is FailureReason.MODEL_SERVER_ERROR
     assert h.sleeps == [2, 4, 8]
     decisions = [e.output["decision"] for e in h.sink.events if e.error_class]
     assert decisions == ["retry", "retry", "retry", "give_up"]
@@ -443,6 +447,7 @@ async def test_non_retryable_error_fails_immediately() -> None:
     h = harness(err("authentication", status=401, message="invalid x-api-key"))
     r = await h.run()
     assert r.outcome is Outcome.MODEL_ERROR and "not_retryable" in (r.reason or "")
+    assert r.failure_reason is FailureReason.MODEL_AUTHENTICATION
     assert h.sleeps == [] and h.session.steps_consumed == 1
 
 
@@ -450,6 +455,7 @@ async def test_provider_errors_running_into_the_deadline_are_a_model_error_not_t
     h = harness(err("overloaded", retry_after_s=120), turn("never"), time_left=60)
     r = await h.run()
     assert r.outcome is Outcome.MODEL_ERROR and "deadline" in (r.reason or "")
+    assert r.failure_reason is FailureReason.MODEL_OVERLOADED
 
 
 async def test_a_short_per_call_timeout_is_retried() -> None:
@@ -472,6 +478,8 @@ async def test_sandbox_loss_during_a_tool_is_a_sandbox_error() -> None:
     h = harness(turn(tool_calls=[tool("read_file", path="a")]), turn("never"), ws=ws)
     r = await h.run()
     assert (r.outcome, r.reason) == (Outcome.SANDBOX_ERROR, "container gone")
+    # WorkspaceUnavailable had no reason of its own: falls back to sandbox_exec_failed.
+    assert r.failure_reason is FailureReason.SANDBOX_EXEC_FAILED
     failed = [e for e in h.sink.events if e.event_type is EventType.TOOL_CALL][0]
     assert (failed.status, failed.error_class) == ("error", "WorkspaceUnavailable")
     assert status_for(r.outcome).value == "FAILED"
@@ -481,6 +489,7 @@ async def test_a_broken_script_is_an_internal_error_and_still_recorded() -> None
     h = harness(turn(tool_calls=[tool("read_file", path="a")]))  # exhausted on the 2nd call
     r = await h.run()
     assert r.outcome is Outcome.INTERNAL_ERROR and "exhausted" in (r.reason or "")
+    assert r.failure_reason is FailureReason.INTERNAL_UNEXPECTED
     assert h.sink.types()[-1] == "run_finished"
 
 

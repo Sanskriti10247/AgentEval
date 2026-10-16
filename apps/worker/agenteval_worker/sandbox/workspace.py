@@ -14,6 +14,7 @@ from typing import TypeVar
 import docker.errors
 
 from agenteval_core.evaluation.results import ExecPlan, FileEvidence
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.tools.workspace import ExecOutput, WorkspaceUnavailable
 from agenteval_worker.sandbox.evaluation import EvaluationSession
 from agenteval_worker.sandbox.session import ExecResult, SandboxError, SandboxSession
@@ -46,9 +47,11 @@ class DockerWorkspace:
         try:
             return await asyncio.to_thread(fn, *args)
         except SandboxError as exc:
-            raise WorkspaceUnavailable(str(exc)) from exc
+            raise WorkspaceUnavailable(str(exc), reason=exc.reason) from exc
         except docker.errors.DockerException as exc:
-            raise WorkspaceUnavailable(f"docker error: {exc}") from exc
+            raise WorkspaceUnavailable(
+                f"docker error: {exc}", reason=FailureReason.SANDBOX_EXEC_FAILED
+            ) from exc
 
 
 class EvaluationWorkspace:

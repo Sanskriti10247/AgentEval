@@ -11,13 +11,17 @@ trustworthy outcome. FAILED means the platform could not.
 
 from enum import StrEnum
 
+from agenteval_core.reliability.transitions import RUN_TRANSITIONS, RunState
+
 
 class RunStatus(StrEnum):
     QUEUED = "QUEUED"
     CLAIMED = "CLAIMED"
     RUNNING = "RUNNING"
+    RETRYING = "RETRYING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class Outcome(StrEnum):
@@ -41,18 +45,22 @@ class Outcome(StrEnum):
 class AttemptStatus(StrEnum):
     RUNNING = "RUNNING"
     FINISHED = "FINISHED"
+    ABANDONED = "ABANDONED"
+    CANCELLED = "CANCELLED"
 
 
-TERMINAL_STATUSES: frozenset[RunStatus] = frozenset({RunStatus.COMPLETED, RunStatus.FAILED})
+TERMINAL_STATUSES: frozenset[RunStatus] = frozenset(
+    {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+)
 
-# The only legal transitions. Repositories also guard every UPDATE with
-# `WHERE status = <from>` so the database enforces this under concurrency.
+# The only legal transitions, derived from the reliability state machine
+# (reliability.transitions.RUN_TRANSITIONS) so the two can never drift apart:
+# a unit test asserts this equality directly. Repositories also guard every
+# UPDATE with `WHERE status = <from>` so the database enforces this under
+# concurrency.
 ALLOWED_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
-    RunStatus.QUEUED: frozenset({RunStatus.CLAIMED}),
-    RunStatus.CLAIMED: frozenset({RunStatus.RUNNING, RunStatus.FAILED}),
-    RunStatus.RUNNING: frozenset({RunStatus.COMPLETED, RunStatus.FAILED}),
-    RunStatus.COMPLETED: frozenset(),
-    RunStatus.FAILED: frozenset(),
+    RunStatus(src.value): frozenset(RunStatus(t.dst.value) for t in RUN_TRANSITIONS if t.src == src)
+    for src in RunState
 }
 
 # Outcomes that are trustworthy results about the task/agent -> COMPLETED.

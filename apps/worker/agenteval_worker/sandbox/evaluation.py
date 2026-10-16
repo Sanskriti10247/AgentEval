@@ -38,6 +38,7 @@ from agenteval_core.evaluation.checks import EVAL_DIR
 from agenteval_core.evaluation.results import ExecPlan, FileEvidence
 from agenteval_core.evaluation.taxonomy import MAX_SNAPSHOT_BYTES
 from agenteval_core.hashing import sha256_hex
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.schemas.task import validate_relative_path
 from agenteval_worker.sandbox.session import (
     SANDBOX_USER,
@@ -90,11 +91,17 @@ _EVIDENCE = (
 
 
 class SnapshotError(SandboxError):
-    """A workspace snapshot could not be produced or trusted. Never silent."""
+    """A workspace snapshot could not be produced or trusted. Never silent.
+
+    `reason` here is the O3d workspace_capture literal, not a FailureReason:
+    SnapshotError only ever happens on a COMPLETED outcome (A2, an evaluator
+    concern), so it never feeds the attempt's failure_reason. The base
+    class's FailureReason is a placeholder, immediately shadowed below.
+    """
 
     def __init__(self, reason: Literal["too_large", "incomplete", "invalid"], message: str) -> None:
-        super().__init__(f"snapshot {reason}: {message}")
-        self.reason = reason
+        super().__init__(f"snapshot {reason}: {message}", reason=FailureReason.SANDBOX_EXEC_FAILED)
+        self.reason: Literal["too_large", "incomplete", "invalid"] = reason  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -256,9 +263,14 @@ class EvaluationSession(SandboxSession):
         try:
             container = client.containers.create(spec.image, **kwargs)
         except docker.errors.ImageNotFound as exc:
-            raise SandboxError(f"image not found: {spec.image} ({exc.explanation})") from exc
+            raise SandboxError(
+                f"image not found: {spec.image} ({exc.explanation})",
+                reason=FailureReason.SANDBOX_IMAGE_NOT_FOUND,
+            ) from exc
         except docker.errors.DockerException as exc:
-            raise SandboxError(f"docker error: {exc}") from exc
+            raise SandboxError(
+                f"docker error: {exc}", reason=FailureReason.SANDBOX_CREATE_FAILED
+            ) from exc
         session = cls(client, container, max_output_bytes, snapshot)
         try:
             session.start()
@@ -276,12 +288,16 @@ class EvaluationSession(SandboxSession):
         """/workspace := the snapshot, /tmp := empty (C5). Run as uid 1000."""
         wipe = self._exec(["sh", "-c", _WIPE], deadline_s=SETUP_TIMEOUT_S, on_deadline=self.kill)
         if wipe.timed_out or wipe.exit_code != 0:
-            raise SandboxError(f"could not reset the workspace (exit {wipe.exit_code})")
+            raise SandboxError(
+                f"could not reset the workspace (exit {wipe.exit_code})",
+                reason=FailureReason.SANDBOX_EXEC_FAILED,
+            )
         restored = self._tar_in(self.snapshot.data, WORKSPACE, SANDBOX_USER, compressed=True)
         if restored.exit_code != 0:
             raise SandboxError(
                 f"restoring the snapshot failed (exit {restored.exit_code}): "
-                f"{restored.stderr[-300:]!r}"
+                f"{restored.stderr[-300:]!r}",
+                reason=FailureReason.SANDBOX_EXEC_FAILED,
             )
         self._dirty = False
 
@@ -318,7 +334,10 @@ class EvaluationSession(SandboxSession):
                 on_deadline=self.kill,
             )
             if meta.timed_out or meta.exit_code != 0:
-                raise SandboxError(f"could not inspect {path!r} (exit {meta.exit_code})")
+                raise SandboxError(
+                    f"could not inspect {path!r} (exit {meta.exit_code})",
+                    reason=FailureReason.SANDBOX_EXEC_FAILED,
+                )
             kind, *rest = meta.stdout.split()
             if kind == "missing":
                 evidence[path] = FileEvidence(path=path, exists=False)
@@ -337,7 +356,10 @@ class EvaluationSession(SandboxSession):
                         stdout_limit=read_cap,
                     )
                     if result.exit_code != 0 or sha256_hex(raw.data()) != digest:
-                        raise SandboxError(f"reading {path!r} gave inconsistent content")
+                        raise SandboxError(
+                            f"reading {path!r} gave inconsistent content",
+                            reason=FailureReason.SANDBOX_EXEC_FAILED,
+                        )
                     content = raw.data()
                 evidence[path] = FileEvidence(
                     path=path, exists=True, size=size, sha256=digest, content=content
@@ -349,7 +371,10 @@ class EvaluationSession(SandboxSession):
     def _install_eval_files(self, files: dict[str, str]) -> None:
         installed = self._tar_in(build_tar(files, mtime=time.time()), EVAL_DIR, ROOT_USER)
         if installed.exit_code != 0:
-            raise SandboxError(f"installing /eval failed (exit {installed.exit_code})")
+            raise SandboxError(
+                f"installing /eval failed (exit {installed.exit_code})",
+                reason=FailureReason.SANDBOX_EXEC_FAILED,
+            )
         locked, _ = self._run(
             ["sh", "-c", _LOCK_EVAL],
             deadline_s=SETUP_TIMEOUT_S,
@@ -357,9 +382,15 @@ class EvaluationSession(SandboxSession):
             user=ROOT_USER,
         )
         if locked.exit_code != 0:
-            raise SandboxError(f"locking /eval failed (exit {locked.exit_code})")
+            raise SandboxError(
+                f"locking /eval failed (exit {locked.exit_code})",
+                reason=FailureReason.SANDBOX_EXEC_FAILED,
+            )
         verified = self._exec(
             ["sh", "-c", _VERIFY_LOCK], deadline_s=SETUP_TIMEOUT_S, on_deadline=self.kill
         )
         if verified.exit_code != 0:
-            raise SandboxError("/eval is not root-owned and read-only to the candidate")
+            raise SandboxError(
+                "/eval is not root-owned and read-only to the candidate",
+                reason=FailureReason.SANDBOX_EXEC_FAILED,
+            )

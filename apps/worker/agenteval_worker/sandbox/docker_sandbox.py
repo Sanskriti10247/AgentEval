@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 import docker
 import docker.errors
 
+from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.states import Outcome
 from agenteval_worker.sandbox.session import (
     DEADLINE_LABEL,
@@ -69,6 +70,10 @@ class ExecutionResult:
     stderr_truncated: bool
     duration_ms: int
     error_message: str | None = None
+    # Set exactly for a failed outcome (SANDBOX_ERROR here); None for a
+    # successful run. Never inferred from error_message - DockerSandbox.run
+    # maps each failure by its exception type.
+    failure_reason: FailureReason | None = None
 
 
 class DockerSandbox:
@@ -113,7 +118,10 @@ class DockerSandbox:
             if result.timed_out:
                 outcome = Outcome.TIMEOUT
             elif result.exit_code is None:
-                raise SandboxError("could not determine the command's exit code")
+                raise SandboxError(
+                    "could not determine the command's exit code",
+                    reason=FailureReason.SANDBOX_EXEC_FAILED,
+                )
             elif result.exit_code == 0:
                 outcome = Outcome.SUCCESS
             else:
@@ -130,11 +138,17 @@ class DockerSandbox:
                 duration_ms=_elapsed_ms(started),
             )
         except SandboxError as exc:
-            return self._error(started, str(exc))
+            # DockerSandbox maps errors by exception type, never by message
+            # (G15/3.8): a SandboxError already carries its own reason.
+            return self._error(started, str(exc), exc.reason)
         except docker.errors.ImageNotFound as exc:
-            return self._error(started, f"image not found: {spec.image} ({exc.explanation})")
+            return self._error(
+                started,
+                f"image not found: {spec.image} ({exc.explanation})",
+                FailureReason.SANDBOX_IMAGE_NOT_FOUND,
+            )
         except docker.errors.DockerException as exc:
-            return self._error(started, f"docker error: {exc}")
+            return self._error(started, f"docker error: {exc}", FailureReason.SANDBOX_CREATE_FAILED)
         finally:
             if session is not None:
                 session.close()
@@ -160,7 +174,7 @@ class DockerSandbox:
     # -- helpers ----------------------------------------------------------------
 
     @staticmethod
-    def _error(started: float, message: str) -> ExecutionResult:
+    def _error(started: float, message: str, reason: FailureReason) -> ExecutionResult:
         return ExecutionResult(
             outcome=Outcome.SANDBOX_ERROR,
             exit_code=None,
@@ -171,6 +185,7 @@ class DockerSandbox:
             stderr_truncated=False,
             duration_ms=_elapsed_ms(started),
             error_message=message,
+            failure_reason=reason,
         )
 
 
