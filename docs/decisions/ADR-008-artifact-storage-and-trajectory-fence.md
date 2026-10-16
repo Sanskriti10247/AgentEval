@@ -106,7 +106,7 @@ On a shared single host, the API, heartbeat process, worker and Postgres need CP
 - **`SAVE_DEADLINE`, 15 s.**
   - Nothing runs between the rename and the statement except the worker's own scheduling.
   - The worst worker event-loop stall measured in any run was **5.3 s**; 15 s is about three times that.
-  - A save that misses the deadline inserts no row, removes its file and fails as retryable. Missing the deadline costs a retry, never correctness.
+  - A save that misses the deadline inserts no row and removes its file. As with any failed snapshot save, the attempt records `workspace_capture = 'persist_failed'`; missing the deadline never affects correctness.
 - **Sweeper grace, 120 s.**
   - Safety needs grace > `SAVE_DEADLINE` + statement timeout + the timeout overshoot, i.e. about 25 s. At that age, no save can still insert a row pointing at the file.
   - 120 s is about five times that bound. It also covers a `.tmp` whose writer is alive but slow: every write refreshes the mtime, and the slowest write measured was 8.1 s for a whole 16 MiB file.
@@ -116,8 +116,8 @@ On a shared single host, the API, heartbeat process, worker and Postgres need CP
 
 **How the failure cases are handled:**
 
-- **Timeout:** Postgres cancels the statement and rolls back, so no row exists. The writer removes its file. The save fails with a retryable platform error, and the attempt is retried within its pinned budget.
-- **Partial file writes:** bytes only ever go to `<key>.tmp`. The final name appears only after `fsync` and rename, so a reader can never see a partial file. A crash leaves at most a `.tmp`, which the sweeper removes after the grace period. If the sweeper removes a `.tmp` whose writer was stalled for more than 120 s, the writer's rename fails and the save fails as retryable. Every read checks size and SHA-256.
+- **Timeout:** Postgres cancels the statement and rolls back, so no row exists. The writer removes its file. As for every failed snapshot save, the run's outcome is unaffected: the attempt finishes normally with `workspace_capture = 'persist_failed'`, and its evaluation is created as ERROR `capture_persist_failed`, which is not retried.
+- **Partial file writes:** bytes only ever go to `<key>.tmp`. The final name appears only after `fsync` and rename, so a reader can never see a partial file. A crash leaves at most a `.tmp`, which the sweeper removes after the grace period. If the sweeper removes a `.tmp` whose writer was stalled for more than 120 s, the writer's rename fails and the save is recorded as `persist_failed`. Every read checks size and SHA-256.
 - **Orphan cleanup:** unreferenced files come from three places: a crash between the rename and the row, a fenced save whose own delete failed, and a crash between the CANCEL commit and the unlink. All are swept after the grace period. Rows on `ABANDONED` attempts keep their files; they are never graded, and garbage collection stays out of scope.
 - **Cancellation:**
   - Once the flag is visible, the save statement inserts nothing.
@@ -137,7 +137,7 @@ On a shared single host, the API, heartbeat process, worker and Postgres need CP
 | After the rename, before the metadata row | file with no row | sweeper removes unreferenced files older than the grace period |
 | Metadata statement fenced (cancelled, recovered, stale epoch) | 0 rows; the writer removes its file | sweeper, if the removal itself fails |
 | After the metadata row commits | row and file; the attempt is later `ABANDONED` by recovery | kept (never graded); garbage collection is out of scope |
-| Metadata statement times out or misses `SAVE_DEADLINE` | no row; the writer removes its file; retryable failure | sweeper, if the removal itself fails |
+| Metadata statement times out or misses `SAVE_DEADLINE` | no row; the writer removes its file; capture `persist_failed`, evaluation ERROR `capture_persist_failed` | sweeper, if the removal itself fails |
 | Worker killed during the CANCEL call | the server finishes the call atomically (decision C): `CANCELLED`, no row | sweeper removes the files |
 | After CANCEL commits, before the unlink | `CANCELLED`, no row; file left behind | sweeper |
 | Row present, file missing or wrong hash | evaluation becomes a platform error (`artifact_missing`) | none; the row is the evidence |
