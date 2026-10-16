@@ -163,6 +163,22 @@ def reason_for_model_error(kind: ModelErrorKind) -> FailureReason:
     return _MODEL_KIND_REASON[kind]
 
 
+class CancelReason(StrEnum):
+    USER = "user"
+    BATCH = "batch"  # runs only; a batch itself is always cancelled by a user
+
+
+class WorkspaceCapture(StrEnum):
+    """What happened to the workspace snapshot of a FINISHED, completed attempt (O3d)."""
+
+    NOT_NEEDED = "not_needed"
+    STORED = "stored"
+    TOO_LARGE = "too_large"
+    INCOMPLETE = "incomplete"
+    INVALID = "invalid"
+    PERSIST_FAILED = "persist_failed"
+
+
 class EvaluationErrorReason(StrEnum):
     # Not retryable: grading again cannot change the result
     SPEC_INVALID = "spec_invalid"

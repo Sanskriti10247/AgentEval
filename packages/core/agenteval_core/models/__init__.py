@@ -10,6 +10,7 @@ from agenteval_core.models.evaluation import (
 from agenteval_core.models.run import Run, RunAttempt
 from agenteval_core.models.task import Task
 from agenteval_core.models.trajectory import TrajectoryEvent
+from agenteval_core.models.worker import Worker
 
 __all__ = [
     "Agent",
@@ -24,4 +25,5 @@ __all__ = [
     "Score",
     "Task",
     "TrajectoryEvent",
+    "Worker",
 ]

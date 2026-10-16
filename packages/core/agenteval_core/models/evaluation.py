@@ -4,16 +4,20 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -25,6 +29,8 @@ from agenteval_core.evaluation.taxonomy import (
     FailureCategory,
 )
 from agenteval_core.models.base import Base, CreatedAt, NullableJSONB, UUIDPk, sql_values
+from agenteval_core.reliability.policy import MAX_ATTEMPTS_CAP, ErrorKind
+from agenteval_core.reliability.taxonomy import EvaluationErrorReason
 
 
 class Evaluation(UUIDPk, CreatedAt, Base):
@@ -35,6 +41,18 @@ class Evaluation(UUIDPk, CreatedAt, Base):
     __table_args__ = (
         CheckConstraint("repetitions BETWEEN 1 AND 10", name="repetitions"),
         CheckConstraint("length(scoring_config_hash) = 64", name="scoring_config_hash"),
+        # Phase 5: a batch is cancelled by a user; both budgets are pinned at creation.
+        CheckConstraint("cancel_reason IN ('user')", name="cancel_reason"),
+        CheckConstraint(
+            "(cancel_reason IS NULL) = (cancel_requested_at IS NULL)",
+            name="cancel_reason_iff_request",
+        ),
+        CheckConstraint(
+            f"run_max_attempts BETWEEN 1 AND {MAX_ATTEMPTS_CAP}", name="run_max_attempts"
+        ),
+        CheckConstraint(
+            f"eval_max_attempts BETWEEN 1 AND {MAX_ATTEMPTS_CAP}", name="eval_max_attempts"
+        ),
     )
 
     name: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -46,26 +64,40 @@ class Evaluation(UUIDPk, CreatedAt, Base):
     scoring_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     scoring_config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[str | None] = mapped_column(String(16))
+    run_max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
+    eval_max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
 
 
 class AttemptArtifact(UUIDPk, CreatedAt, Base):
     """Opaque bytes captured from an attempt. Never extracted on the host:
-    only streamed into a sandbox's tar."""
+    only streamed into a sandbox's tar. The bytes live either in `content`
+    (Phase 4 rows) or in a file on the artifact volume named by `storage_key`
+    (ADR-008); the row is authoritative either way."""
 
     __tablename__ = "attempt_artifacts"
     __table_args__ = (
         UniqueConstraint("attempt_id", "kind", name="uq_attempt_artifacts_attempt_id_kind"),
         CheckConstraint(f"kind IN ({sql_values(ArtifactKind)})", name="kind"),
         CheckConstraint(f"size_bytes BETWEEN 0 AND {MAX_SNAPSHOT_BYTES}", name="size_bytes"),
-        CheckConstraint("size_bytes = octet_length(content)", name="size_matches_content"),
+        CheckConstraint(
+            "content IS NULL OR size_bytes = octet_length(content)", name="size_matches_content"
+        ),
         CheckConstraint("length(sha256) = 64", name="sha256"),
+        CheckConstraint("num_nonnulls(content, storage_key) = 1", name="one_location"),
     )
 
     attempt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("run_attempts.id"), nullable=False)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    content: Mapped[bytes | None] = mapped_column(LargeBinary)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_key: Mapped[str | None] = mapped_column(String(255))
+    # e.g. the snapshot's normalized_paths; `metadata` is reserved by SQLAlchemy.
+    artifact_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
 
 
 class AttemptEvaluation(UUIDPk, CreatedAt, Base):
@@ -108,6 +140,34 @@ class AttemptEvaluation(UUIDPk, CreatedAt, Base):
             name="passed_iff_success",
         ),
         CheckConstraint("duration_ms >= 0", name="duration_ms"),
+        # Phase 5: grading budget pinned per row; no PENDING row is ever exhausted (G9).
+        CheckConstraint("eval_attempts >= 0", name="eval_attempts"),
+        CheckConstraint(
+            f"max_eval_attempts BETWEEN 1 AND {MAX_ATTEMPTS_CAP}", name="max_eval_attempts"
+        ),
+        CheckConstraint("eval_attempts <= max_eval_attempts", name="eval_budget"),
+        CheckConstraint(
+            "status <> 'PENDING' OR eval_attempts < max_eval_attempts", name="pending_budget"
+        ),
+        CheckConstraint(
+            f"error_reason IN ({sql_values(EvaluationErrorReason)})", name="error_reason_values"
+        ),
+        CheckConstraint(f"error_kind IN ({sql_values(ErrorKind)})", name="error_kind_values"),
+        CheckConstraint("error_kind IS NULL OR status = 'ERROR'", name="error_kind"),
+        CheckConstraint(
+            "error_reason IS NULL OR status IN ('ERROR','PENDING')", name="reason_states"
+        ),
+        Index(
+            "ix_attempt_evaluations_lease",
+            "lease_expires_at",
+            postgresql_where=text("status = 'RUNNING'"),
+        ),
+        Index(
+            "ix_attempt_evaluations_pending",
+            "next_attempt_at",
+            "dispatched_at",
+            postgresql_where=text("status = 'PENDING'"),
+        ),
     )
 
     attempt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("run_attempts.id"), nullable=False)
@@ -124,6 +184,17 @@ class AttemptEvaluation(UUIDPk, CreatedAt, Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Phase 5: grading lease and retry state.
+    worker_id: Mapped[str | None] = mapped_column(String(255))
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    eval_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0")
+    max_eval_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
+    error_reason: Mapped[str | None] = mapped_column(String(32))
+    error_kind: Mapped[str | None] = mapped_column(String(20))
 
 
 class Score(UUIDPk, CreatedAt, Base):
