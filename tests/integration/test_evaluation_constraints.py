@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import func, insert, update
+from sqlalchemy import func, insert, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -110,6 +110,7 @@ async def attempt(sm: SM) -> uuid.UUID:
         status="RUNNING",
         attempt_count=1,
         worker_id="w1",
+        lease_expires_at=text("now() + interval '30 seconds'"),
     )
     return await ok(
         sm,

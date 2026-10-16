@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from agenteval_core.models import Run, RunAttempt
 from agenteval_core.queue.streams import DispatchMessage, RunQueue
 from agenteval_core.reliability.taxonomy import FailureReason
-from agenteval_core.repositories.runs import FinishOutcome, RunRepository
+from agenteval_core.repositories.runs import FinishOutcome, RunRepository, StartOutcome
 from agenteval_core.states import Outcome, RunStatus
 from agenteval_worker.consumer import Consumer
 from agenteval_worker.executor import Executor
@@ -190,8 +190,8 @@ async def test_finish_is_fenced_to_the_owning_worker(
     async with sessionmaker() as s:
         repo = RunRepository(s)
         await repo.claim(run_id, "w1")
-        attempt = await repo.start_attempt(run_id, "w1")
-        assert attempt is not None
+        outcome, attempt = await repo.start_attempt(run_id, "w1")
+        assert outcome is StartOutcome.STARTED and attempt is not None
         await s.commit()
     # Simulate ownership moving away (what Phase 5 lease recovery will do):
     # a takeover is an epoch bump, on both the run and its RUNNING attempt.
@@ -228,8 +228,8 @@ async def test_a_lost_acknowledgement_of_our_own_commit_is_classified_as_success
     async with sessionmaker() as s:
         repo = RunRepository(s)
         await repo.claim(run_id, "w1")
-        attempt = await repo.start_attempt(run_id, "w1")
-        assert attempt is not None
+        outcome, attempt = await repo.start_attempt(run_id, "w1")
+        assert outcome is StartOutcome.STARTED and attempt is not None
         await s.commit()
 
     fields = {k: v for k, v in fake_result().__dict__.items()}
@@ -252,9 +252,10 @@ async def test_start_attempt_requires_the_claiming_worker(
     async with sessionmaker() as s:
         repo = RunRepository(s)
         await repo.claim(run_id, "w1")
-        assert await repo.start_attempt(run_id, "intruder") is None
-        assert await repo.start_attempt(run_id, "w1") is not None
-        assert await repo.start_attempt(run_id, "w1") is None  # already RUNNING
+        assert (await repo.start_attempt(run_id, "intruder"))[0] is StartOutcome.FENCED
+        outcome, attempt = await repo.start_attempt(run_id, "w1")
+        assert outcome is StartOutcome.STARTED and attempt is not None
+        assert (await repo.start_attempt(run_id, "w1"))[0] is StartOutcome.FENCED  # already RUNNING
         await s.commit()
 
 

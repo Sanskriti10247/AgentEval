@@ -11,7 +11,10 @@ from tests.integration.phase5_seed import add_artifact, running_run
 # (constraint, statement that must violate it). The run is RUNNING at epoch 1
 # with its RUNNING attempt; :r and :a are their ids.
 REJECTED = [
-    ("ck_runs_status", "UPDATE runs SET status = 'PAUSED' WHERE id = :r"),
+    (
+        "ck_runs_status",
+        "UPDATE runs SET status = 'PAUSED', lease_expires_at = NULL WHERE id = :r",
+    ),
     (
         "ck_runs_cancel_reason",
         "UPDATE runs SET cancel_reason = 'admin', cancel_requested_at = now() WHERE id = :r",
@@ -35,7 +38,10 @@ REJECTED = [
         "ck_runs_failure_reason_failed",
         "UPDATE runs SET failure_reason = 'claim_abandoned' WHERE id = :r",
     ),
-    ("ck_runs_retrying", "UPDATE runs SET status = 'RETRYING' WHERE id = :r"),
+    (
+        "ck_runs_retrying",
+        "UPDATE runs SET status = 'RETRYING', lease_expires_at = NULL WHERE id = :r",
+    ),
     ("ck_runs_retrying", "UPDATE runs SET next_attempt_at = now() WHERE id = :r"),
     (
         "ck_runs_cancel_reason_iff_request",
@@ -47,6 +53,12 @@ REJECTED = [
         "cancel_reason = 'user' WHERE id = :r",
     ),
     ("ck_runs_cancelled_has_request", "UPDATE runs SET status = 'CANCELLED' WHERE id = :r"),
+    # Step 4: a lease exists exactly while CLAIMED or RUNNING.
+    ("ck_runs_lease", "UPDATE runs SET lease_expires_at = NULL WHERE id = :r"),
+    (
+        "ck_runs_lease",
+        "UPDATE runs SET status = 'QUEUED', lease_epoch = lease_epoch + 1 WHERE id = :r",
+    ),
     ("ck_run_attempts_status", "UPDATE run_attempts SET status = 'LOST' WHERE id = :a"),
     (
         "ck_run_attempts_outcome_iff_finished",
@@ -106,28 +118,36 @@ async def test_run_and_attempt_checks_reject(
 
 ACCEPTED = [
     # R8: RETRYING, no outcome or message on the run (G14); the attempt keeps its reason.
+    # Every exit from RUNNING/CLAIMED clears the lease too (ck_runs_lease, Step 4).
     "UPDATE run_attempts SET status = 'FINISHED', outcome = 'MODEL_ERROR', "
     "failure_reason = 'model_server_error', retryable = true WHERE id = :a; "
-    "UPDATE runs SET status = 'RETRYING', next_attempt_at = now() + interval '2 s' WHERE id = :r",
+    "UPDATE runs SET status = 'RETRYING', next_attempt_at = now() + interval '2 s', "
+    "lease_expires_at = NULL WHERE id = :r",
     # R11 with A4: CANCELLED, request recorded, no outcome.
     "UPDATE runs SET cancel_requested_at = now(), cancel_reason = 'batch' WHERE id = :r; "
     "UPDATE run_attempts SET status = 'CANCELLED', failure_reason = 'cancelled_by_batch', "
     "retryable = false WHERE id = :a; "
-    "UPDATE runs SET status = 'CANCELLED' WHERE id = :r",
+    "UPDATE runs SET status = 'CANCELLED', lease_expires_at = NULL WHERE id = :r",
     # R9/R10 with A3: ABANDONED with lease_expired, then dead-lettered.
     "UPDATE run_attempts SET status = 'ABANDONED', outcome = 'INTERNAL_ERROR', "
     "failure_reason = 'lease_expired', retryable = true WHERE id = :a; "
     "UPDATE runs SET status = 'FAILED', outcome = 'INTERNAL_ERROR', "
-    "dead_letter_reason = 'retries_exhausted' WHERE id = :r",
+    "dead_letter_reason = 'retries_exhausted', lease_expires_at = NULL WHERE id = :r",
     # R7 with a stored capture.
     "UPDATE run_attempts SET status = 'FINISHED', outcome = 'AGENT_FINISHED', "
     "workspace_capture = 'stored' WHERE id = :a; "
-    "UPDATE runs SET status = 'COMPLETED', outcome = 'AGENT_FINISHED' WHERE id = :r",
+    "UPDATE runs SET status = 'COMPLETED', outcome = 'AGENT_FINISHED', "
+    "lease_expires_at = NULL WHERE id = :r",
     # Config failures pair with INTERNAL_ERROR; the legacy reason pairs with any failed outcome.
     "UPDATE run_attempts SET status = 'FINISHED', outcome = 'INTERNAL_ERROR', "
     "failure_reason = 'config_invalid', retryable = false WHERE id = :a",
     "UPDATE run_attempts SET status = 'FINISHED', outcome = 'MODEL_ERROR', "
     "failure_reason = 'unclassified', retryable = false WHERE id = :a",
+    # R1: CLAIMED carries a lease; R7: COMPLETED clears it.
+    "UPDATE runs SET status = 'CLAIMED', lease_epoch = lease_epoch + 1 WHERE id = :r; "
+    "UPDATE run_attempts SET status = 'FINISHED', outcome = 'SUCCESS' WHERE id = :a; "
+    "UPDATE runs SET status = 'COMPLETED', outcome = 'SUCCESS', lease_expires_at = NULL "
+    "WHERE id = :r",
 ]
 
 
@@ -147,7 +167,7 @@ async def test_run_level_failure_reason_on_a_failed_run(engine: AsyncEngine) -> 
             text(
                 "UPDATE runs SET status = 'FAILED', outcome = 'INTERNAL_ERROR', attempt_count = 0, "
                 "failure_reason = 'claim_abandoned', dead_letter_reason = 'retries_exhausted', "
-                "unstarted_claims = 3 WHERE id = :r"
+                "unstarted_claims = 3, lease_expires_at = NULL WHERE id = :r"
             ),
             {"r": run_id},
         )

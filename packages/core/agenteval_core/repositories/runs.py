@@ -81,6 +81,14 @@ class FinishOutcome(StrEnum):
     FENCED = "fenced"  # this worker no longer owns the attempt; nothing was written
 
 
+class StartOutcome(StrEnum):
+    """What start_attempt (R3) did with this call (design §16, 4508 §3.4)."""
+
+    STARTED = "started"  # RUNNING, with attempt A1 inserted
+    CANCELLED = "cancelled"  # R3 lost to a pending cancel instead: R5, no attempt created
+    FENCED = "fenced"  # this worker no longer owns the claim; nothing was written
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
@@ -135,10 +143,12 @@ class RunRepository:
         )
         return list(result.scalars())
 
-    async def claim(self, run_id: uuid.UUID, worker_id: str) -> Run | None:
+    async def claim(self, run_id: uuid.UUID, worker_id: str, *, ttl_s: float = 30.0) -> Run | None:
         """QUEUED -> CLAIMED (R1). Exactly one concurrent caller gets a row
         back. Bumps lease_epoch: this is the fencing token every later write
-        for this claim (start, finish, cancel) must present."""
+        for this claim (start, finish, cancel) must present. Seeds the lease
+        (lease_expires_at, heartbeat_at) so ck_runs_lease holds immediately;
+        the lease keeper takes over renewing it from here (ADR-008 D)."""
         check_transition(RunStatus.QUEUED, RunStatus.CLAIMED)
         stmt = (
             update(Run)
@@ -148,19 +158,31 @@ class RunRepository:
                 worker_id=worker_id,
                 claimed_at=func.now(),
                 lease_epoch=Run.lease_epoch + 1,
+                lease_expires_at=func.now() + timedelta(seconds=ttl_s),
+                heartbeat_at=func.now(),
             )
             .returning(Run)
             .execution_options(synchronize_session=False)
         )
         return (await self._s.execute(stmt)).scalar_one_or_none()
 
-    async def start_attempt(self, run_id: uuid.UUID, worker_id: str) -> RunAttempt | None:
+    async def start_attempt(
+        self, run_id: uuid.UUID, worker_id: str
+    ) -> tuple[StartOutcome, RunAttempt | None]:
         """CLAIMED -> RUNNING and insert attempt N (= new attempt_count), under
-        the run's current lease_epoch (A1, R3)."""
+        the run's current lease_epoch (A1, R3). The guard excludes a pending
+        cancel (G7/3.4): if 0 rows come back and a cancel is pending at our
+        epoch, apply R5 (CLAIMED -> CANCELLED, no attempt) instead of treating
+        it as a fence (design §16; 4508 §3.4)."""
         check_transition(RunStatus.CLAIMED, RunStatus.RUNNING)
         stmt = (
             update(Run)
-            .where(Run.id == run_id, Run.status == RunStatus.CLAIMED, Run.worker_id == worker_id)
+            .where(
+                Run.id == run_id,
+                Run.status == RunStatus.CLAIMED,
+                Run.worker_id == worker_id,
+                Run.cancel_requested_at.is_(None),
+            )
             .values(
                 status=RunStatus.RUNNING,
                 attempt_count=Run.attempt_count + 1,
@@ -171,7 +193,7 @@ class RunRepository:
         )
         row = (await self._s.execute(stmt)).one_or_none()
         if row is None:
-            return None
+            return await self._start_attempt_blocked(run_id, worker_id), None
         attempt_no, epoch = row
         attempt = (
             await self._s.execute(
@@ -188,7 +210,31 @@ class RunRepository:
                 .returning(RunAttempt)
             )
         ).scalar_one()
-        return attempt
+        return StartOutcome.STARTED, attempt
+
+    async def _start_attempt_blocked(self, run_id: uuid.UUID, worker_id: str) -> StartOutcome:
+        """R3 matched 0 rows: either a cancel beat us to it (R5), or we no
+        longer own the claim (fenced). 'Otherwise it was fenced: ack and
+        stop' (design §16)."""
+        stmt = (
+            update(Run)
+            .where(
+                Run.id == run_id,
+                Run.status == RunStatus.CLAIMED,
+                Run.worker_id == worker_id,
+                Run.cancel_requested_at.is_not(None),
+            )
+            .values(
+                status=RunStatus.CANCELLED,
+                lease_epoch=Run.lease_epoch + 1,
+                lease_expires_at=None,
+                finished_at=func.now(),
+            )
+            .returning(Run.id)
+            .execution_options(synchronize_session=False)
+        )
+        cancelled = (await self._s.execute(stmt)).scalar_one_or_none()
+        return StartOutcome.CANCELLED if cancelled is not None else StartOutcome.FENCED
 
     async def finish_attempt(
         self,
@@ -362,6 +408,8 @@ class RunRepository:
                 failure_reason=FailureReason.INTERNAL_INCONSISTENT,
                 dead_letter_reason=DeadLetterReason.NON_RETRYABLE,
                 finished_at=func.now(),
+                # ck_runs_lease: every non-lease exit from CLAIMED/RUNNING clears the lease.
+                lease_expires_at=None,
             )
             .returning(Run.id)
             .execution_options(synchronize_session=False)

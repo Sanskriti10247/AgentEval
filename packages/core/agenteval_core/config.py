@@ -6,6 +6,8 @@ from functools import lru_cache
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from agenteval_core.reliability.fencing import LeaseTiming
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -33,6 +35,25 @@ class Settings(BaseSettings):
     # At drain_timeout - cancel_grace, in-flight agent runs are cancelled
     # (reason worker_shutdown) and get cancel_grace to record and persist.
     worker_cancel_grace_s: int = 20
+
+    # Leases (F7; ADR-008 D). Timing values come from the approved Step 1
+    # plan: ttl 30 s, heartbeat 10 s, self-fence margin 10 s, reconciler tick
+    # 5 s, worker liveness timeout 15 s. lease_timing() builds the validated
+    # dataclass the keeper and the worker's self-fence math both use.
+    lease_ttl_s: float = 30.0
+    heartbeat_s: float = 10.0
+    self_fence_margin_s: float = 10.0
+    reconcile_interval_s: float = 5.0
+    worker_liveness_timeout_s: float = 15.0
+
+    def lease_timing(self) -> LeaseTiming:
+        return LeaseTiming(
+            ttl_s=self.lease_ttl_s,
+            heartbeat_s=self.heartbeat_s,
+            margin_s=self.self_fence_margin_s,
+            reconcile_interval_s=self.reconcile_interval_s,
+            liveness_timeout_s=self.worker_liveness_timeout_s,
+        )
 
     # Agent runtime. The scripted fake provider is the default for dev, CI and
     # tests; real providers are opt-in.

@@ -333,7 +333,7 @@ async def running_attempt(sm: SM, queue: RunQueue, worker_id: str = "w1") -> Run
     async with sm() as s:
         repo = RunRepository(s)
         await repo.claim(run_id, worker_id)
-        attempt = await repo.start_attempt(run_id, worker_id)
+        _, attempt = await repo.start_attempt(run_id, worker_id)
         assert attempt is not None
         await s.commit()
     return attempt
@@ -360,10 +360,18 @@ async def test_writer_is_idempotent_on_retries(sessionmaker: SM, queue: RunQueue
 async def test_writer_is_fenced_to_the_owning_worker(sessionmaker: SM, queue: RunQueue) -> None:
     attempt = await running_attempt(sessionmaker, queue)
     async with sessionmaker() as s:
+        # ADR-008 B: the fence reads only the attempt row's own lease_epoch,
+        # so a takeover is simulated by bumping it directly (what recovery's
+        # A3 does, in the same transaction as the run's own epoch bump).
         await s.execute(
             update(Run)
             .where(Run.id == attempt.run_id)
             .values(worker_id="w2", lease_epoch=Run.lease_epoch + 1)
+        )
+        await s.execute(
+            update(RunAttempt)
+            .where(RunAttempt.id == attempt.id)
+            .values(lease_epoch=RunAttempt.lease_epoch + 1)
         )
         await s.commit()
     with pytest.raises(TrajectoryFenced):
@@ -416,11 +424,19 @@ async def test_losing_ownership_mid_run_stops_the_agent(sessionmaker: SM, queue:
     async with asyncio.timeout(20):
         while not await first_tool_call_recorded():  # noqa: ASYNC110 - polling Postgres
             await asyncio.sleep(0.05)
-    async with sessionmaker() as s:  # ownership moves (what Phase 5 recovery will do)
+    _, [attempt_before], _ = await load(sessionmaker, run_id)
+    async with sessionmaker() as s:  # ownership moves (what Phase 5 recovery will do):
+        # both epochs move together, as recovery's A3 does in one transaction
+        # (ADR-008 B's fence now reads only the attempt row's own epoch).
         await s.execute(
             update(Run)
             .where(Run.id == run_id)
             .values(worker_id="w-other", lease_epoch=Run.lease_epoch + 1)
+        )
+        await s.execute(
+            update(RunAttempt)
+            .where(RunAttempt.id == attempt_before.id)
+            .values(lease_epoch=RunAttempt.lease_epoch + 1)
         )
         await s.commit()
     await asyncio.wait_for(task, 20)

@@ -369,6 +369,39 @@ def test_cancel_token_keeps_the_first_reason() -> None:
     assert token.cancelled and token.reason == "worker_shutdown"
 
 
+def test_cancel_token_deadline_guard_flips_exactly_at_the_fence() -> None:
+    """Design §6 rule 4: the runtime guard also trips from a deadline alone,
+    with a fake clock standing in for monotonic()."""
+    token = CancelToken()
+    now = [100.0]
+    token.set_deadline(120.0, clock=lambda: now[0])
+    now[0] = 119.999
+    assert not token.cancelled
+    assert token.reason is None
+    now[0] = 120.0
+    assert token.cancelled
+    assert token.reason == "lease_lost"
+
+
+async def test_cancel_token_deadline_guard_wakes_an_in_flight_wait() -> None:
+    """Checking `cancelled` past the deadline performs a real cancel(), so
+    anything already racing against wait() unblocks too."""
+    token = CancelToken()
+    now = [0.0]
+    token.set_deadline(1.0, clock=lambda: now[0])
+    waiter = asyncio.ensure_future(token.wait())
+    now[0] = 1.0
+    assert token.cancelled  # the property check performs the real cancel()
+    await asyncio.wait_for(waiter, 1)
+
+
+def test_cancel_token_explicit_cancel_beats_a_later_deadline() -> None:
+    token = CancelToken()
+    token.cancel("worker_shutdown")
+    token.set_deadline(0.0, clock=lambda: 0.0)  # already past
+    assert token.cancelled and token.reason == "worker_shutdown"
+
+
 # -- model behaviour ------------------------------------------------------------------------------
 
 

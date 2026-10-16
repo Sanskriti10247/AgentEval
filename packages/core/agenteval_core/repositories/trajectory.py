@@ -1,9 +1,13 @@
 """Append-only trajectory persistence, fenced to the owning worker.
 
-append_fenced() inserts a batch only while the attempt is still RUNNING and
-its run is RUNNING, owned by this worker, on this attempt number - the same
-fence finish_attempt uses. The run row is locked FOR SHARE for the duration,
-so ownership can't change between the check and the insert.
+ADR-008 B: the fence locks only the attempt row, `FOR SHARE`
+(`id`, `status = 'RUNNING'`, `lease_epoch`), and never locks or reads `runs`.
+Invariant I1 makes this equivalent to the old runs-joined check: while an
+attempt is RUNNING at epoch e, its run is RUNNING at the same epoch e (R3/A1
+create both together, under one epoch; every exit from RUNNING moves the
+epoch or the attempt's status first). Moving the lock off `runs` is what lets
+heartbeats and cancellation stay fast regardless of how many trajectory
+events are being appended (ADR-008's WAL/lock measurements).
 
 Inserts are idempotent on (attempt_id, seq): a retry after an ambiguous
 failure (committed, but the acknowledgement was lost) can't duplicate rows.
@@ -17,9 +21,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agenteval_core.agent.events import TrajectoryEventData
-from agenteval_core.models import Run, RunAttempt, TrajectoryEvent
+from agenteval_core.models import RunAttempt, TrajectoryEvent
 from agenteval_core.models.base import new_id
-from agenteval_core.states import AttemptStatus, RunStatus
+from agenteval_core.states import AttemptStatus
 
 
 class TrajectoryRepository:
@@ -32,16 +36,13 @@ class TrajectoryRepository:
         """Returns False (and writes nothing) if this worker no longer owns
         the attempt. The caller commits."""
         owned = await self._s.execute(
-            select(Run.id)
-            .join(RunAttempt, RunAttempt.run_id == Run.id)
+            select(RunAttempt.id)
             .where(
                 RunAttempt.id == attempt.id,
                 RunAttempt.status == AttemptStatus.RUNNING,
-                Run.status == RunStatus.RUNNING,
-                Run.worker_id == attempt.worker_id,
-                Run.attempt_count == attempt.attempt_no,
+                RunAttempt.lease_epoch == attempt.lease_epoch,
             )
-            .with_for_update(read=True, of=Run)
+            .with_for_update(read=True)
         )
         if owned.scalar_one_or_none() is None:
             return False
