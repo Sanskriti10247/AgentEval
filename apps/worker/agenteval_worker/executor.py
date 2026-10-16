@@ -10,10 +10,20 @@ never change or roll back the attempt; its failures end in its own record.
 
 Postgres decides ownership. The Redis message is acked only after the attempt
 is durably RUNNING in Postgres; from then on Postgres (not the stream's
-pending list) is what future recovery (Phase 5 leases) works from.
+pending list) is what future recovery works from.
+
+Step 4 (ADR-008 D): the run's lease is held from the moment it's claimed
+(`t_sent` seeds its self-stop deadline) until its T-finish call returns,
+through the worker's `LeaseManager`. A `fenced` or expired lease cancels the
+one `CancelToken` shared by this attempt with reason `lease_lost`; the
+executor then makes no further writes at all (T-finish is skipped - the
+attempt's own epoch fencing would refuse it anyway, but this avoids the
+wasted call and the "finish_fenced" noise). A heartbeat reporting a pending
+cancel cancels the same token with the run's own reason ('user' or 'batch').
 """
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import fields
@@ -25,11 +35,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agenteval_core.agent.context import CancelToken
 from agenteval_core.logging import get_logger
-from agenteval_core.models import AgentVersion, RunAttempt, Task
+from agenteval_core.models import AgentVersion, Run, RunAttempt, Task
 from agenteval_core.queue.streams import DispatchMessage, RunQueue
 from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.repositories.agents import AgentVersionRepository
-from agenteval_core.repositories.runs import FinishOutcome, RunRepository
+from agenteval_core.repositories.runs import FinishOutcome, RunRepository, StartOutcome
 from agenteval_core.repositories.tasks import TaskRepository
 from agenteval_core.states import Outcome, status_for
 from agenteval_worker.sandbox.docker_sandbox import ExecutionResult, SandboxSpec
@@ -37,6 +47,7 @@ from agenteval_worker.sandbox.docker_sandbox import ExecutionResult, SandboxSpec
 if TYPE_CHECKING:
     from agenteval_worker.agent_runner import AgentAttemptResult, AgentRunner
     from agenteval_worker.evaluation_runner import EvaluationRunner
+    from agenteval_worker.lease_manager import LeaseManager
 
 log = get_logger(__name__)
 
@@ -50,7 +61,23 @@ SANDBOX_GRACE_S = 60
 TRANSIENT_DB_ERRORS = (OperationalError, InterfaceError, OSError, TimeoutError)
 FINISH_RETRY_BACKOFF_S = (0.2, 0.5, 1.0, 2.0)
 
+DEFAULT_LEASE_TTL_S = 30.0
+DEFAULT_LEASE_MARGIN_S = 10.0
+
 SandboxRunner = Callable[[SandboxSpec], ExecutionResult]
+
+
+class _LeaseSlot:
+    """Per-attempt state the lease callbacks (running on the event loop, not
+    in `handle`'s call stack) need: the shared cancel token, and the attempt
+    id once it exists (there is none yet while the run is still CLAIMED)."""
+
+    __slots__ = ("token", "attempt_id", "released")
+
+    def __init__(self, token: CancelToken) -> None:
+        self.token = token
+        self.released = False
+        self.attempt_id: uuid.UUID | None = None
 
 
 class Executor:
@@ -65,6 +92,10 @@ class Executor:
         *,
         finish_backoff_s: Sequence[float] = FINISH_RETRY_BACKOFF_S,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        lease_manager: "LeaseManager | None" = None,
+        lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
+        lease_margin_s: float = DEFAULT_LEASE_MARGIN_S,
+        kill_by_attempt_label: Callable[[str], int] | None = None,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
@@ -74,6 +105,10 @@ class Executor:
         self._evaluation_runner = evaluation_runner
         self._finish_backoff_s = tuple(finish_backoff_s)
         self._sleep = sleep
+        self._lease_manager = lease_manager
+        self._lease_ttl_s = lease_ttl_s
+        self._lease_margin_s = lease_margin_s
+        self._kill_by_attempt_label = kill_by_attempt_label
         # In-flight agent runs, so shutdown can cancel them cooperatively.
         self._active: dict[uuid.UUID, CancelToken] = {}
 
@@ -91,30 +126,85 @@ class Executor:
         with structlog.contextvars.bound_contextvars(
             run_id=str(msg.run_id), worker_id=self.worker_id
         ):
-            started = await self._claim_and_start(msg)
-            if started is None:
+            claimed = await self._claim(msg)
+            if claimed is None:
                 return
-            task, attempt, version = started
-            with structlog.contextvars.bound_contextvars(
-                task_id=str(task.id), attempt_no=attempt.attempt_no, task_type=task.task_type
-            ):
-                result: ExecutionResult | AgentAttemptResult
-                if task.task_type == "agent":
-                    assert version is not None
-                    result = await self._execute_agent(task, attempt, version)
-                else:
-                    result = await self._execute(task, attempt)
-                outcome = await self._persist(attempt, result)
-                if outcome is FinishOutcome.FINISHED and task.task_type == "agent":
-                    await self._evaluate(task, attempt, result)
+            run, t_sent = claimed
+            slot = _LeaseSlot(CancelToken())
+            if self._lease_manager is not None:
+                # Seeded immediately from the claim's own send time (design
+                # §16): the token self-fences even if every later beat is
+                # lost, late, or the keeper itself is gone.
+                slot.token.set_deadline(t_sent + self._lease_ttl_s - self._lease_margin_s)
+                self._lease_manager.hold(
+                    "run",
+                    str(run.id),
+                    run.lease_epoch,
+                    t_sent,
+                    on_lease_lost=lambda: self._on_lease_lost(slot),
+                    on_cancel_requested=slot.token.cancel,
+                    on_renewed=slot.token.set_deadline,
+                )
+            try:
+                started = await self._start(msg, run)
+                if started is None:
+                    return
+                task, attempt, version = started
+                slot.attempt_id = attempt.id
+                with structlog.contextvars.bound_contextvars(
+                    task_id=str(task.id),
+                    attempt_no=attempt.attempt_no,
+                    task_type=task.task_type,
+                ):
+                    result: ExecutionResult | AgentAttemptResult
+                    if task.task_type == "agent":
+                        assert version is not None
+                        result = await self._execute_agent(task, attempt, version, slot.token)
+                    else:
+                        result = await self._execute(task, attempt)
+                    if slot.token.reason == "lease_lost":
+                        # The lease is gone: no further writes (design §6 rule 3).
+                        # Epoch fencing would refuse T-finish anyway; skipping it
+                        # avoids the call and the "finish_fenced" noise.
+                        log.warning("lease_lost_skip_persist", attempt_id=str(attempt.id))
+                        return
+                    outcome = await self._persist(attempt, result)
+                    # The run is terminal (or RETRYING) now and holds no lease: stop
+                    # renewing before grading, or the next renewal would match 0 rows,
+                    # look like a lost lease, and kill the evaluation container (it
+                    # carries the same agenteval.attempt_id label).
+                    self._release(slot, run)
+                    if outcome is FinishOutcome.FINISHED and task.task_type == "agent":
+                        await self._evaluate(task, attempt, result)
+            finally:
+                self._release(slot, run)
 
-    async def _claim_and_start(
-        self, msg: DispatchMessage
-    ) -> tuple[Task, RunAttempt, AgentVersion | None] | None:
+    def _release(self, slot: _LeaseSlot, run: Run) -> None:
+        if self._lease_manager is not None and not slot.released:
+            slot.released = True
+            self._lease_manager.release("run", str(run.id), run.lease_epoch)
+
+    def _on_lease_lost(self, slot: _LeaseSlot) -> None:
+        """Called from the lease manager's own asyncio tasks, not from
+        `handle`'s call stack. Cancels the shared token (which, for an agent
+        task, makes the runtime stop via its existing mechanism) and, best
+        effort, kills any container already running for this attempt (the
+        only way to interrupt a command task, which has no cancel token of
+        its own to check)."""
+        if slot.released:
+            return  # a beat that raced the release: the attempt is already finished
+        slot.token.cancel("lease_lost")
+        if slot.attempt_id is not None and self._kill_by_attempt_label is not None:
+            asyncio.create_task(
+                asyncio.to_thread(self._kill_by_attempt_label, str(slot.attempt_id))
+            )
+
+    async def _claim(self, msg: DispatchMessage) -> tuple[Run, float] | None:
         assert msg.run_id is not None
+        t_sent = time.monotonic()  # seeds the lease's self-stop deadline (design §16)
         async with self._sm() as s:
             runs = RunRepository(s)
-            run = await runs.claim(msg.run_id, self.worker_id)
+            run = await runs.claim(msg.run_id, self.worker_id, ttl_s=self._lease_ttl_s)
             if run is None:
                 # Another worker won, or the run isn't QUEUED any more: the
                 # message is a duplicate/stale. Harmless: ack and move on.
@@ -124,7 +214,11 @@ class Executor:
                 return None
             await s.commit()
             log.info("run_claimed")
+        return run, t_sent
 
+    async def _start(
+        self, msg: DispatchMessage, run: Run
+    ) -> tuple[Task, RunAttempt, AgentVersion | None] | None:
         try:
             async with self._sm() as s:
                 runs = RunRepository(s)
@@ -137,9 +231,21 @@ class Executor:
                         version = await AgentVersionRepository(s).get(run.agent_version_id)
                     if version is None:
                         raise RuntimeError("agent task run has no agent version")
-                attempt = await runs.start_attempt(run.id, self.worker_id)
-                if attempt is None:
-                    raise RuntimeError("run or task changed underneath the claim")
+                outcome, attempt = await runs.start_attempt(run.id, self.worker_id)
+                if outcome is StartOutcome.FENCED:
+                    # Someone else owns this claim now. "Otherwise it was
+                    # fenced: ack and stop" (design §16).
+                    await s.rollback()
+                    await self._queue.ack(msg.message_id)
+                    log.info("start_fenced")
+                    return None
+                if outcome is StartOutcome.CANCELLED:
+                    # R3 lost to a pending cancel; R5 already ran. No attempt exists.
+                    await s.commit()
+                    await self._queue.ack(msg.message_id)
+                    log.info("run_cancelled_before_start")
+                    return None
+                assert attempt is not None
                 await s.commit()
         except Exception as exc:
             log.exception("start_attempt_failed")
@@ -180,13 +286,12 @@ class Executor:
             )
 
     async def _execute_agent(
-        self, task: Task, attempt: RunAttempt, version: AgentVersion
+        self, task: Task, attempt: RunAttempt, version: AgentVersion, token: CancelToken
     ) -> "ExecutionResult | AgentAttemptResult":
         if self._agent_runner is None:
             return _internal_error(
                 "agent tasks are not enabled on this worker", FailureReason.WORKER_CAPABILITY
             )
-        token = CancelToken()
         self._active[attempt.run_id] = token
         try:
             # Backstop only: the runtime enforces task.timeout_s itself.

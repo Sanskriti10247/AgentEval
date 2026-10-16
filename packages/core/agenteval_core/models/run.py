@@ -128,6 +128,10 @@ class Run(UUIDPk, CreatedAt, Base):
             name="cancelled_has_request",
         ),
         CheckConstraint("attempt_count <= max_attempts", name="attempts"),
+        # A lease exists exactly while the run is CLAIMED or RUNNING (Step 4; migration 0006).
+        CheckConstraint(
+            "(status IN ('CLAIMED','RUNNING')) = (lease_expires_at IS NOT NULL)", name="lease"
+        ),
         Index(
             "ix_runs_lease",
             "lease_expires_at",

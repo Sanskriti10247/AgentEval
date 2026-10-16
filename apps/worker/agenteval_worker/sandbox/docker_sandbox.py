@@ -153,6 +153,27 @@ class DockerSandbox:
             if session is not None:
                 session.close()
 
+    def kill_attempt(self, attempt_id: str) -> int:
+        """Lease lost (design §6 rule 3): kill and remove every container
+        labelled for this attempt, agent or command task alike. Best-effort
+        and idempotent - the container may already be gone, or never have
+        been created. Called from a thread; this worker no longer owns the
+        attempt and makes no further Postgres writes either way."""
+        killed = 0
+        for c in self._client.containers.list(
+            all=True, filters={"label": f"agenteval.attempt_id={attempt_id}"}
+        ):
+            try:
+                c.kill()
+            except docker.errors.APIError:
+                pass
+            try:
+                c.remove(force=True)
+            except docker.errors.APIError:
+                pass
+            killed += 1
+        return killed
+
     def sweep_orphans(self) -> int:
         """Remove managed containers past their deadline label.
 

@@ -300,7 +300,7 @@ async def test_events_are_paged_by_seq(client: httpx.AsyncClient, sessionmaker: 
     async with sessionmaker() as s:
         repo = RunRepository(s)
         await repo.claim(uuid.UUID(run_id), "w1")
-        attempt = await repo.start_attempt(uuid.UUID(run_id), "w1")
+        _, attempt = await repo.start_attempt(uuid.UUID(run_id), "w1")
         await s.commit()
     assert attempt is not None
     events = [TrajectoryEventData(seq=0, step=0, event_type=EventType.RUN_STARTED)] + [
