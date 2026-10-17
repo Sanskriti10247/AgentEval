@@ -174,6 +174,65 @@ async def test_scripted_error_then_success() -> None:
     assert (await call(s)).text == "ok"
 
 
+ATTEMPT_SCRIPT = [
+    {"type": "error", "kind": "overloaded", "attempts": [1]},
+    {"type": "error", "kind": "rate_limited", "attempts": [1, 3]},
+    {"type": "turn", "text": "ok"},
+]
+
+
+def attempt_session(attempt_no: int) -> FakeSession:
+    return FakeProvider().start(
+        model="fake-model",
+        system="sys",
+        tools=TOOLS,
+        task_prompt="t",
+        settings={"script": ATTEMPT_SCRIPT},
+        attempt_no=attempt_no,
+    )
+
+
+async def test_error_step_with_attempts_only_fires_on_those_attempts() -> None:
+    first = attempt_session(1)
+    for kind in (ModelErrorKind.OVERLOADED, ModelErrorKind.RATE_LIMITED):
+        with pytest.raises(ModelError) as exc:
+            await call(first)
+        assert exc.value.kind is kind
+    assert (await call(first)).text == "ok"
+
+    # Attempt 2 is in neither filter: both error steps are skipped.
+    assert (await call(attempt_session(2))).text == "ok"
+
+    # Attempt 3 only sees the second error step.
+    third = attempt_session(3)
+    with pytest.raises(ModelError) as exc:
+        await call(third)
+    assert exc.value.kind is ModelErrorKind.RATE_LIMITED
+    assert (await call(third)).text == "ok"
+
+
+async def test_error_step_without_attempts_applies_to_every_attempt() -> None:
+    for n in (1, 2, 7):
+        s = FakeProvider().start(
+            model="m",
+            system="",
+            tools=TOOLS,
+            task_prompt="t",
+            settings={"script": [{"type": "error", "kind": "overloaded"}]},
+            attempt_no=n,
+        )
+        with pytest.raises(ModelError):
+            await call(s)
+
+
+@pytest.mark.parametrize("attempts", [[], [0], [-1]])
+def test_invalid_attempts_filter_rejected(attempts: list[int]) -> None:
+    with pytest.raises(ValidationError):
+        FakeScript.model_validate(
+            {"script": [{"type": "error", "kind": "overloaded", "attempts": attempts}]}
+        )
+
+
 async def test_delay_is_reported_as_latency() -> None:
     s = session({"type": "turn", "text": "slow", "delay_s": 0.05})
     t0 = time.monotonic()

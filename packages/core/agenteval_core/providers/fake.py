@@ -5,7 +5,13 @@ A script is a list of steps consumed one per next() call:
   {"type": "turn", "text": "...", "tool_calls": [{"name": "read_file", "input": {...}}],
    "stop": "tool_use", "usage": {...}, "delay_s": 0.0,
    "expect_tool_results_contain": ["FAILED"]}
-  {"type": "error", "kind": "overloaded", "retry_after_s": 1.0}
+  {"type": "error", "kind": "overloaded", "retry_after_s": 1.0, "attempts": [1]}
+
+An error step may carry "attempts": [1, ...]: it is only part of the script for
+those attempt numbers (the run attempt, not the in-step model retry). A session
+for any other attempt skips the step as if it were not there, so one agent
+version can fail attempt 1 and succeed on attempt 2. Without it the step
+applies to every attempt.
 
 It is JSON-serializable so an agent version can carry it in model_settings
 ({"script": [...]}) and run end to end with no network and no cost.
@@ -97,6 +103,8 @@ class ErrorStep(_Strict):
     status: int | None = None
     retry_after_s: float | None = Field(default=None, ge=0)
     delay_s: float = Field(default=0.0, ge=0, le=3600)
+    # Only for these run-attempt numbers (None: every attempt).
+    attempts: list[Annotated[int, Field(ge=1)]] | None = Field(default=None, min_length=1)
 
 
 ScriptStep = Annotated[TurnStep | ErrorStep, Field(discriminator="type")]
@@ -117,6 +125,10 @@ class FakeRequest:
     transcript_len: int
 
 
+def _applies(step: TurnStep | ErrorStep, attempt_no: int) -> bool:
+    return not isinstance(step, ErrorStep) or step.attempts is None or attempt_no in step.attempts
+
+
 class FakeSession:
     def __init__(
         self,
@@ -126,6 +138,7 @@ class FakeSession:
         system: str,
         tools: list[ToolSpec],
         task_prompt: str,
+        attempt_no: int = 1,
     ) -> None:
         self.model = model
         self.system = system
@@ -133,7 +146,7 @@ class FakeSession:
         # Neutral, append-only record of the conversation (for assertions).
         self.transcript: list[dict[str, Any]] = [{"role": "user", "text": task_prompt}]
         self.requests: list[FakeRequest] = []
-        self._steps = script.script
+        self._steps = [step for step in script.script if _applies(step, attempt_no)]
         self._cursor = 0
         self._tool_call_seq = 0
         self._pending = PendingToolCalls()
@@ -244,10 +257,16 @@ class FakeProvider:
         tools: list[ToolSpec],
         task_prompt: str,
         settings: dict[str, Any],
+        attempt_no: int = 1,
     ) -> FakeSession:
         script = self._script or FakeScript.model_validate(settings)
         session = FakeSession(
-            script, model=model, system=system, tools=tools, task_prompt=task_prompt
+            script,
+            model=model,
+            system=system,
+            tools=tools,
+            task_prompt=task_prompt,
+            attempt_no=attempt_no,
         )
         self.sessions.append(session)
         return session

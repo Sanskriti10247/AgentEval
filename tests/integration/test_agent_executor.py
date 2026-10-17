@@ -461,12 +461,17 @@ async def test_drain_deadline_cancels_agent_runs_and_records_why(
     stop = asyncio.Event()
     loop = asyncio.create_task(consumer.run(stop))
 
-    async def running() -> bool:
-        run, _, _ = await load(sessionmaker, run_id)
-        return run.status == "RUNNING"
+    async def in_model_call() -> bool:
+        # RUNNING alone only means the attempt row exists: the worker may still be
+        # creating the container (Docker create/start can take over a second, and
+        # that thread cannot be interrupted). The runtime flushes run_started just
+        # before its first model call, so seeing it means the agent really is in
+        # flight, which is the state this test is about.
+        _, _, events = await load(sessionmaker, run_id)
+        return any(e.event_type == "run_started" for e in events)
 
-    async with asyncio.timeout(20):
-        while not await running():  # noqa: ASYNC110 - polling Postgres
+    async with asyncio.timeout(60):
+        while not await in_model_call():  # noqa: ASYNC110 - polling Postgres
             await asyncio.sleep(0.05)
     stop.set()
     await asyncio.wait_for(loop, 20)

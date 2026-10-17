@@ -1,8 +1,8 @@
 # ADR-008: Artifact bytes on a volume, metadata in Postgres; trajectory writes fenced on the attempt row
 
-**Status:** Proposed (Phase 5). Validated in a scratch environment; awaiting approval. Nothing is implemented yet.
+**Status:** Accepted (Phase 5). Validated in a scratch environment first, then implemented in Phase 5 Steps 2 to 7 (see [Implementation](#implementation)). The validation history below is kept as it was written, so some sentences are phrased as proposals.
 
-Related: ADR-002 (Postgres is the source of truth), ADR-006 (evaluation; this ADR would replace its D3 storage choice).
+Related: ADR-002 (Postgres is the source of truth), ADR-006 (evaluation; this ADR replaces its D3 storage choice), [ADR-009](ADR-009-reliability-and-recovery.md) (the reliability design that uses it).
 
 ## Context
 
@@ -128,13 +128,15 @@ A save inserts its metadata row only within `SAVE_DEADLINE` of renaming the file
 
 On a shared single host, the API, heartbeat process, worker and Postgres need CPU priority over sandbox containers. The validation used Docker CPU weights (4× the default) and `nice -10` for the heartbeat and API processes.
 
+`docker-compose.yml` applies the weights: `cpu_shares: 4096` (4× Docker's default of 1024) on `postgres`, `api` and `worker`. The lease keeper and the reconciler run inside the worker container, so they share its weight. Sandbox containers are created by the worker and keep the default 1024. Weights only decide who wins under CPU contention; they reserve nothing on an idle host. The `nice -10` part of the validation setup is not reproduced in compose.
+
 ### Invariants kept
 
 - A `CANCELLED` attempt has no artifact row, no workspace capture and no evaluation.
 - A stale owner cannot save, append, heartbeat or finish. Its attempt row no longer matches (`status`, `lease_epoch`), and a statement that was waiting re-checks the latest row version once the lock is released.
 - Artifacts on `ABANDONED` attempts may remain; they are never graded.
 
-## Timeouts and grace period (proposed values)
+## Timeouts and grace period (values adopted)
 
 | Setting | Proposed | Bounds |
 |---|---|---|
@@ -158,7 +160,7 @@ On a shared single host, the API, heartbeat process, worker and Postgres need CP
   - 120 s is about five times that bound. It also covers a `.tmp` whose writer is alive but slow: every write refreshes the mtime, and the slowest write measured was 8.1 s for a whole 16 MiB file.
   - Sweeps keep running on the existing 300 s orphan-sweep interval.
 - Whole saves (file plus row) took p50 0.5–1.2 s, with a max of **21 s** in the soak with 8 concurrent owners. The file write is not timed out separately: it holds no database lock, and the task's wall-clock timeout bounds a hung disk.
-- These exact values have not been run under load yet. The deadline and grace mechanism itself was tested deterministically with small values. The implementation's tests will re-check the values.
+- These exact values were not run under load in the scratch environment. The deadline and grace mechanism itself is tested deterministically with small values, and startup refuses a grace that is not larger than the deadline plus the statement timeout.
 
 **How the failure cases are handled:**
 
@@ -189,6 +191,19 @@ On a shared single host, the API, heartbeat process, worker and Postgres need CP
 | Row present, file missing or wrong hash | evaluation becomes a platform error (`artifact_missing`) | none; the row is the evidence |
 
 **The sweeper** runs in the reconciler. It deletes only files that no row references and that are older than the grace period. It lists files before reading the keys, and it never deletes a file a row points to.
+
+## Implementation
+
+Implemented in Phase 5 as follows (design notes in `PROGRESS.md`, Steps 2 to 7):
+
+| Part | Step | Where |
+|---|---|---|
+| Attempt-row fence for trajectory appends (B), server-side finish and cancel calls (C) | 2, 3 | migrations `0004`/`0005` (the plpgsql `p5_finish` and `p5_cancel`), `repositories/runs.py` |
+| Lease keeper process and worker self-stop (D) | 4 | `reliability/keeper*.py`, `lease_manager.py` |
+| Reconciler recovery (never waits, never touches artifacts) | 5 | `reconciler.py`, `repositories/recovery.py` |
+| `ArtifactStore`, the save protocol, the sweeper (A, E) | 6 | `agenteval_core/artifacts/`, executor, reconciler step 5 |
+
+Settings keep the values above (`AGENTEVAL_ARTIFACT_INSERT_TIMEOUT_S` 10, `AGENTEVAL_ARTIFACT_SAVE_DEADLINE_S` 15, `AGENTEVAL_ARTIFACT_SWEEP_GRACE_S` 120). The reliability behaviour as a whole is described in [ADR-009](ADR-009-reliability-and-recovery.md).
 
 ## Consequences
 

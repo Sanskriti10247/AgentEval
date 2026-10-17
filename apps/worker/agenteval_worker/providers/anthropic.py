@@ -88,6 +88,7 @@ class AnthropicProvider:
         tools: list[ToolSpec],
         task_prompt: str,
         settings: dict[str, Any],
+        attempt_no: int = 1,  # unused: a real model does not vary by attempt
     ) -> AnthropicSession:
         caps = ANTHROPIC_MODELS.get(model)
         if caps is None:

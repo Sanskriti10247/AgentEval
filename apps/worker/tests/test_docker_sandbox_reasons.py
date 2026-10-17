@@ -76,7 +76,7 @@ def test_exit_code_none_is_an_exec_failure(monkeypatch: pytest.MonkeyPatch) -> N
         def exec_until_deadline(self, command: list[str], timeout_s: float) -> Any:
             return Result()
 
-        def oom_killed(self) -> bool:
+        def oom_killed(self, *, settle_s: float = 0.0) -> bool:
             return False
 
         def close(self) -> None:
@@ -108,7 +108,7 @@ def test_success_carries_no_failure_reason(monkeypatch: pytest.MonkeyPatch) -> N
         def exec_until_deadline(self, command: list[str], timeout_s: float) -> Any:
             return Result()
 
-        def oom_killed(self) -> bool:
+        def oom_killed(self, *, settle_s: float = 0.0) -> bool:
             return False
 
         def close(self) -> None:

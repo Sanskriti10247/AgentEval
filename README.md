@@ -2,20 +2,21 @@
 
 A platform for running, observing, evaluating and benchmarking AI agents inside controlled execution environments.
 
-> **Status: Phase 4 complete (evaluation and benchmark evaluations).** Two kinds of task run through the same pipeline:
+> **Status: Phase 5 complete (reliability and recovery).** Two kinds of task run through the same pipeline:
 >
 > - **Command tasks** (the S1 slice) run one command in a locked-down Docker sandbox.
 > - **Agent tasks** give instructions to an agent: a hand-written loop that calls a model and uses six sandboxed tools, within step, token, cost and time limits. Every model call and tool call is recorded as a trajectory.
 >
-> Phase 4 adds **objective grading**. An agent task can carry a hidden evaluation spec, which is graded after the attempt in a fresh, hardened evaluation container. Each attempt gets a failure category and a transparent score. **Benchmark evaluations** run an agent version over a frozen dataset, then summarise and compare the results.
+> **Objective grading (Phase 4).** An agent task can carry a hidden evaluation spec, which is graded after the attempt in a fresh, hardened evaluation container. Each attempt gets a failure category and a transparent score. **Benchmark evaluations** run an agent version over a frozen dataset, then summarise and compare the results.
+>
+> **Reliability (Phase 5).** Runs have budgeted, retried attempts. Workers hold fenced leases renewed by a separate heartbeat process, and a reconciler in every worker recovers crashed workers, lost messages and stuck evaluations. Runs and batches can be cancelled, failed runs are dead-lettered (`FAILED` plus a `dead_letter_reason`) and can be replayed, and workspace snapshots live on a volume. See [Failure handling](#failure-handling) and [ADR-009](docs/decisions/ADR-009-reliability-and-recovery.md).
 >
 > The default model provider is a deterministic scripted fake. Real Anthropic models are **opt-in**.
 >
 > **Not built yet:**
 >
-> - **Phase 5:** attempt retries, leases and heartbeats, recovery of stuck evaluations, the cancel API, dead-letter handling.
 > - **Phase 6:** metrics and tracing.
-> - **Phase 7:** performance and throughput benchmarks of the platform itself (distinct from Phase 4's benchmark evaluations, which measure agents).
+> - **Phase 7:** performance and throughput benchmarks of the platform itself (distinct from Phase 4's benchmark evaluations, which measure agents). No performance numbers are claimed anywhere in this repository yet.
 > - **Phase 8:** authentication, rate limiting, the web UI.
 > - **Deferred:** rescoring through the API, and LLM-as-judge.
 
@@ -42,11 +43,12 @@ client ──GET /api/v1/runs/…, /evaluations/…──► api ──► Postg
 
 - **Modular monolith + workers.** A single domain package, `agenteval_core`, is used by two process types, `api` and `worker` (ADR-004).
 - **Postgres is authoritative.** Redis only delivers run ids, and every state change is a guarded `UPDATE` (ADR-002).
-- **Redis Streams** handle dispatch. Duplicate messages are harmless because the claim is conditional (ADR-001).
+- **Redis Streams** handle dispatch (runs on `runs.dispatch`, gradings on `evaluations.dispatch`). Duplicate or lost messages are harmless: the claim is conditional and the reconciler republishes (ADR-001).
 - **One Docker container per attempt**, with no network, resource limits, a read-only rootfs and a non-root user (ADR-003).
 - **The agent runtime is hand-written,** not a framework. It is provider-neutral and lives in core (ADR-005).
 - **Evaluation is a separate record, written after the attempt is durable,** and graded in a fresh hardened container. It never changes the run's outcome (ADR-006).
 - **Hidden evaluation data never leaves the evaluator.** Specs are write-only, and every API response goes through one public projection (ADR-007).
+- **Every write by a lease owner is fenced** by an epoch, and a reconciler in every worker recovers what crashes leave behind (ADR-008, ADR-009).
 
 ### Agent runs
 
@@ -99,8 +101,10 @@ These are two separate columns, because they answer two separate questions.
 | `QUEUED` | persisted, waiting for a worker |
 | `CLAIMED` | exactly one worker owns it (its conditional `UPDATE` won) |
 | `RUNNING` | an attempt is executing |
+| `RETRYING` | the last attempt failed with a retryable reason and budget is left; waiting for its backoff |
 | `COMPLETED` | the platform produced a **trustworthy outcome** (the task may still have failed) |
-| `FAILED` | the platform **could not** produce a trustworthy outcome |
+| `FAILED` | the platform **could not** produce a trustworthy outcome (and, if `dead_letter_reason` is set, will not retry it; it can be replayed) |
+| `CANCELLED` | a cancel request won: no outcome, no evaluation |
 
 | `outcome` | Task type | Meaning | Status |
 | --- | --- | --- | --- |
@@ -117,11 +121,37 @@ These are two separate columns, because they answer two separate questions.
 
 **`COMPLETED` never means the task was solved.** It means the result is attributable to the task or the agent. Whether an agent actually solved its task is decided by the [evaluation](#evaluation), recorded separately from the run.
 
-`FAILED` outcomes are platform faults, so the task was never fairly tested; they are the only ones Phase 5 will make retryable.
+`FAILED` outcomes are platform faults, so the task was never fairly tested; they are the only ones that are retried (and only when the failure reason is retryable). A `COMPLETED` outcome is never retried.
 
 The mapping lives in one pure function, `states.status_for()`, and the database enforces it with CHECK constraints.
 
-Legal transitions: `QUEUED → CLAIMED → RUNNING → COMPLETED | FAILED`, plus `CLAIMED → FAILED` when an attempt can't be started.
+Legal transitions (the full table with transition codes is in [ADR-009](docs/decisions/ADR-009-reliability-and-recovery.md)):
+
+```text
+QUEUED ─► CLAIMED ─► RUNNING ─► COMPLETED
+  ▲          │          │ ├────► FAILED ──replay──► QUEUED
+  │          │          │ └────► RETRYING ─(backoff)─► QUEUED
+  └──────────┘          └──────► CANCELLED   (also from QUEUED, CLAIMED, RETRYING)
+ (claim lease expired)
+```
+
+`CLAIMED → QUEUED` happens when a claim's lease expires before an attempt starts (at most 3 times, then `FAILED` with `claim_abandoned`). `CLAIMED → FAILED` also happens when the run or task is inconsistent at claim time.
+
+## Failure handling
+
+The full design, the transition tables and the failure-semantics table are in [ADR-009](docs/decisions/ADR-009-reliability-and-recovery.md). In short:
+
+- **Postgres decides; Redis only delivers ids.** Every state change is one guarded `UPDATE` or one server-side function call. A duplicate message, a stale worker or an overlapping reconciler can only be refused.
+- **Attempts and retries.** A run has an attempt budget (`max_attempts`, 1 to 10, default 3). An attempt that fails with a *retryable* reason (transient model errors, sandbox faults, worker shutdown, a lost lease) goes `RETRYING`, waits `min(2 s × 2^(n-1), 60 s) × U(0.8, 1.2)`, and becomes a new attempt. Model calls are also retried inside a step. Retryability comes from a closed enum of failure reasons, never from error text. Completed outcomes (the agent finished, hit a limit, was refused, timed out) are never retried.
+- **Leases and fencing.** A claim sets a lease and bumps `lease_epoch`. A separate *lease keeper* process renews the worker's leases. If renewals stop, the worker stops itself shortly before the lease can expire, and every write a stale owner attempts (heartbeat, trajectory, artifact, finish) matches zero rows once recovery has bumped the epoch.
+- **The reconciler** runs in every worker, one advisory lock per step. It abandons and retries runs whose lease expired (worker crash), requeues claims that never started, republishes `QUEUED` runs and due retries, reclaims pending stream entries, recovers expired and missing evaluations, marks silent workers lost, trims the streams and sweeps orphaned containers and artifact files.
+- **Cancellation.** `POST /runs/{id}/cancel` cancels a queued or retrying run at once; a claimed or running run is flagged and its worker stops it on the next lease beat. Cancelling and finishing race deterministically: if the finish committed first the API answers 409 and nothing changes. A cancelled attempt has no evaluation and no artifact.
+- **Dead letters and replay.** A run that fails non-retryably, or exhausts its budget, is `FAILED` with `dead_letter_reason` (`non_retryable` or `retries_exhausted`). `GET /runs?dead_letter=true` lists them and `POST /runs/{id}/replay` gives one more attempts. History is kept.
+- **Evaluation reliability.** Grading has its own budget (`max_eval_attempts`), lease and retries. A grading failure never touches the attempt or its trajectory; a worker crash during grading, or between finishing an attempt and recording its evaluation, is recovered by the reconciler. Snapshots are files on a shared volume with a metadata row, so any worker can grade any attempt.
+- **Guarantees, and their limit.** Execution is **at least once**: a recovered attempt re-runs the agent from the start, so model calls are paid for again. Results are recorded **once**, because of the fencing. Recovery takes about one lease TTL (30 s by default).
+- **CPU priority.** `docker-compose.yml` gives `postgres`, `api` and `worker` a `cpu_shares` weight of 4096 (four times Docker's default of 1024) so that, on a busy single host, sandbox containers cannot starve heartbeats and cancellations (ADR-008, deployment note). Sandbox containers keep the default weight. Weights only matter under contention.
+
+Settings are listed in [`.env.example`](.env.example) and in ADR-009.
 
 ## Local setup
 
@@ -361,22 +391,29 @@ ANTHROPIC_API_KEY=sk-ant-...                # passed to the worker container onl
 packages/core/agenteval_core/
   config, db, states (state machine), hashing, logging (with secret redaction)
   models/, schemas/, repositories/, services/, queue/
+  reliability/  state machines, failure taxonomy, retry policy and backoff, lease timing,
+                lease keeper process
+  artifacts/    ArtifactStore (snapshot files on a volume; metadata row in Postgres)
   agent/        runtime loop, limits, context, events, prompts, pricing, retry policy
   providers/    ModelProvider protocol, FakeProvider, Anthropic settings (no SDK here)
   tools/        Tool contract, ToolSet/registry, the six tools, Workspace protocol
   evaluation/   pure grading domain: spec, checks (plan/judge), matchers, parsers,
                 integrity, metrics, classify, scoring, stats, public (the D11 projection)
 packages/core/migrations/       Alembic: 0001 (tasks, runs, attempts), 0002 (agent runtime),
-                                0003 (datasets, evaluations, artifacts, attempt evaluations, scores)
+                                0003 (datasets, evaluations, artifacts, attempt evaluations, scores),
+                                0004-0009 (reliability: leases, failure reasons, budgets, worker stop
+                                reasons, evaluation leases, replays)
 apps/api/agenteval_api/         FastAPI app, deps, error mapping (sanitised 422s), routes/
 apps/worker/agenteval_worker/   main (signals, drain), consumer, executor, agent_runner,
-                                evaluation_runner, trajectory writer,
+                                evaluation_runner, reconciler, lease_manager, trajectory writer,
                                 sandbox/ (session, evaluation, workspace), providers/
 infrastructure/docker/          api, worker and sandbox Dockerfiles
 tests/integration/              testcontainers Postgres 16 + Redis 7 (real migrations)
 tests/e2e/                      against the running compose stack (incl. Phase 4 scenarios)
 docs/architecture/, docs/api/   evaluation architecture and API reference
-docs/decisions/                 ADR-001 … ADR-007
+docs/decisions/                 ADR-001 … ADR-009
+docker-compose.yml              the dev stack (CPU weights, artifact volume)
+docker-compose.e2e.yml          short lease timings, applied by `make e2e`
 ```
 
 ## Testing
@@ -384,7 +421,7 @@ docs/decisions/                 ADR-001 … ADR-007
 ```bash
 make test        # unit + integration + real-Docker tests (no network, no API key)
 make test-unit   # no Docker needed
-make e2e         # needs `make up && make migrate`
+make e2e         # needs `make up && make migrate`; recreates the worker with short lease timings
 make lint        # ruff + mypy
 ```
 
@@ -408,12 +445,23 @@ The standard suite uses only the fake provider and makes no real model calls. It
 - **API tests:** datasets, idempotent batches, results, summary and compare, plus the D11 response-model snapshot and route sweep.
 - **E2E benchmark scenarios** (S1–S9) on the running stack.
 
+**Phase 5 tests:**
+
+- **Unit tests:** the state-machine tables, failure taxonomy and its CHECK lists, retry policy, backoff, lease timing and the keeper protocol.
+- **Integration tests** (real Postgres, Redis and Docker): every transition and constraint, fencing of stale owners, lock behaviour (recovery never waits), each reconciler step, a worker killed mid-run and recovered by another, artifact save and sweep races, evaluation recovery, and the cancel, replay, run-listing and budget APIs.
+- **E2E reliability scenarios** (`tests/e2e/test_reliability_e2e.py`) on the compose stack: worker SIGKILL mid-run and mid-grading, a transient model failure retried with backoff, run and batch cancellation, dead letter and replay, and duplicate dispatch.
+
 **E2E configuration:**
+- **Short lease timings.** `make e2e` runs `docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --no-deps --wait worker` first, so the worker uses a 15 s lease, 2 s heartbeat and 1 s reconcile tick (`docker-compose.e2e.yml`, values that pass startup validation). The crash scenarios then recover in seconds, and the older scenarios behave the same. Those timings are only for this suite: run `make up` (or `docker compose up -d worker`) afterwards to go back to the 30 s defaults. The crash scenarios call `docker compose kill -s SIGKILL worker` and `docker compose up -d worker` with both files, so the timings survive the restart.
+- **Redis.** The duplicate-dispatch scenario also needs Redis, read from `AGENTEVAL_E2E_REDIS_URL` (default `redis://127.0.0.1:56379/0`).
 - The E2E suite reads `AGENTEVAL_E2E_URL` (default `http://localhost:8000`).
 - The invariant scenario also reads `AGENTEVAL_E2E_DATABASE_URL` (default `postgresql://agenteval:agenteval@127.0.0.1:55432/agenteval`), through a **SELECT-only** probe. It is skipped if the database is unreachable.
 - A full `make e2e` takes a few minutes and needs a Docker host that isn't starved of memory.
 
-**Known flaky test:** `tests/integration/test_agent_executor.py::test_drain_deadline_cancels_agent_runs_and_records_why` is timing-sensitive. Its 1 s cancel grace races Docker teardown on a busy host, so it fails intermittently; it fails at the Phase 3 code too. It has been left unchanged so far.
+**Timing-sensitive tests, and how they are made deterministic:** three tests that used to fail intermittently now wait for the condition they assert instead of racing it.
+- `test_backstop_kills_the_container_if_timeout_never_fires` waits for the daemon to report the killed container as not running (`docker kill` only delivers the signal).
+- `test_memory_limit_oom` is fixed in the code: after an exec exits 137 the sandbox waits (up to 3 s) for Docker to record `OOMKilled`, so a real OOM kill is no longer reported as `oom_killed=false`.
+- `test_drain_deadline_cancels_agent_runs_and_records_why` starts its drain only once the agent is really in its first model call (the `run_started` event), not as soon as the attempt row exists while the container is still being created.
 
 The S1 tests from the slice still run unchanged: state machine, idempotency, claim races, fencing, sandbox controls, the command-task E2E.
 
@@ -444,27 +492,27 @@ This is a **research and portfolio sandbox, not a hardened multi-tenant security
 
 ## Known limitations (by design; fixed in the phase noted)
 
-- **Worker crash mid-run:** the run stays `RUNNING` (its trajectory so far is kept). There are no leases or heartbeats yet (Phase 5).
-- **No automatic re-dispatch** if `XADD` fails. The client must retry with the same `Idempotency-Key` (a reconciler comes in Phase 5).
-- **A worker crash between reading a message and acking it** leaves the message in the stream's pending list, with no reclaim yet (Phase 5).
-- **Retries:** model calls are retried within a step (Phase 3), but **attempts** are never retried, and there is no cancel API or dead-letter handling (Phase 5). Phase 3's only cancellation trigger is worker shutdown.
-- **If Postgres is unavailable when the result is persisted,** the result is logged but lost, and the run stays `RUNNING` (Phase 5).
+- **Reliability scope (Phase 5):**
+  - **At-least-once execution.** A recovered or retried attempt re-runs the agent from the start (model calls are paid for again). Only the recorded result is exactly-once.
+  - **Single host.** Container kills, the orphan sweeps and the artifact volume assume one Docker daemon, and the artifact store is a local named volume shared by workers on that host. Several hosts would need an object store behind `ArtifactStore` and per-host sweeps.
+  - **Recovery needs a live worker,** because the reconciler runs inside the workers. Recovery takes about one lease TTL (30 s by default); a cancel of a running run takes up to one heartbeat (10 s) plus the runtime's next check.
+  - **Failure handling is tested, not load-tested.** Behaviour under sustained load, many workers and throughput are Phase 7 and nothing about them is claimed.
+  - **A batch created without `Idempotency-Key`** whose dispatch fails isn't re-dispatched by the client, but the reconciler republishes its `QUEUED` runs.
+- **No authentication or rate limiting (Phase 8).** Compose binds every port to `127.0.0.1`. No web UI yet (Phase 8).
+- **No metrics or tracing (Phase 6).** Observability is structured JSON logs (with `run_id`, `task_id`, `attempt_no`, `worker_id`), the trajectory, and the run, attempt, evaluation and `workers` rows.
 - **Agent runs:**
   - Budgets are checked between model calls (the worst-case overshoot is one call).
   - Model calls are non-streaming.
   - Costs are list-price estimates (no batch or volume discounts, 5-minute cache writes).
   - A tool that leaves a process holding stdout takes about 2 s longer (Docker's stream drain).
-- **Observability:** structured JSON logs (with `run_id`, `task_id`, `attempt_no`, `worker_id`) and the trajectory. No metrics or tracing yet (Phase 6).
 - **File mtimes (decided in Phase 4, C8):** agent-task files and tool writes use real mtimes. S1 command-task files deliberately keep `tar`'s mtime 0, so S1 execution is unchanged; a command task using `make`, or anything else that compares timestamps, could still misbehave.
 - **Evaluation (Phase 4):**
   - **No rescoring endpoint and no re-running of checks** (deferred; the score storage already supports rescoring).
-  - **No recovery yet (Phase 5).** A worker crash between an attempt's commit and its evaluation record leaves no evaluation. A crash during grading leaves it PENDING or RUNNING, and that batch never reports `complete`. Shutdown during grading marks it ERROR on a best-effort basis.
   - **Mutable image tags.** Evaluation containers use the task's image *tag*. The agent's resolved image ID is recorded, but grading isn't verified against it.
   - **pytest checks fail closed** if the image has no pytest (recorded as `tests_failed`).
   - **Indirect disclosure.** Public per-check scores and positions reveal how many hidden tests and checks exist (not model-visible).
   - **Specs are write-only,** even for their author.
   - **Summaries are computed in memory** over at most 1000 runs per batch.
-  - **A batch created without `Idempotency-Key`** whose dispatch fails can't be re-dispatched.
   - **No LLM-as-judge** (deferred).
 
 ## Deviations from the approved plan (found during implementation)

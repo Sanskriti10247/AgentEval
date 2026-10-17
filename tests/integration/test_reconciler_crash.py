@@ -54,12 +54,18 @@ class NoDelayFake(FakeProvider):
         tools: list[ToolSpec],
         task_prompt: str,
         settings: dict[str, Any],
+        attempt_no: int = 1,
     ) -> FakeSession:
         fast = {
             "script": [{**step, "delay_s": 0.0} for step in settings["script"]],
         }
         return super().start(
-            model=model, system=system, tools=tools, task_prompt=task_prompt, settings=fast
+            model=model,
+            system=system,
+            tools=tools,
+            task_prompt=task_prompt,
+            settings=fast,
+            attempt_no=attempt_no,
         )
 
 

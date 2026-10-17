@@ -1,0 +1,21 @@
+# Short lease timings for the end-to-end suite (`make e2e` applies this file on
+# top of docker-compose.yml; see the README, "Testing"). Never use these in a
+# real deployment: a 15 s lease is only safe on an idle machine.
+#
+# Why: the reliability scenarios kill a worker and wait for recovery, which takes
+# one lease ttl plus a reconcile tick. With the defaults (30 s) every such
+# scenario would wait over a minute.
+#
+# The values must pass LeaseTiming.validate():
+#   heartbeat (2) < ttl - margin (10)     margin (5) >= 2 x reconcile (1)
+#   liveness (8) < ttl - margin (10)
+# The ttl stays large enough that a healthy worker renews many times per lease
+# (every 2 s against 15 s), so the 31 older scenarios behave exactly as before.
+services:
+  worker:
+    environment:
+      AGENTEVAL_LEASE_TTL_S: "15"
+      AGENTEVAL_HEARTBEAT_S: "2"
+      AGENTEVAL_SELF_FENCE_MARGIN_S: "5"
+      AGENTEVAL_RECONCILE_INTERVAL_S: "1"
+      AGENTEVAL_WORKER_LIVENESS_TIMEOUT_S: "8"
