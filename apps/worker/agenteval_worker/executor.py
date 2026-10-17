@@ -37,8 +37,11 @@ from agenteval_core.agent.context import CancelToken
 from agenteval_core.artifacts import ArtifactStore
 from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, Run, RunAttempt, Task
+from agenteval_core.observability import metrics as prom
 from agenteval_core.queue.streams import DispatchMessage, RunQueue
+from agenteval_core.reliability.policy import RunDecision
 from agenteval_core.reliability.taxonomy import FailureReason, WorkspaceCapture
+from agenteval_core.reliability.transitions import RunState
 from agenteval_core.repositories.agents import AgentVersionRepository
 from agenteval_core.repositories.artifacts import ArtifactRepository, SaveResult
 from agenteval_core.repositories.runs import FinishOutcome, RunRepository, StartOutcome
@@ -136,6 +139,10 @@ class Executor:
         return len(self._active)
 
     async def handle(self, msg: DispatchMessage) -> None:
+        with prom.inflight("run"):  # includes the attempt's inline grading
+            await self._handle(msg)
+
+    async def _handle(self, msg: DispatchMessage) -> None:
         if msg.run_id is None:
             log.warning("malformed_message", message_id=msg.message_id)
             await self._queue.ack(msg.message_id)
@@ -193,7 +200,7 @@ class Executor:
                         # graded); an orphan file is the sweeper's.
                         log.warning("lease_lost_skip_persist", attempt_id=str(attempt.id))
                         return
-                    outcome = await self._persist(attempt, result)
+                    outcome = await self._persist(attempt, result, cancel_reason=slot.token.reason)
                     # The run is terminal (or RETRYING) now and holds no lease: stop
                     # renewing before grading, or the next renewal would match 0 rows,
                     # look like a lost lease, and kill the evaluation container (it
@@ -219,8 +226,11 @@ class Executor:
             log.warning("malformed_message", message_id=msg.message_id, stream=queue.stream)
             await queue.ack(msg.message_id)
             return
-        with structlog.contextvars.bound_contextvars(
-            evaluation_id=str(msg.evaluation_id), worker_id=self.worker_id
+        with (
+            prom.inflight("evaluation"),
+            structlog.contextvars.bound_contextvars(
+                evaluation_id=str(msg.evaluation_id), worker_id=self.worker_id
+            ),
         ):
             await self._evaluation_runner.grade(
                 msg.evaluation_id, acknowledge=lambda: queue.ack(msg.message_id)
@@ -282,6 +292,9 @@ class Executor:
                 return None
             await s.commit()
             log.info("run_claimed")
+        prom.run_step("R1")
+        if run.attempt_count == 0:  # a retry's wait is its backoff, not queueing
+            prom.queue_wait_since(run.created_at)
         return run, t_sent
 
     async def _start(
@@ -310,6 +323,7 @@ class Executor:
                 if outcome is StartOutcome.CANCELLED:
                     # R3 lost to a pending cancel; R5 already ran. No attempt exists.
                     await s.commit()
+                    prom.run_decided("R5", "worker", RunState.CANCELLED)
                     await self._queue.ack(msg.message_id)
                     log.info("run_cancelled_before_start")
                     return None
@@ -321,6 +335,7 @@ class Executor:
             await self._queue.ack(msg.message_id)
             return None
 
+        prom.run_step("R3")
         await self._queue.ack(msg.message_id)
         log.info("attempt_started", attempt_no=attempt.attempt_no)
         return task, attempt, version
@@ -378,7 +393,11 @@ class Executor:
             self._active.pop(attempt.run_id, None)
 
     async def _persist(
-        self, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
+        self,
+        attempt: RunAttempt,
+        result: "ExecutionResult | AgentAttemptResult",
+        *,
+        cancel_reason: str | None = None,
     ) -> FinishOutcome:
         """T-finish (Step 3): calls finish_attempt (p5_finish), retrying a
         transient DB error with backoff - a CHECK violation or any other
@@ -394,6 +413,7 @@ class Executor:
                         return outcome
                     await s.commit()
                     cancelled_keys = repo.cancelled_storage_keys
+                    decision = repo.finish_decision
                 break
             except TRANSIENT_DB_ERRORS as exc:
                 if try_no == len(self._finish_backoff_s):
@@ -409,6 +429,7 @@ class Executor:
                 # recovery. Log what we had so it's at least observable.
                 log.exception("persist_failed", outcome=result.outcome, exit_code=result.exit_code)
                 return FinishOutcome.FENCED
+        self._record_finish(outcome, decision, result, cancel_reason)
         log.info(
             "run_finished",
             finish_outcome=outcome,
@@ -423,6 +444,36 @@ class Executor:
         for key in cancelled_keys:
             await self._unlink(key)
         return outcome
+
+    @staticmethod
+    def _record_finish(
+        outcome: FinishOutcome,
+        decision: RunDecision | None,
+        result: "ExecutionResult | AgentAttemptResult",
+        cancel_reason: str | None,
+    ) -> None:
+        """Metrics for a committed T-finish, from values already in hand. A
+        cancel that won the race (CANCELLED) is R11 with no outcome."""
+        try:
+            if decision is None:
+                return
+            terminal_outcome = (
+                result.outcome if decision.status in (RunState.COMPLETED, RunState.FAILED) else None
+            )
+            dead = decision.dead_letter_reason
+            prom.run_decided(
+                decision.code,
+                "worker",
+                decision.status,
+                terminal_outcome,
+                dead_letter_reason=dead.value if dead is not None else None,
+                cancel_reason=cancel_reason,
+            )
+            if outcome is FinishOutcome.FINISHED:
+                prom.run_duration_ms(result.outcome, result.duration_ms)
+                prom.attempt_failed(getattr(result, "failure_reason", None))
+        except Exception as exc:
+            log.warning("metric_failed", metric="record_finish", error_type=type(exc).__name__)
 
     async def _save_workspace(
         self, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
@@ -440,6 +491,7 @@ class Executor:
         snapshot = result.snapshot
         capture = WorkspaceCapture.PERSIST_FAILED
         if self._artifacts is None:
+            prom.artifact_save("failed")
             log.error("artifact_store_missing", attempt_id=str(attempt.id))
         else:
             try:
@@ -453,6 +505,7 @@ class Executor:
                         insert_timeout_s=self._artifact_insert_timeout_s,
                         deadline_s=self._artifact_save_deadline_s,
                     )
+                    prom.artifact_save(saved.value)
                     if saved is SaveResult.STORED:
                         await s.commit()
                         capture = WorkspaceCapture.STORED
@@ -461,6 +514,7 @@ class Executor:
             except Exception as exc:
                 # A failed commit is ambiguous, so the file is left to the sweeper
                 # (it never deletes a referenced one).
+                prom.artifact_save("failed")
                 log.warning("artifact_commit_failed", error_type=type(exc).__name__)
         return replace(result, workspace_capture=capture, snapshot=None)
 
@@ -485,8 +539,16 @@ class Executor:
     async def _fail_claimed(self, run_id: uuid.UUID, error: str) -> None:
         try:
             async with self._sm() as s:
-                await RunRepository(s).fail_claimed(run_id, self.worker_id, error)
+                applied = await RunRepository(s).fail_claimed(run_id, self.worker_id, error)
                 await s.commit()
+            if applied:
+                prom.run_decided(
+                    "R6",
+                    "worker",
+                    RunState.FAILED,
+                    Outcome.INTERNAL_ERROR,
+                    dead_letter_reason="non_retryable",
+                )
         except Exception:
             log.exception("fail_claimed_failed")
 

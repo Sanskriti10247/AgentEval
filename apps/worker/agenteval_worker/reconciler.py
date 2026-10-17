@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agenteval_core.artifacts import ArtifactStore
 from agenteval_core.logging import get_logger
+from agenteval_core.observability import metrics as prom
 from agenteval_core.queue.streams import RunQueue
 from agenteval_core.repositories.evaluations import EvaluationRepository
 from agenteval_core.repositories.recovery import (
@@ -140,6 +141,7 @@ class Reconciler:
             try:
                 await step()
             except Exception:
+                prom.reconciler_step_error(name)
                 log.exception("reconciler_step_failed", step=name)
 
     # -- step 1a ----------------------------------------------------------------------------
@@ -151,6 +153,8 @@ class Reconciler:
             if not await repo.begin_step(STEP_CLAIMED):
                 return []
             recovery = await repo.recover_expired_claims()
+        for recovered in recovery.recovered:
+            prom.run_recovered(recovered.code, recovered.cancel_reason)
         await self._publish_and_stamp(recovery.to_publish)
         return recovery.to_publish
 
@@ -163,6 +167,8 @@ class Reconciler:
             if not await repo.begin_step(STEP_RUNNING):
                 return []
             recovery = await repo.recover_expired_running()
+        for recovered in recovery.recovered:
+            prom.run_recovered(recovered.code, recovered.cancel_reason)
         # Single host: the container (if any) carries the attempt id as a label.
         # Best effort - the owner's own self-stop usually got there first.
         for attempt_id in recovery.attempt_ids:
@@ -183,6 +189,8 @@ class Reconciler:
             if not await repo.begin_step(STEP_EVAL_RECOVERY):
                 return []
             recovery = await repo.recover_expired_evaluations()
+        for recovered in recovery.recovered:
+            prom.evaluation_transition(recovered.code)
         for attempt_id in recovery.attempt_ids:
             try:
                 await asyncio.to_thread(self._kill, str(attempt_id))
@@ -236,6 +244,8 @@ class Reconciler:
             if not await repo.begin_step(STEP_RETRIES_DUE):
                 return []
             released = await repo.release_due_retries()
+        for _ in released:
+            prom.run_recovered("R12")
         await self._publish_and_stamp(released)
         return released
 

@@ -13,12 +13,14 @@ import socket
 from pathlib import Path
 
 import docker
+from prometheus_client import start_http_server
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agenteval_core.artifacts import LocalArtifactStore
 from agenteval_core.config import get_settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.logging import configure_logging, get_logger
+from agenteval_core.observability import metrics as prom
 from agenteval_core.queue.streams import EVALUATION_FIELD, RunQueue, redis_for_blocking_reads
 from agenteval_core.repositories.workers import WorkerRepository
 from agenteval_worker.agent_runner import AgentRunner
@@ -39,6 +41,8 @@ REGISTRY_HEARTBEAT_S = 10.0
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_json)
+    _start_metrics_server(settings.worker_metrics_host, settings.worker_metrics_port)
+    prom.set_concurrency(settings.worker_concurrency)
     # F12: unique per process, so a restarted worker never reuses an old id.
     worker_id = settings.worker_id or f"{socket.gethostname()}-{os.getpid()}-{secrets.token_hex(4)}"
     # Startup refuses an invalid timing combination (F7): a heartbeat too
@@ -206,6 +210,21 @@ async def _registry_heartbeat(
             await asyncio.wait_for(stop.wait(), timeout=REGISTRY_HEARTBEAT_S)
         except TimeoutError:
             pass
+
+
+def _start_metrics_server(host: str, port: int) -> None:
+    """Prometheus exposition on a daemon thread (prometheus_client's own server),
+    so it never runs on, or blocks, the event loop. Best effort: a port that is
+    taken costs this worker its metrics, never its work. Port 0 disables it."""
+    if port == 0:
+        log.info("metrics_server_disabled")
+        return
+    try:
+        start_http_server(port, addr=host)
+    except OSError as exc:
+        log.warning("metrics_server_failed", host=host, port=port, error=str(exc))
+        return
+    log.info("metrics_server_started", host=host, port=port)
 
 
 def _request_stop(stop: asyncio.Event, sig: signal.Signals) -> None:

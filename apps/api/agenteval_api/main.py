@@ -6,11 +6,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
 from agenteval_api.errors import install_error_handlers
+from agenteval_api.middleware import MetricsMiddleware
 from agenteval_api.routes import (
     agents,
     datasets,
     evaluations,
     health,
+    metrics,
     runs,
     stats,
     tasks,
@@ -48,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await app.state.engine.dispose()
 
     app = FastAPI(title="AgentEval API", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(MetricsMiddleware)
     install_error_handlers(app)
     # The dashboard's origin(s) only; no credentials (there is no auth yet), and
     # just the methods and headers the API uses.
@@ -60,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_age=600,
     )
     app.include_router(health.router)
+    app.include_router(metrics.router)
     v1 = APIRouter(prefix="/api/v1")
     v1.include_router(agents.router)
     v1.include_router(tasks.router)

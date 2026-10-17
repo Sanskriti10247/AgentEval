@@ -550,3 +550,46 @@ def test_system_prompt_is_static() -> None:
     assert build_system_prompt("You fix bugs.") == f"You fix bugs.\n\n{RUNTIME_PREAMBLE}"
     assert build_system_prompt("  ") == RUNTIME_PREAMBLE
     assert build_system_prompt("x") == build_system_prompt("x")  # no timestamps/ids
+
+
+# -- metrics (ADR-010 A) ------------------------------------------------------------------------
+
+
+def _metric(name: str, **labels: str) -> float:
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+async def test_a_run_moves_the_model_and_tool_metrics() -> None:
+    lab = {"provider": "fake", "model": "fake-model"}
+    tokens_in = _metric("agenteval_model_tokens_total", **lab, direction="input")
+    tokens_out = _metric("agenteval_model_tokens_total", **lab, direction="output")
+    cost = _metric("agenteval_model_cost_usd_total", **lab)
+    calls = _metric("agenteval_model_call_duration_seconds_count", **lab)
+    tool_ok = _metric("agenteval_tool_calls_total", tool="read_file", status="ok")
+    tool_unknown = _metric("agenteval_tool_calls_total", tool="unknown", status="unknown_tool")
+    errors = _metric("agenteval_model_call_errors_total", **lab, kind="overloaded")
+
+    h = harness(
+        err("overloaded", status=529),
+        turn("reading", tool_calls=[tool("read_file", path="calc.py"), tool("browse", url="x")]),
+        turn("done"),
+    )
+    h.ctx.config.update(model_provider="fake", model="fake-model")
+    r = await h.run()
+
+    assert r.outcome is Outcome.AGENT_FINISHED and r.steps == 2
+    assert _metric("agenteval_model_call_duration_seconds_count", **lab) == calls + 2
+    assert _metric("agenteval_model_tokens_total", **lab, direction="input") == tokens_in + 200
+    assert _metric("agenteval_model_tokens_total", **lab, direction="output") == tokens_out + 40
+    assert _metric("agenteval_model_cost_usd_total", **lab) == pytest.approx(
+        cost + float(r.cost_usd)
+    )
+    assert _metric("agenteval_model_call_errors_total", **lab, kind="overloaded") == errors + 1
+    assert _metric("agenteval_tool_calls_total", tool="read_file", status="ok") == tool_ok + 1
+    # The model invented "browse": counted, but never as a label of its own.
+    assert _metric("agenteval_tool_calls_total", tool="unknown", status="unknown_tool") == (
+        tool_unknown + 1
+    )
+    assert _metric("agenteval_tool_calls_total", tool="browse", status="unknown_tool") == 0
