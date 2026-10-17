@@ -1,0 +1,263 @@
+{
+ "schema_version": 1,
+ "label": "smoke",
+ "workload": "noop-command",
+ "runs": 5,
+ "workers": 1,
+ "concurrency": 2,
+ "repeat": 1,
+ "repeats": 1,
+ "git": {
+  "sha": "09b6df80011891af879d25fe8b595313c20227eb",
+  "branch": "phase7/benchmarks",
+  "dirty": true
+ },
+ "started_at": "2026-10-17T09:31:03.007458+00:00",
+ "machine": {
+  "nproc": 12,
+  "cpu_model": "13th Gen Intel(R) Core(TM) i5-13420H",
+  "mem_total_mib": 15687,
+  "mem_available_mib": 4946,
+  "swap_total_mib": 15686,
+  "swap_free_mib": 11047,
+  "kernel": "7.2.5-3-omarchy",
+  "docker_server_version": "29.7.2",
+  "load_avg": [
+   2.39697265625,
+   2.58154296875,
+   2.92529296875
+  ],
+  "other_containers_running": [
+   "clinicflow-control-plane",
+   "clinicflow-worker",
+   "clinicflow-worker2",
+   "knowops-frontend",
+   "knowops-tunnel",
+   "session20-control-plane"
+  ],
+  "compose_project": "agenteval"
+ },
+ "settings": {
+  "worker_env": {
+   "AGENTEVAL_DATABASE_URL": "postgresql+asyncpg://agenteval:agenteval@postgres:5432/agenteval",
+   "AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER": "false",
+   "AGENTEVAL_IMAGE_ALLOWLIST": "[\"agenteval-sandbox:py312\"]",
+   "AGENTEVAL_LOG_LEVEL": "INFO",
+   "AGENTEVAL_REDIS_URL": "redis://redis:6379/0",
+   "AGENTEVAL_WORKER_CONCURRENCY": "2",
+   "AGENTEVAL_WORKER_METRICS_HOST": "0.0.0.0",
+   "AGENTEVAL_WORKER_METRICS_PORT": "9464"
+  },
+  "submit_parallelism": 32,
+  "max_attempts": 1
+ },
+ "status": "ok",
+ "expected_outcome": "SUCCESS",
+ "graded": false,
+ "wall": {
+  "submit_s": 0.051951723002275685,
+  "total_s": 2.0681859889991756
+ },
+ "submit": {
+  "submit_s": 0.051951723002275685,
+  "submitted": 5,
+  "submit_failures": [],
+  "submit_latency_s": {
+   "n": 5,
+   "min": 0.02918683500320185,
+   "mean": 0.0458185647999926,
+   "p50": 0.05034292200070922,
+   "p95": 0.051495562600757695,
+   "p99": 0.0515472005213087,
+   "max": 0.051560110001446446
+  }
+ },
+ "progress": {
+  "terminal": 5,
+  "total": 5,
+  "finished_attempts": 5,
+  "evaluations": 0,
+  "grading_open": 0,
+  "done": true
+ },
+ "summary": {
+  "runs": 5,
+  "terminal": 5,
+  "succeeded": 5,
+  "success_rate": 1.0,
+  "retried": 0,
+  "retry_rate": 0.0,
+  "window_s": 1.9943411350250244,
+  "throughput_rps": 2.5070936522287908,
+  "graded_throughput_rps": null,
+  "latency_s": {
+   "queue": {
+    "n": 5,
+    "min": 0.015109062194824219,
+    "mean": 0.634899377822876,
+    "p50": 0.8031678199768066,
+    "p95": 1.367360496520996,
+    "p99": 1.4732521820068358,
+    "max": 1.499725103378296
+   },
+   "start": {
+    "n": 5,
+    "min": 0.0071599483489990234,
+    "mean": 0.011072063446044922,
+    "p50": 0.0077021121978759766,
+    "p95": 0.01932415962219238,
+    "p99": 0.020796175003051757,
+    "max": 0.0211641788482666
+   },
+   "exec": {
+    "n": 5,
+    "min": 0.4764869213104248,
+    "mean": 0.6851067543029785,
+    "p50": 0.7092220783233643,
+    "p95": 0.7825671672821045,
+    "p99": 0.782979040145874,
+    "max": 0.7830820083618164
+   },
+   "e2e": {
+    "n": 5,
+    "min": 0.8055610656738281,
+    "mean": 1.3310781955718993,
+    "p50": 1.4913668632507324,
+    "p95": 1.8979881286621092,
+    "p99": 1.9667289352416992,
+    "max": 1.9839141368865967
+   }
+  },
+  "failures": {}
+ },
+ "resources": {
+  "samples": 1,
+  "api": {
+   "cpu_mean": 0.16,
+   "cpu_peak": 0.16,
+   "mem_mean_mib": 106.4,
+   "mem_peak_mib": 106.4,
+   "containers_max": 1,
+   "present": 1
+  },
+  "worker": {
+   "cpu_mean": 5.2,
+   "cpu_peak": 5.2,
+   "mem_mean_mib": 148.6,
+   "mem_peak_mib": 148.6,
+   "containers_max": 1,
+   "present": 1
+  },
+  "postgres": {
+   "cpu_mean": 2.79,
+   "cpu_peak": 2.79,
+   "mem_mean_mib": 55.52,
+   "mem_peak_mib": 55.52,
+   "containers_max": 1,
+   "present": 1
+  },
+  "redis": {
+   "cpu_mean": 2.32,
+   "cpu_peak": 2.32,
+   "mem_mean_mib": 3.75,
+   "mem_peak_mib": 3.75,
+   "containers_max": 1,
+   "present": 1
+  },
+  "sandbox": {
+   "cpu_mean": 0.0,
+   "cpu_peak": 0.0,
+   "mem_mean_mib": 0.0,
+   "mem_peak_mib": 0.0,
+   "containers_max": 0,
+   "present": 0
+  },
+  "host": {
+   "mem_available_min_mib": 4957.1484375,
+   "mem_available_mean_mib": 4957.1484375,
+   "load1_max": 2.53,
+   "load1_mean": 2.53
+  },
+  "errors": 0
+ },
+ "rows": {
+  "created_s": [
+   0.0,
+   0.010412216186523438,
+   0.010426998138427734,
+   0.01080322265625,
+   0.010807037353515625
+  ],
+  "finished_s": [
+   0.8055610656738281,
+   0.8306770324707031,
+   1.9943411350250244,
+   1.5021700859069824,
+   1.5650911331176758
+  ],
+  "queue": [
+   0.015109062194824219,
+   0.01859283447265625,
+   1.499725103378296,
+   0.8031678199768066,
+   0.8379020690917969
+  ],
+  "start": [
+   0.0073699951171875,
+   0.0211641788482666,
+   0.0077021121978759766,
+   0.011964082717895508,
+   0.0071599483489990234
+  ],
+  "exec": [
+   0.7830820083618164,
+   0.7805078029632568,
+   0.4764869213104248,
+   0.6762349605560303,
+   0.7092220783233643
+  ],
+  "e2e": [
+   0.8055610656738281,
+   0.8202648162841797,
+   1.9839141368865967,
+   1.4913668632507324,
+   1.5542840957641602
+  ],
+  "grade": [
+   null,
+   null,
+   null,
+   null,
+   null
+  ],
+  "e2e_graded": [
+   null,
+   null,
+   null,
+   null,
+   null
+  ],
+  "attempts": [
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "status": [
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED"
+  ],
+  "outcome": [
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS"
+  ]
+ },
+ "finished_at": "2026-10-17T09:31:08.604330+00:00"
+}

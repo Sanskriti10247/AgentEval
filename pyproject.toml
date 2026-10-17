@@ -18,6 +18,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 addopts = "--import-mode=importlib"
+# Lets benchmarks/tests import the `benchmarks` package (run them with `uv run pytest benchmarks/tests`).
+pythonpath = ["."]
 testpaths = ["packages/core/tests", "apps/api/tests", "apps/worker/tests", "tests/integration"]
 markers = [
     "docker: needs a Docker daemon",
@@ -35,6 +37,9 @@ select = ["E", "F", "I", "B", "UP", "ASYNC"]
 [tool.ruff.lint.per-file-ignores]
 # Migrations hold frozen DDL literals (CHECK bodies), which are long by nature.
 "packages/core/migrations/versions/*" = ["E501"]
+
+# The report builds long SVG/markdown literals.
+"benchmarks/report.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["agenteval_core", "agenteval_api", "agenteval_worker"]
