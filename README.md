@@ -270,16 +270,18 @@ The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style 
 | GET | `/api/v1/agents/{id}/versions`, `…/versions/{n}` | versions are immutable |
 | POST | `/api/v1/tasks` | `task_type` `command` (default) or `agent`. 201; 422 on validation or an image not on the allowlist |
 | GET | `/api/v1/tasks/{id}` | |
-| POST | `/api/v1/runs` | body `{task_id, agent_version_id?}`, optional `Idempotency-Key` header |
-| GET | `/api/v1/runs/{id}` | |
+| POST | `/api/v1/runs` | body `{task_id, agent_version_id?, max_attempts?}` (budget 1–10, default `AGENTEVAL_RUN_MAX_ATTEMPTS` = 3, pinned on the run), optional `Idempotency-Key` header |
+| GET | `/api/v1/runs` | newest first; filters `status`, `dead_letter` (the DLQ view), `evaluation_id`, `task_id`; keyset-paged by an opaque `after` cursor, `limit` 1–200; `{runs, next_after}` |
+| GET | `/api/v1/runs/{id}` | includes `max_attempts`, `replay_count`, `dead_letter_reason`, `failure_reason`, `next_attempt_at` |
 | POST | `/api/v1/runs/{id}/cancel` | 202 accepted (queued/retrying: cancelled now; claimed/running: flagged, the worker stops it) / 200 repeat / 409 already finished / 404 |
+| POST | `/api/v1/runs/{id}/replay` | give a FAILED run `additional_attempts` (1–9, default 1; total cap 10) more attempts and queue it again; optional `Idempotency-Key`; 202 replayed / 200 repeat of the key / 409 not FAILED or key reused / 422 over the cap / 404 |
 | GET | `/api/v1/runs/{id}/attempts` | exit code and output (command tasks); steps, tokens, cost and final answer (agent tasks) |
 | GET | `/api/v1/runs/{id}/attempts/{n}/events` | the trajectory, paged by `after_seq` (default -1) and `limit` (1–1000, default 100); `next_after_seq` is null on the last page |
 | GET | `/api/v1/runs/{id}/attempts/{n}/evaluation` | the attempt's **public** evaluation; 404 if none is recorded |
 | POST | `/api/v1/datasets` | 201 DRAFT dataset; 409 if `(name, version)` exists |
 | GET | `/api/v1/datasets/{id}` | includes `task_ids` |
 | POST | `/api/v1/datasets/{id}/freeze` | DRAFT → FROZEN (idempotent); 409 if it has no tasks |
-| POST | `/api/v1/evaluations` | a benchmark evaluation: agent version × frozen dataset × repetitions; optional `Idempotency-Key`; 202 new / 200 replay / 409 / 503 |
+| POST | `/api/v1/evaluations` | a benchmark evaluation: agent version × frozen dataset × repetitions, with optional budgets `run_max_attempts` / `eval_max_attempts` (1–10, default 3); optional `Idempotency-Key`; 202 new / 200 replay / 409 / 503 |
 | GET | `/api/v1/evaluations/{id}` | the batch, scoring config and hash, derived progress |
 | POST | `/api/v1/evaluations/{id}/cancel` | cancel the batch and its unfinished runs; finished runs and scores are untouched; 202 / 200 repeat / 404 |
 | GET | `/api/v1/evaluations/{id}/results` | public per-run results, keyset-paged |
@@ -294,7 +296,7 @@ The full reference for the Phase 4 endpoints is [docs/api/evaluations.md](docs/a
 
 - **202:** a new run was created.
 - **200:** a replay of an existing `Idempotency-Key`.
-- **409:** the key was already used for a different task or agent version.
+- **409:** the key was already used for a different task, agent version or `max_attempts`.
 - **404:** unknown task or agent version.
 - **422:** an agent task without an `agent_version_id`, or a command task with one.
 - **503:** the run was persisted but dispatch failed. Retry with the same key and the run is re-dispatched.

@@ -19,6 +19,7 @@ from decimal import Decimal
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agenteval_core.config import Settings
 from agenteval_core.evaluation.classify import Verdict, platform_category
 from agenteval_core.evaluation.metrics import TrajectoryMetrics
 from agenteval_core.evaluation.public import PublicEvaluation, public_view
@@ -74,17 +75,16 @@ log = get_logger(__name__)
 # CANCELLED counts as terminal for `complete` (Step 8): a cancelled batch completes.
 TERMINAL = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED})
 _UNFINISHED_EVAL = frozenset({EvaluationStatus.PENDING, EvaluationStatus.RUNNING})
-# RunStatus gained RETRYING and CANCELLED in Step 3 (reliability.transitions),
-# but the Progress.runs_by_status key set is a Phase 4 API contract: it must
-# not change until F13 (Step 9) teaches summaries/progress about retries and
-# cancellation. Direct runs still default to max_attempts=1, so RETRYING is
-# unreachable here regardless; this just keeps the response shape frozen.
-_PHASE4_RUN_STATUSES = (
-    RunStatus.QUEUED,
-    RunStatus.CLAIMED,
-    RunStatus.RUNNING,
-    RunStatus.COMPLETED,
-    RunStatus.FAILED,
+# Statuses whose run has a result of its own (F13). In every other status the
+# run's latest attempt (attempt_no = attempt_count) is either an earlier, failed
+# attempt that is being retried or replayed (QUEUED, CLAIMED, RETRYING) or one
+# that was cancelled with the run (CANCELLED): that attempt is history, not the
+# run's result, so it is not counted, summarised or shown as the result.
+# RUNNING is the exception that has no result yet either, but its latest attempt
+# is the live one and has no evaluation, so it counts as in progress anyway.
+_HAS_RESULT = frozenset({RunStatus.COMPLETED, RunStatus.FAILED})
+_NO_RESULT = frozenset(
+    {RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.RETRYING, RunStatus.CANCELLED}
 )
 
 
@@ -141,7 +141,11 @@ def _public(r: ResultRecord, scoring_config_hash: str) -> PublicEvaluation | Non
 def _result_of(r: ResultRecord) -> tuple[EvaluationStatus, FailureCategory | None] | None:
     """(evaluation status, category) for success_stats(), or None while the
     attempt is still in progress (not counted yet). A run that FAILED before
-    any attempt has no evaluation row: Step 3's platform_category() decides."""
+    any attempt has no evaluation row: Step 3's platform_category() decides.
+    A run that is not (yet) COMPLETED or FAILED has no result either (F13): a
+    RETRYING run is not finished, whatever its earlier attempt's evaluation says."""
+    if r.run_status not in _HAS_RESULT:
+        return None
     if r.eval_status is not None:
         status = EvaluationStatus(r.eval_status)
         if status in _UNFINISHED_EVAL:
@@ -177,7 +181,10 @@ def summarize(
 ) -> Summary:
     finished = [(r, res) for r in records if (res := _result_of(r)) is not None]
     stats = success_stats(res for _, res in finished)
-    in_progress = len(records) - len(finished)
+    # A CANCELLED run is terminal with no result (F13): neither finished nor in progress,
+    # so a cancelled batch's summary completes.
+    cancelled = sum(r.run_status == RunStatus.CANCELLED for r in records)
+    in_progress = len(records) - len(finished) - cancelled
 
     graded = [r for r, (st, _) in finished if st is EvaluationStatus.SUCCEEDED]
     scored = [r for r in graded if r.score_components is not None]
@@ -267,8 +274,9 @@ def summarize(
 
 
 class EvaluationService:
-    def __init__(self, session: AsyncSession, queue: RunQueue) -> None:
+    def __init__(self, session: AsyncSession, queue: RunQueue, settings: Settings) -> None:
         self._s = session
+        self._settings = settings
         self._batches = BatchRepository(session)
         self._queue = queue
 
@@ -287,6 +295,8 @@ class EvaluationService:
         if len(task_ids) * data.repetitions > MAX_BATCH_RUNS:
             raise InvalidEvaluation(f"an evaluation can have at most {MAX_BATCH_RUNS} runs")
         config = data.scoring_config or DEFAULT_SCORING_CONFIG
+        run_budget = data.run_max_attempts or self._settings.run_max_attempts
+        eval_budget = data.eval_max_attempts or self._settings.eval_max_attempts
         values = {
             "name": data.name,
             "dataset_id": data.dataset_id,
@@ -295,6 +305,8 @@ class EvaluationService:
             "scoring_config": config.model_dump(mode="json"),
             "scoring_config_hash": config.config_hash(),
             "idempotency_key": idempotency_key,
+            "run_max_attempts": run_budget,  # F6, G1
+            "eval_max_attempts": eval_budget,  # F9, G1
         }
 
         batch = await self._batches.create(**values)
@@ -309,12 +321,16 @@ class EvaluationService:
                 batch.agent_version_id,
                 batch.repetitions,
                 batch.scoring_config_hash,
+                batch.run_max_attempts,
+                batch.eval_max_attempts,
             ) == (
                 data.name,
                 data.dataset_id,
                 data.agent_version_id,
                 data.repetitions,
                 values["scoring_config_hash"],
+                run_budget,
+                eval_budget,
             )
             if not same:
                 raise IdempotencyConflict(
@@ -465,9 +481,11 @@ class EvaluationService:
             scoring_config_hash=batch.scoring_config_hash,
             created_at=batch.created_at,
             cancel_requested_at=batch.cancel_requested_at,
+            run_max_attempts=batch.run_max_attempts,
+            eval_max_attempts=batch.eval_max_attempts,
             progress=Progress(
                 runs_total=total,
-                runs_by_status={RunStatus(s): runs.get(s, 0) for s in _PHASE4_RUN_STATUSES},
+                runs_by_status={RunStatus(s): runs.get(s, 0) for s in RunStatus},
                 evaluations_by_status={s.value: evals.get(s.value, 0) for s in EvaluationStatus},
                 awaiting_evaluation=awaiting,
                 complete=terminal == total and awaiting == 0,
@@ -476,6 +494,24 @@ class EvaluationService:
 
 
 def _row(r: ResultRecord, scoring_config_hash: str) -> ResultRow:
+    """One results row. A run that is QUEUED/CLAIMED/RETRYING/CANCELLED has no
+    result (F13): its latest attempt is history, so the attempt and evaluation
+    columns are blank rather than a stale failed attempt shown as the result."""
+    if r.run_status in _NO_RESULT:
+        return ResultRow(
+            run_id=r.run_id,
+            task_id=r.task_id,
+            repetition=r.repetition,
+            run_status=RunStatus(r.run_status),
+            run_outcome=None,
+            attempt_no=None,
+            duration_ms=None,
+            steps=None,
+            tokens_in=None,
+            tokens_out=None,
+            cost_usd=None,
+            evaluation=None,
+        )
     return ResultRow(
         run_id=r.run_id,
         task_id=r.task_id,

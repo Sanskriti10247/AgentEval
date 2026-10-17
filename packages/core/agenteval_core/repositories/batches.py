@@ -159,6 +159,7 @@ class BatchRepository:
                 "status": RunStatus.QUEUED,
                 "idempotency_key": batch_run_key(batch.id, task_id, rep),
                 "attempt_count": 0,
+                "max_attempts": batch.run_max_attempts,  # F6, G1: the batch's pinned budget
             }
             for task_id in task_ids
             for rep in range(1, repetitions + 1)
@@ -291,7 +292,9 @@ class BatchRepository:
         self, evaluation_id: uuid.UUID
     ) -> tuple[dict[str, int], dict[str, int], int]:
         """(runs by status, evaluations by status, finished runs awaiting
-        evaluation), over each run's latest attempt."""
+        evaluation), over each run's latest attempt. Evaluations are counted only
+        for COMPLETED/FAILED runs (F13): a RETRYING, replayed or cancelled run's
+        latest attempt is history, not its result."""
         latest = and_(RunAttempt.run_id == Run.id, RunAttempt.attempt_no == Run.attempt_count)
         runs = await self._s.execute(
             select(Run.status, func.count())
@@ -303,7 +306,10 @@ class BatchRepository:
             .select_from(Run)
             .join(RunAttempt, latest)
             .join(AttemptEvaluation, AttemptEvaluation.attempt_id == RunAttempt.id)
-            .where(Run.evaluation_id == evaluation_id)
+            .where(
+                Run.evaluation_id == evaluation_id,
+                Run.status.in_([RunStatus.COMPLETED, RunStatus.FAILED]),
+            )
             .group_by(AttemptEvaluation.status)
         )
         awaiting = await self._s.execute(

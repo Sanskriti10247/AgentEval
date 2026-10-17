@@ -56,8 +56,10 @@ class FakeSandbox:
 
 
 async def submit(client: httpx.AsyncClient, **task: object) -> str:
+    # max_attempts=1: these tests assert the single attempt's final status, and the API
+    # default budget (3) would turn a retryable failure into RETRYING (Step 9).
     task_id = await create_task(client, **task)
-    resp = await client.post("/api/v1/runs", json={"task_id": task_id})
+    resp = await client.post("/api/v1/runs", json={"task_id": task_id, "max_attempts": 1})
     assert resp.status_code == 202
     return resp.json()["id"]
 

@@ -546,14 +546,18 @@ async def test_a_batch_cancel_cancels_every_unfinished_run_and_the_batch_complet
     assert body["cancel_requested_at"] is not None
     assert body["progress"]["complete"] is True
     assert body["progress"]["runs_total"] == 9
-    # The frozen Phase 4 key set (Step 9 changes it); CANCELLED is simply not a key.
-    assert set(body["progress"]["runs_by_status"]) == {
+    # F13 (Step 9): every run status is a key, so cancelled runs are visible.
+    by_status = body["progress"]["runs_by_status"]
+    assert set(by_status) == {
         "QUEUED",
         "CLAIMED",
         "RUNNING",
+        "RETRYING",
         "COMPLETED",
         "FAILED",
+        "CANCELLED",
     }
+    assert by_status["COMPLETED"] == 1 and by_status["CANCELLED"] == 8
     assert not any(key in str(body) for key in HIDDEN)
 
     async with engine.connect() as conn:

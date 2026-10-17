@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     orphan_sweep_interval_s: float = 300.0
     stream_maxlen: int = 100_000
 
+    # Execution budget (F6): the max_attempts a run is pinned with when the request
+    # doesn't give one (RunCreate, EvaluationCreate.run_max_attempts). 1..10.
+    run_max_attempts: int = Field(default=3, ge=1, le=10)
+
     # Evaluation reliability (Step 7; F9). The grading budget an ad hoc run's
     # evaluation row is pinned with at creation (a batch run uses its batch's
     # eval_max_attempts instead); a FINISHED attempt still without an evaluation

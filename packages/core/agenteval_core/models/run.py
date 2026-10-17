@@ -23,6 +23,7 @@ from agenteval_core.models.base import Base, CreatedAt, UUIDPk, sql_values
 from agenteval_core.reliability.policy import (
     MAX_ATTEMPTS_CAP,
     MAX_UNSTARTED_CLAIMS,
+    REPLAY_MAX_ADDITIONAL,
     DeadLetterReason,
 )
 from agenteval_core.reliability.taxonomy import (
@@ -249,3 +250,28 @@ class RunAttempt(UUIDPk, Base):
     failure_reason: Mapped[str | None] = mapped_column(String(40))
     retryable: Mapped[bool | None] = mapped_column(Boolean)
     workspace_capture: Mapped[str | None] = mapped_column(String(16))
+
+
+class RunReplay(UUIDPk, CreatedAt, Base):
+    """One replay (R14) of a FAILED run, written in the same transaction as the
+    FAILED -> QUEUED update. Its job is idempotency (G4): the optional
+    Idempotency-Key is unique across all replays, so a retried request is
+    recognised and changes nothing, while a key reused for another run or a
+    different budget is told apart by the stored (run_id, additional_attempts).
+    `replay_no` is the run's replay_count after this replay."""
+
+    __tablename__ = "run_replays"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_run_replays_idempotency_key"),
+        UniqueConstraint("run_id", "replay_no", name="uq_run_replays_run_id_replay_no"),
+        CheckConstraint("replay_no >= 1", name="replay_no"),
+        CheckConstraint(
+            f"additional_attempts BETWEEN 1 AND {REPLAY_MAX_ADDITIONAL}",
+            name="additional_attempts",
+        ),
+    )
+
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    replay_no: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    additional_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False)

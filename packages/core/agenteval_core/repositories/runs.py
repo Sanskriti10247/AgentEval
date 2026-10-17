@@ -18,18 +18,20 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import case, func, insert, select, text, update
+from sqlalchemy import case, func, insert, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agenteval_core.logging import get_logger
-from agenteval_core.models import Run, RunAttempt
+from agenteval_core.models import Run, RunAttempt, RunReplay
 from agenteval_core.models.base import new_id
 from agenteval_core.reliability.backoff import backoff_delay
 from agenteval_core.reliability.policy import (
     DeadLetterReason,
     after_completed_attempt,
     after_failed_attempt,
+    check_budget,
+    replay_budget,
 )
 from agenteval_core.reliability.taxonomy import (
     CancelReason,
@@ -105,6 +107,20 @@ class CancelDisposition(StrEnum):
     NOT_FOUND = "not_found"
 
 
+class ReplayDisposition(StrEnum):
+    """What a replay request did, decided under the run's row lock."""
+
+    REPLAYED = "replayed"  # FAILED -> QUEUED (R14); the caller publishes after commit
+    ALREADY = "already"  # this Idempotency-Key was already applied to this run: nothing written
+    KEY_REUSED = "key_reused"  # the key belongs to another run or a different budget (409)
+    NOT_FAILED = "not_failed"  # only a FAILED run can be replayed (409)
+    NOT_FOUND = "not_found"
+
+
+class BudgetExceeded(ValueError):
+    """The replay would take max_attempts past the cap (422). Fixed text only."""
+
+
 def cancel_values(reason: CancelReason) -> dict[str, Any]:
     """The single guarded UPDATE behind every cancel request (run or batch).
 
@@ -169,8 +185,11 @@ class RunRepository:
         task_id: uuid.UUID,
         idempotency_key: str | None,
         agent_version_id: uuid.UUID | None = None,
+        max_attempts: int = 1,
     ) -> Run | None:
-        """Insert a QUEUED run. Returns None if the idempotency key already exists.
+        """Insert a QUEUED run pinned with `max_attempts` (F6; 1 matches the column
+        default, which direct inserts keep). Returns None if the idempotency key
+        already exists.
 
         ON CONFLICT DO NOTHING makes concurrent duplicate submissions safe
         without relying on catching IntegrityError.
@@ -184,6 +203,7 @@ class RunRepository:
                 status=RunStatus.QUEUED,
                 idempotency_key=idempotency_key,
                 attempt_count=0,
+                max_attempts=check_budget(max_attempts),
             )
             .on_conflict_do_nothing(index_elements=[Run.idempotency_key])
             .returning(Run)
@@ -240,6 +260,128 @@ class RunRepository:
             if row.status in (RunStatus.COMPLETED, RunStatus.FAILED):
                 return CancelDisposition.FINISHED
         raise RuntimeError(f"run {run_id} kept changing state under a cancel request")
+
+    async def replay(
+        self, run_id: uuid.UUID, additional_attempts: int, idempotency_key: str | None
+    ) -> ReplayDisposition:
+        """Replay API (R14, F10, G4): FAILED -> QUEUED with a bigger budget, in the
+        caller's transaction.
+
+        The run row is locked first (SELECT ... FOR UPDATE), which serialises
+        every replay and cancel of one run; then the idempotency key is looked
+        up, so a retry that lost the race still finds the winner's row and
+        answers ALREADY instead of a misleading "not FAILED". The guarded UPDATE
+        keeps `status = 'FAILED'` in SQL anyway. attempt_count is NOT reset
+        (attempt numbers continue, history is kept); only max_attempts grows
+        (ck_runs_attempts holds because it only grows). Everything the failure
+        wrote on the run is cleared: outcome, error_message, failure_reason,
+        dead_letter_reason, finished_at, dispatched_at (so it is published
+        afresh) and unstarted_claims (a new claim budget, G5).
+
+        Raises BudgetExceeded (422) if max_attempts + additional would pass the cap."""
+        check_transition(RunStatus.FAILED, RunStatus.QUEUED)  # R14
+        row = (
+            await self._s.execute(
+                select(Run.status, Run.max_attempts, Run.replay_count)
+                .where(Run.id == run_id)
+                .with_for_update()
+            )
+        ).one_or_none()
+        if row is None:
+            return ReplayDisposition.NOT_FOUND
+        if idempotency_key is not None:
+            earlier = (
+                await self._s.execute(
+                    select(RunReplay.run_id, RunReplay.additional_attempts).where(
+                        RunReplay.idempotency_key == idempotency_key
+                    )
+                )
+            ).one_or_none()
+            if earlier is not None:
+                same = (earlier.run_id, earlier.additional_attempts) == (
+                    run_id,
+                    additional_attempts,
+                )
+                return ReplayDisposition.ALREADY if same else ReplayDisposition.KEY_REUSED
+        if row.status != RunStatus.FAILED:
+            return ReplayDisposition.NOT_FAILED
+        try:
+            new_budget = replay_budget(row.max_attempts, additional_attempts)
+        except ValueError as exc:
+            raise BudgetExceeded(str(exc)) from None
+        updated = (
+            await self._s.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.status == RunStatus.FAILED)
+                .values(
+                    status=RunStatus.QUEUED,
+                    max_attempts=new_budget,
+                    replay_count=Run.replay_count + 1,
+                    outcome=None,
+                    error_message=None,
+                    failure_reason=None,
+                    dead_letter_reason=None,
+                    finished_at=None,
+                    dispatched_at=None,
+                    unstarted_claims=0,
+                )
+                .returning(Run.replay_count)
+                .execution_options(synchronize_session=False)
+            )
+        ).scalar_one_or_none()
+        if updated is None:  # cannot happen under the row lock; fail closed
+            return ReplayDisposition.NOT_FAILED
+        recorded = await self._s.execute(
+            pg_insert(RunReplay)
+            .values(
+                id=new_id(),
+                run_id=run_id,
+                idempotency_key=idempotency_key,
+                replay_no=updated,
+                additional_attempts=additional_attempts,
+            )
+            .on_conflict_do_nothing(index_elements=[RunReplay.idempotency_key])
+            .returning(RunReplay.id)
+        )
+        if recorded.scalar_one_or_none() is None:
+            # The key was committed for another run between our lookup and insert
+            # (a same-run race is excluded by the row lock). The caller rolls back.
+            return ReplayDisposition.KEY_REUSED
+        return ReplayDisposition.REPLAYED
+
+    async def list_page(
+        self,
+        *,
+        status: RunStatus | None,
+        dead_letter: bool | None,
+        evaluation_id: uuid.UUID | None,
+        task_id: uuid.UUID | None,
+        after: tuple[datetime, uuid.UUID] | None,
+        limit: int,
+    ) -> list[Run]:
+        """Runs newest first, keyset-paged on (created_at, id) descending (F15).
+
+        `dead_letter=True` is `status = 'FAILED' AND dead_letter_reason IS NOT
+        NULL` (F1: a dead letter is a FAILED run with a reason), which the
+        partial index ix_runs_failed serves; False is "no dead-letter reason".
+        A page is `limit` rows; the caller asks for one extra to learn whether
+        another page exists."""
+        stmt = select(Run).order_by(Run.created_at.desc(), Run.id.desc()).limit(limit)
+        if status is not None:
+            stmt = stmt.where(Run.status == status)
+        if dead_letter is True:
+            stmt = stmt.where(Run.status == RunStatus.FAILED, Run.dead_letter_reason.is_not(None))
+        elif dead_letter is False:
+            stmt = stmt.where(Run.dead_letter_reason.is_(None))
+        if evaluation_id is not None:
+            stmt = stmt.where(Run.evaluation_id == evaluation_id)
+        if task_id is not None:
+            stmt = stmt.where(Run.task_id == task_id)
+        if after is not None:
+            stmt = stmt.where(tuple_(Run.created_at, Run.id) < tuple_(*after))
+        return list(
+            (await self._s.execute(stmt.execution_options(populate_existing=True))).scalars()
+        )
 
     async def mark_dispatched(self, run_ids: Sequence[uuid.UUID]) -> int:
         """Stamp `dispatched_at = now()` on runs just published (guarded by
