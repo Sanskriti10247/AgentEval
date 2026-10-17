@@ -1,4 +1,4 @@
-.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up observability-up observability-down
+.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up observability-up observability-down bench-smoke bench bench-report
 
 COMPOSE := docker compose
 # The e2e suite runs the worker with short lease timings (docker-compose.e2e.yml).
@@ -63,3 +63,13 @@ observability-down:  ## Remove Prometheus + Jaeger and recreate api and worker w
 
 web-check:  ## Dashboard gates: typecheck, lint, test, build
 	cd apps/web && npm ci && npm run typecheck && npm run lint && npm test && npm run build
+
+bench-smoke:  ## Quick benchmark sanity run: 5 noop runs, 1 worker (wipes the stack's data; make up && make migrate first)
+	AGENTEVAL_BENCH_ALLOW_RESET=1 uv run python -m benchmarks.run --workload noop-command --runs 5 --workers 1 --concurrency 2 --repeat 1 --label smoke --out-dir benchmarks/results/smoke
+
+bench:  ## Full ADR-011 matrix (hours; WIPES the stack's data and rescales the worker service), then render the report
+	AGENTEVAL_BENCH_ALLOW_RESET=1 uv run python -m benchmarks.matrix
+	uv run python -m benchmarks.report
+
+bench-report:  ## Re-render docs/benchmarks/README.md from benchmarks/results/*.json
+	uv run python -m benchmarks.report

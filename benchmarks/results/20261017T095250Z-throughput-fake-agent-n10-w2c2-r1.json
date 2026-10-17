@@ -1,0 +1,337 @@
+{
+ "schema_version": 1,
+ "label": "throughput",
+ "workload": "fake-agent",
+ "runs": 10,
+ "workers": 2,
+ "concurrency": 2,
+ "repeat": 1,
+ "repeats": 3,
+ "git": {
+  "sha": "09b6df80011891af879d25fe8b595313c20227eb",
+  "branch": "phase7/benchmarks",
+  "dirty": true
+ },
+ "started_at": "2026-10-17T09:52:42.590361+00:00",
+ "machine": {
+  "nproc": 12,
+  "cpu_model": "13th Gen Intel(R) Core(TM) i5-13420H",
+  "mem_total_mib": 15687,
+  "mem_available_mib": 4740,
+  "swap_total_mib": 15686,
+  "swap_free_mib": 10852,
+  "kernel": "7.2.5-3-omarchy",
+  "docker_server_version": "29.7.2",
+  "load_avg": [
+   7.173828125,
+   7.14111328125,
+   5.9580078125
+  ],
+  "other_containers_running": [
+   "clinicflow-control-plane",
+   "clinicflow-worker",
+   "clinicflow-worker2",
+   "knowops-frontend",
+   "knowops-tunnel",
+   "session20-control-plane"
+  ],
+  "compose_project": "agenteval"
+ },
+ "settings": {
+  "worker_env": {
+   "AGENTEVAL_DATABASE_URL": "postgresql+asyncpg://agenteval:agenteval@postgres:5432/agenteval",
+   "AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER": "false",
+   "AGENTEVAL_IMAGE_ALLOWLIST": "[\"agenteval-sandbox:py312\"]",
+   "AGENTEVAL_LOG_LEVEL": "INFO",
+   "AGENTEVAL_REDIS_URL": "redis://redis:6379/0",
+   "AGENTEVAL_WORKER_CONCURRENCY": "2",
+   "AGENTEVAL_WORKER_METRICS_HOST": "0.0.0.0",
+   "AGENTEVAL_WORKER_METRICS_PORT": "9464"
+  },
+  "submit_parallelism": 32,
+  "max_attempts": 1
+ },
+ "status": "ok",
+ "expected_outcome": "AGENT_FINISHED",
+ "graded": true,
+ "wall": {
+  "submit_s": 0.1571661519992631,
+  "total_s": 3.1806113839993486
+ },
+ "submit": {
+  "submit_s": 0.1571661519992631,
+  "submitted": 10,
+  "submit_failures": [],
+  "submit_latency_s": {
+   "n": 10,
+   "min": 0.12141107900242787,
+   "mean": 0.14172559940016072,
+   "p50": 0.14350073999958113,
+   "p95": 0.15632665374996577,
+   "p99": 0.15677494915023998,
+   "max": 0.15688702300030855
+  }
+ },
+ "progress": {
+  "terminal": 10,
+  "total": 10,
+  "finished_attempts": 10,
+  "evaluations": 10,
+  "grading_open": 0,
+  "done": true
+ },
+ "summary": {
+  "runs": 10,
+  "terminal": 10,
+  "succeeded": 10,
+  "success_rate": 1.0,
+  "retried": 0,
+  "retry_rate": 0.0,
+  "window_s": 2.7037620544433594,
+  "throughput_rps": 3.6985503156855137,
+  "graded_throughput_rps": 3.6701571175411694,
+  "latency_s": {
+   "queue": {
+    "n": 10,
+    "min": 0.013931035995483398,
+    "mean": 0.8177170753479004,
+    "p50": 1.031646490097046,
+    "p95": 1.8509852051734925,
+    "p99": 1.8709634137153626,
+    "max": 1.87595796585083
+   },
+   "start": {
+    "n": 10,
+    "min": 0.0057811737060546875,
+    "mean": 0.008534812927246093,
+    "p50": 0.0077474117279052734,
+    "p95": 0.014124143123626715,
+    "p99": 0.017091224193573,
+    "max": 0.01783299446105957
+   },
+   "exec": {
+    "n": 10,
+    "min": 0.714907169342041,
+    "mean": 0.8758418083190918,
+    "p50": 0.91645348072052,
+    "p95": 0.9628508448600769,
+    "p99": 0.9638973784446716,
+    "max": 0.9641590118408203
+   },
+   "e2e": {
+    "n": 10,
+    "min": 0.9853999614715576,
+    "mean": 1.7020936965942384,
+    "p50": 1.8851289749145508,
+    "p95": 2.5815854907035827,
+    "p99": 2.595326726436615,
+    "max": 2.598762035369873
+   },
+   "grade": {
+    "n": 10,
+    "min": 0.02091693878173828,
+    "mean": 0.03904068470001221,
+    "p50": 0.038336873054504395,
+    "p95": 0.052888262271881106,
+    "p99": 0.05558326005935669,
+    "max": 0.056257009506225586
+   },
+   "e2e_graded": {
+    "n": 10,
+    "min": 1.0171310901641846,
+    "mean": 1.7411343812942506,
+    "p50": 1.9227489233016968,
+    "p95": 2.6048352003097532,
+    "p99": 2.61671021938324,
+    "max": 2.6196789741516113
+   }
+  },
+  "failures": {}
+ },
+ "resources": {
+  "samples": 2,
+  "api": {
+   "cpu_mean": 0.2,
+   "cpu_peak": 0.21,
+   "mem_mean_mib": 113.0,
+   "mem_peak_mib": 113.0,
+   "containers_max": 1,
+   "present": 2
+  },
+  "worker": {
+   "cpu_mean": 19.905,
+   "cpu_peak": 39.21,
+   "mem_mean_mib": 299.9,
+   "mem_peak_mib": 300.1,
+   "containers_max": 2,
+   "present": 2
+  },
+  "postgres": {
+   "cpu_mean": 7.9399999999999995,
+   "cpu_peak": 11.66,
+   "mem_mean_mib": 74.935,
+   "mem_peak_mib": 75.14,
+   "containers_max": 1,
+   "present": 2
+  },
+  "redis": {
+   "cpu_mean": 1.355,
+   "cpu_peak": 2.29,
+   "mem_mean_mib": 5.373,
+   "mem_peak_mib": 5.496,
+   "containers_max": 1,
+   "present": 2
+  },
+  "sandbox": {
+   "cpu_mean": 0.0,
+   "cpu_peak": 0.0,
+   "mem_mean_mib": 0.0,
+   "mem_peak_mib": 0.0,
+   "containers_max": 0,
+   "present": 0
+  },
+  "host": {
+   "mem_available_min_mib": 4729.60546875,
+   "mem_available_mean_mib": 4736.115234375,
+   "load1_max": 7.17,
+   "load1_mean": 7.045
+  },
+  "interval_s": 2.075683832168579,
+  "errors": 0
+ },
+ "rows": {
+  "created_s": [
+   0.0,
+   0.022047042846679688,
+   0.022068023681640625,
+   0.022099971771240234,
+   0.022639989852905273,
+   0.022670984268188477,
+   0.059114933013916016,
+   0.0591280460357666,
+   0.10500001907348633,
+   0.10505008697509766
+  ],
+  "finished_s": [
+   0.9853999614715576,
+   1.880389928817749,
+   1.9339830875396729,
+   1.0386760234832764,
+   1.0509600639343262,
+   1.0511000156402588,
+   2.085582971572876,
+   2.0652599334716797,
+   2.7037620544433594,
+   2.665642023086548
+  ],
+  "queue": [
+   0.013931035995483398,
+   1.0066218376159668,
+   1.0678119659423828,
+   0.09282493591308594,
+   0.08758401870727539,
+   0.09565901756286621,
+   1.056671142578125,
+   1.0596458911895752,
+   1.87595796585083,
+   1.820462942123413
+  ],
+  "start": [
+   0.007309913635253906,
+   0.0064661502838134766,
+   0.006103992462158203,
+   0.0057811737060546875,
+   0.007597923278808594,
+   0.01783299446105957,
+   0.008544921875,
+   0.009591102600097656,
+   0.007896900177001953,
+   0.00822305679321289
+  ],
+  "exec": [
+   0.9641590118408203,
+   0.8452548980712891,
+   0.8379991054534912,
+   0.9179699420928955,
+   0.9331381320953369,
+   0.9149370193481445,
+   0.961251974105835,
+   0.9368948936462402,
+   0.714907169342041,
+   0.7319059371948242
+  ],
+  "e2e": [
+   0.9853999614715576,
+   1.8583428859710693,
+   1.9119150638580322,
+   1.0165760517120361,
+   1.028320074081421,
+   1.0284290313720703,
+   2.02646803855896,
+   2.006131887435913,
+   2.598762035369873,
+   2.56059193611145
+  ],
+  "grade": [
+   0.03173112869262695,
+   0.035839080810546875,
+   0.03940081596374512,
+   0.03727293014526367,
+   0.048770904541015625,
+   0.056257009506225586,
+   0.04658102989196777,
+   0.04753613471984863,
+   0.02091693878173828,
+   0.026100873947143555
+  ],
+  "e2e_graded": [
+   1.0171310901641846,
+   1.8941819667816162,
+   1.9513158798217773,
+   1.0538489818572998,
+   1.0770909786224365,
+   1.084686040878296,
+   2.0730490684509277,
+   2.0536680221557617,
+   2.6196789741516113,
+   2.5866928100585938
+  ],
+  "attempts": [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "status": [
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED"
+  ],
+  "outcome": [
+   "AGENT_FINISHED",
+   "AGENT_FINISHED",
+   "AGENT_FINISHED",
+   "AGENT_FINISHED",
+   "AGENT_FINISHED",
+   "AGENT_FINISHED",
+   "AGENT_FINISHED",
+   "AGENT_FINISHED",
+   "AGENT_FINISHED",
+   "AGENT_FINISHED"
+  ]
+ },
+ "finished_at": "2026-10-17T09:52:50.189985+00:00"
+}

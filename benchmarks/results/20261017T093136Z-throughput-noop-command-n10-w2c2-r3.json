@@ -1,0 +1,319 @@
+{
+ "schema_version": 1,
+ "label": "throughput",
+ "workload": "noop-command",
+ "runs": 10,
+ "workers": 2,
+ "concurrency": 2,
+ "repeat": 3,
+ "repeats": 3,
+ "git": {
+  "sha": "09b6df80011891af879d25fe8b595313c20227eb",
+  "branch": "phase7/benchmarks",
+  "dirty": true
+ },
+ "started_at": "2026-10-17T09:31:28.818997+00:00",
+ "machine": {
+  "nproc": 12,
+  "cpu_model": "13th Gen Intel(R) Core(TM) i5-13420H",
+  "mem_total_mib": 15687,
+  "mem_available_mib": 4882,
+  "swap_total_mib": 15686,
+  "swap_free_mib": 10939,
+  "kernel": "7.2.5-3-omarchy",
+  "docker_server_version": "29.7.2",
+  "load_avg": [
+   2.29541015625,
+   2.548828125,
+   2.904296875
+  ],
+  "other_containers_running": [
+   "clinicflow-control-plane",
+   "clinicflow-worker",
+   "clinicflow-worker2",
+   "knowops-frontend",
+   "knowops-tunnel",
+   "session20-control-plane"
+  ],
+  "compose_project": "agenteval"
+ },
+ "settings": {
+  "worker_env": {
+   "AGENTEVAL_DATABASE_URL": "postgresql+asyncpg://agenteval:agenteval@postgres:5432/agenteval",
+   "AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER": "false",
+   "AGENTEVAL_IMAGE_ALLOWLIST": "[\"agenteval-sandbox:py312\"]",
+   "AGENTEVAL_LOG_LEVEL": "INFO",
+   "AGENTEVAL_REDIS_URL": "redis://redis:6379/0",
+   "AGENTEVAL_WORKER_CONCURRENCY": "2",
+   "AGENTEVAL_WORKER_METRICS_HOST": "0.0.0.0",
+   "AGENTEVAL_WORKER_METRICS_PORT": "9464"
+  },
+  "submit_parallelism": 32,
+  "max_attempts": 1
+ },
+ "status": "ok",
+ "expected_outcome": "SUCCESS",
+ "graded": false,
+ "wall": {
+  "submit_s": 0.1751067660006811,
+  "total_s": 3.1976407840011234
+ },
+ "submit": {
+  "submit_s": 0.1751067660006811,
+  "submitted": 10,
+  "submit_failures": [],
+  "submit_latency_s": {
+   "n": 10,
+   "min": 0.04000611399897025,
+   "mean": 0.14991947789967525,
+   "p50": 0.16298909800025285,
+   "p95": 0.1701945225997406,
+   "p99": 0.17342149492000317,
+   "max": 0.1742282380000688
+  }
+ },
+ "progress": {
+  "terminal": 10,
+  "total": 10,
+  "finished_attempts": 10,
+  "evaluations": 0,
+  "grading_open": 0,
+  "done": true
+ },
+ "summary": {
+  "runs": 10,
+  "terminal": 10,
+  "succeeded": 10,
+  "success_rate": 1.0,
+  "retried": 0,
+  "retry_rate": 0.0,
+  "window_s": 3.0764710903167725,
+  "throughput_rps": 3.2504774809927883,
+  "graded_throughput_rps": null,
+  "latency_s": {
+   "queue": {
+    "n": 10,
+    "min": 0.017930984497070312,
+    "mean": 0.8895439147949219,
+    "p50": 0.9829419851303101,
+    "p95": 2.064811182022095,
+    "p99": 2.208215036392212,
+    "max": 2.244065999984741
+   },
+   "start": {
+    "n": 10,
+    "min": 0.006624937057495117,
+    "mean": 0.013970494270324707,
+    "p50": 0.011271476745605469,
+    "p95": 0.027421045303344726,
+    "p99": 0.027864274978637697,
+    "max": 0.027975082397460938
+   },
+   "exec": {
+    "n": 10,
+    "min": 0.7096571922302246,
+    "mean": 1.0557380199432373,
+    "p50": 1.0932015180587769,
+    "p95": 1.2619861125946046,
+    "p99": 1.2626459789276123,
+    "max": 1.2628109455108643
+   },
+   "e2e": {
+    "n": 10,
+    "min": 0.8841180801391602,
+    "mean": 1.9592524290084838,
+    "p50": 2.070955991744995,
+    "p95": 2.8448774814605713,
+    "p99": 2.9427107334136964,
+    "max": 2.9671690464019775
+   }
+  },
+  "failures": {}
+ },
+ "resources": {
+  "samples": 2,
+  "api": {
+   "cpu_mean": 4.11,
+   "cpu_peak": 8.01,
+   "mem_mean_mib": 107.2,
+   "mem_peak_mib": 107.2,
+   "containers_max": 1,
+   "present": 2
+  },
+  "worker": {
+   "cpu_mean": 5.3549999999999995,
+   "cpu_peak": 9.93,
+   "mem_mean_mib": 301.35,
+   "mem_peak_mib": 301.4,
+   "containers_max": 2,
+   "present": 2
+  },
+  "postgres": {
+   "cpu_mean": 1.7249999999999999,
+   "cpu_peak": 3.3,
+   "mem_mean_mib": 60.614999999999995,
+   "mem_peak_mib": 60.75,
+   "containers_max": 1,
+   "present": 2
+  },
+  "redis": {
+   "cpu_mean": 2.3600000000000003,
+   "cpu_peak": 2.45,
+   "mem_mean_mib": 4.043,
+   "mem_peak_mib": 4.289,
+   "containers_max": 1,
+   "present": 2
+  },
+  "sandbox": {
+   "cpu_mean": 0.0,
+   "cpu_peak": 0.0,
+   "mem_mean_mib": 0.0,
+   "mem_peak_mib": 0.0,
+   "containers_max": 1,
+   "present": 1
+  },
+  "host": {
+   "mem_available_min_mib": 4877.57421875,
+   "mem_available_mean_mib": 4878.021484375,
+   "load1_max": 2.91,
+   "load1_mean": 2.91
+  },
+  "interval_s": 2.0802812576293945,
+  "errors": 0
+ },
+ "rows": {
+  "created_s": [
+   0.0,
+   0.02701401710510254,
+   0.027019977569580078,
+   0.02726006507873535,
+   0.027415037155151367,
+   0.10929489135742188,
+   0.1092979907989502,
+   0.10930204391479492,
+   0.10931396484375,
+   0.10931897163391113
+  ],
+  "finished_s": [
+   0.8841180801391602,
+   1.199213981628418,
+   1.4035780429840088,
+   1.9406769275665283,
+   1.356205940246582,
+   2.6051831245422363,
+   2.6397759914398193,
+   3.0764710903167725,
+   2.3378090858459473,
+   2.8047289848327637
+  ],
+  "queue": [
+   0.017930984497070312,
+   0.08338499069213867,
+   0.08577203750610352,
+   0.8669559955596924,
+   0.08643507957458496,
+   1.3033690452575684,
+   1.2628750801086426,
+   2.244065999984741,
+   1.0989279747009277,
+   1.845721960067749
+  ],
+  "start": [
+   0.007853031158447266,
+   0.019665002822875977,
+   0.027975082397460938,
+   0.010228872299194336,
+   0.02674388885498047,
+   0.008144140243530273,
+   0.006624937057495117,
+   0.013445854187011719,
+   0.012314081192016602,
+   0.006710052490234375
+  ],
+  "exec": [
+   0.8583340644836426,
+   1.0691499710083008,
+   1.2628109455108643,
+   1.0362319946289062,
+   1.2156119346618652,
+   1.1843750476837158,
+   1.2609779834747314,
+   0.7096571922302246,
+   1.117253065109253,
+   0.8429780006408691
+  ],
+  "e2e": [
+   0.8841180801391602,
+   1.1721999645233154,
+   1.3765580654144287,
+   1.913416862487793,
+   1.3287909030914307,
+   2.4958882331848145,
+   2.530478000640869,
+   2.9671690464019775,
+   2.2284951210021973,
+   2.6954100131988525
+  ],
+  "grade": [
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null
+  ],
+  "e2e_graded": [
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null,
+   null
+  ],
+  "attempts": [
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1,
+   1
+  ],
+  "status": [
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED",
+   "COMPLETED"
+  ],
+  "outcome": [
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS",
+   "SUCCESS"
+  ]
+ },
+ "finished_at": "2026-10-17T09:31:36.403637+00:00"
+}
