@@ -1,0 +1,19 @@
+# Turns tracing export on (ADR-010 B). Apply on top of docker-compose.yml together with the
+# `observability` profile, which supplies the Jaeger service these variables point at:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml \
+#     --profile observability up -d
+#
+# Why an override file and not a defaulted variable in docker-compose.yml: the default stack
+# then has no OTEL_* variable at all, so "exports nothing" is true by construction, and
+# `make up` / `make e2e` never depend on a collector being there. Without this file the api
+# and worker still create spans (trace ids appear in their logs), they just never leave the
+# process.
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+
+services:
+  api:
+    environment: *otel-env
+  worker:
+    environment: *otel-env

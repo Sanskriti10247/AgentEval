@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from agenteval_core.artifacts import ArtifactStore
 from agenteval_core.logging import get_logger
 from agenteval_core.observability import metrics as prom
+from agenteval_core.observability import tracing
 from agenteval_core.queue.streams import RunQueue
 from agenteval_core.repositories.evaluations import EvaluationRepository
 from agenteval_core.repositories.recovery import (
@@ -139,7 +140,12 @@ class Reconciler:
             ("artifact_sweep", self.step_artifact_sweep),
         ):
             try:
-                await step()
+                # Its own root span, so a recovery is one trace, whatever run it
+                # touches. A step that found nothing is marked idle and not exported.
+                with tracing.span(f"reconciler.{name}", root=True, reconciler_step=name) as sp:
+                    done = await step()
+                    handled = _handled(done)
+                    sp.set(count=handled, idle=handled == 0)
             except Exception:
                 prom.reconciler_step_error(name)
                 log.exception("reconciler_step_failed", step=name)
@@ -445,6 +451,16 @@ class Reconciler:
             async with self._sm() as s, s.begin():
                 await RunRepository(s).mark_dispatched(published)
         return published
+
+
+def _handled(result: object) -> int:
+    """How much a step did, from what it returned: a list of ids, a pair of
+    lists (step 9), a count, or nothing (the step was skipped or idle)."""
+    if isinstance(result, list):
+        return len(result)
+    if isinstance(result, tuple):
+        return sum(len(part) for part in result)
+    return result if isinstance(result, int) else 0
 
 
 def _worker_of(consumer: str) -> str:

@@ -78,6 +78,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import docker
 import docker.errors
+from opentelemetry.trace import SpanKind
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -114,6 +115,7 @@ from agenteval_core.models import (
     TrajectoryEvent,
 )
 from agenteval_core.observability import metrics as prom
+from agenteval_core.observability import tracing
 from agenteval_core.reliability.backoff import backoff_delay
 from agenteval_core.reliability.policy import after_evaluation_error, after_evaluation_shutdown
 from agenteval_core.reliability.taxonomy import (
@@ -370,6 +372,28 @@ class EvaluationRunner:
         evaluation_id: uuid.UUID,
         *,
         acknowledge: Callable[[], Awaitable[None]] | None = None,
+        traceparent: str | None = None,
+    ) -> uuid.UUID | None:
+        # Delivered from the evaluations stream (`acknowledge` is its ack): the
+        # consumer side of that hop, so a child of the publisher's context, or a
+        # new root if the message had none. The inline fast path is simply a child
+        # of the run's own `run.execute` span.
+        from_stream = acknowledge is not None
+        with tracing.span(
+            "evaluation.grade",
+            kind=SpanKind.CONSUMER if from_stream else SpanKind.INTERNAL,
+            remote=from_stream,
+            traceparent=traceparent,
+            evaluation_id=evaluation_id,
+            worker_id=self._worker_id,
+        ):
+            return await self._grade(evaluation_id, acknowledge=acknowledge)
+
+    async def _grade(
+        self,
+        evaluation_id: uuid.UUID,
+        *,
+        acknowledge: Callable[[], Awaitable[None]] | None = None,
     ) -> uuid.UUID | None:
         """E4 claim -> grade -> finish. Returns the id if this call claimed the
         row, None if it did not (not PENDING any more, or its backoff has not
@@ -460,6 +484,10 @@ class EvaluationRunner:
             log.warning("evaluation_lease_lost_skip_persist", evaluation_id=str(claimed.id))
             return
         slot.finishing = True
+        if isinstance(outcome, _Done):
+            tracing.set_attributes(status=outcome.graded.verdict.status)
+        else:
+            tracing.set_attributes(status="ERROR", failure_reason=outcome.reason)
         if (
             isinstance(outcome, _Done)
             and outcome.graded.verdict.status is EvaluationStatus.SUCCEEDED
@@ -522,7 +550,9 @@ class EvaluationRunner:
                     snapshot = await self._load_workspace(loaded)
                 except WorkspaceUnavailable as exc:
                     return _Failed(exc.reason, str(exc))
-            results, integrity = await self._check(loaded.task, spec, snapshot, loaded)
+            with tracing.span("evaluation.check") as check_span:
+                results, integrity = await self._check(loaded.task, spec, snapshot, loaded)
+                check_span.set(count=len(results))
             graded = grade(spec, loaded.facts, results, integrity, loaded.metrics, loaded.config)
             return _Done(graded, integrity, loaded.config)
         except EvaluationFailed as exc:

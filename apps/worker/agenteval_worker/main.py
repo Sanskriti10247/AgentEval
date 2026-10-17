@@ -21,6 +21,7 @@ from agenteval_core.config import get_settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.logging import configure_logging, get_logger
 from agenteval_core.observability import metrics as prom
+from agenteval_core.observability.tracing import configure_tracing
 from agenteval_core.queue.streams import EVALUATION_FIELD, RunQueue, redis_for_blocking_reads
 from agenteval_core.repositories.workers import WorkerRepository
 from agenteval_worker.agent_runner import AgentRunner
@@ -41,6 +42,7 @@ REGISTRY_HEARTBEAT_S = 10.0
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_json)
+    tracing = configure_tracing("agenteval-worker")
     _start_metrics_server(settings.worker_metrics_host, settings.worker_metrics_port)
     prom.set_concurrency(settings.worker_concurrency)
     # F12: unique per process, so a restarted worker never reuses an old id.
@@ -192,6 +194,7 @@ async def main() -> None:
         await redis.aclose()
         await engine.dispose()
         log.info("worker_stopped", worker_id=worker_id)
+        tracing.shutdown()  # flush spans still in the batch queue
 
 
 async def _registry_heartbeat(

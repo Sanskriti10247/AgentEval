@@ -36,7 +36,7 @@ Phase 6 adds the three standard signals — metrics, traces, a dashboard — and
 
 - **Why OpenTelemetry:** the vendor-neutral standard; the SDK is the only dependency (`opentelemetry-api`, `-sdk`, `-exporter-otlp-proto-http`).
 - **Spans:** API request → `queue.publish` → (W3C `traceparent` carried as a field in the Redis stream message) → worker `run.execute` → `run.claim` / `attempt` → `agent.step` → `model.call` / `tool.call` → `artifact.save` → `run.finish` → `evaluation.grade` → `evaluation.check`. Attributes are ids and enums only; no prompts, outputs, hidden checks or file contents (D11, ADR-007).
-- A message without `traceparent` (older publisher, reconciler redispatch) starts a new root span linked by `run_id`.
+- Every publish runs inside a `queue.publish` producer span and writes `traceparent`; a reconciler redispatch publishes inside its own `reconciler.redispatch` root span, so the redelivered run joins that trace. A message without `traceparent` (an older or unconfigured publisher) starts a new root `run.execute` span with a `run_id` attribute.
 - **Export:** nothing leaves the process unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set (standard OTel env vars). Compose profile `observability` adds Jaeger (OTLP in, UI on 16686).
 - **Log correlation:** a structlog processor adds `trace_id`/`span_id` to every log line inside a span.
 
