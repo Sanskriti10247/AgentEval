@@ -70,6 +70,10 @@ services:
     environment:
       <<: *app-env
       AGENTEVAL_WORKER_CONCURRENCY: ${AGENTEVAL_WORKER_CONCURRENCY:-2}
+      # Prometheus endpoint (ADR-010 A): listens on all interfaces of the
+      # container, and is only `expose`d below - never published to the host.
+      AGENTEVAL_WORKER_METRICS_HOST: 0.0.0.0
+      AGENTEVAL_WORKER_METRICS_PORT: ${AGENTEVAL_WORKER_METRICS_PORT:-9464}
       # Worker only: the key never reaches the API or any sandbox container.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     # watchfiles restarts on code changes; SIGINT triggers the worker's graceful drain.
@@ -85,6 +89,9 @@ services:
       - artifacts:/var/lib/agenteval/artifacts
     # Let in-flight runs (max timeout 300s) drain on `docker compose stop`.
     stop_grace_period: 340s
+    # Reachable by other services on the compose network (Prometheus), not from the host.
+    expose:
+      - "9464"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -104,7 +111,26 @@ services:
     depends_on:
       - api
 
+  # Opt-in: `docker compose --profile observability up -d prometheus`. Scrapes the
+  # API and every worker replica (infrastructure/monitoring/prometheus.yml).
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:${AGENTEVAL_PROMETHEUS_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    depends_on:
+      - api
+      - worker
+
 volumes:
   pgdata:
   redisdata:
   artifacts:
+  promdata:

@@ -192,6 +192,7 @@ async def test_no_route_returns_hidden_evaluation_data(
     calls: list[tuple[str, str, str, dict[str, Any]]] = [
         ("GET", "/health", "/health", {}),
         ("GET", "/ready", "/ready", {}),
+        ("GET", "/metrics", "/metrics", {}),
         ("POST", "/api/v1/agents", "/api/v1/agents",
          {"json": {"name": f"b-{uuid.uuid4().hex[:6]}"}}),
         ("GET", "/api/v1/agents", "/api/v1/agents", {}),

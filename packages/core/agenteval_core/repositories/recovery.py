@@ -70,6 +70,7 @@ STEP_WORKERS = 7
 class RecoveredRun:
     run_id: uuid.UUID
     code: str  # the transition: R4a, R4b, R5, R9, R10, R11, R12
+    cancel_reason: str | None = None  # the run's cancel request, for R5 and R11 (metrics only)
 
 
 @dataclass
@@ -128,7 +129,7 @@ class RecoveryRepository:
         rows = (
             await self._s.execute(
                 text(
-                    "SELECT id, lease_epoch, unstarted_claims,"
+                    "SELECT id, lease_epoch, unstarted_claims, cancel_reason,"
                     " cancel_requested_at IS NOT NULL AS cancel"
                     " FROM runs WHERE status = 'CLAIMED' AND lease_expires_at < now()"
                     " ORDER BY lease_expires_at LIMIT :n FOR UPDATE SKIP LOCKED"
@@ -178,7 +179,7 @@ class RecoveryRepository:
                 .execution_options(synchronize_session=False)
             )
             if applied.scalar_one_or_none() is not None:
-                result.recovered.append(RecoveredRun(row.id, decision.code))
+                result.recovered.append(RecoveredRun(row.id, decision.code, row.cancel_reason))
                 log.info(
                     "run_recovered", run_id=str(row.id), transition=decision.code, scan="claimed"
                 )
@@ -195,7 +196,7 @@ class RecoveryRepository:
             await self._s.execute(
                 text(
                     "SELECT r.id AS run_id, a.id AS attempt_id, a.attempt_no,"
-                    " r.lease_epoch, r.max_attempts,"
+                    " r.lease_epoch, r.max_attempts, r.cancel_reason,"
                     " r.cancel_requested_at IS NOT NULL AS cancel"
                     " FROM runs r JOIN run_attempts a"
                     "   ON a.run_id = r.id AND a.status = 'RUNNING'"
@@ -267,7 +268,7 @@ class RecoveryRepository:
                 # Cannot happen while we hold both locks; if it ever does, the
                 # whole step's transaction must not commit a half-applied pair.
                 raise RuntimeError(f"run {row.run_id} changed under its own recovery lock")
-            result.recovered.append(RecoveredRun(row.run_id, decision.code))
+            result.recovered.append(RecoveredRun(row.run_id, decision.code, row.cancel_reason))
             result.attempt_ids.append(row.attempt_id)
             log.info(
                 "run_recovered",

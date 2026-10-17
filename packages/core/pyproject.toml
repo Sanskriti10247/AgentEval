@@ -12,6 +12,7 @@ dependencies = [
     "redis>=5.0",
     "structlog>=24.1",
     "uuid-utils>=0.9",
+    "prometheus-client>=0.20",
 ]
 
 [build-system]

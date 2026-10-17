@@ -25,6 +25,7 @@ from multiprocessing.context import SpawnContext
 from multiprocessing.process import BaseProcess
 
 from agenteval_core.logging import get_logger
+from agenteval_core.observability import metrics as prom
 from agenteval_core.reliability.fencing import LeaseDeadline, LeaseTiming
 from agenteval_core.reliability.keeper_process import run_keeper_process
 from agenteval_core.reliability.keeper_protocol import (
@@ -211,6 +212,7 @@ class LeaseManager:
     def _fire_lost(self, kind: LeaseKind, id_: str) -> None:
         held = self._held.pop((kind, id_), None)
         if held is not None:
+            prom.lease_lost(kind)
             held.on_lease_lost()
 
     async def _self_check_loop(self) -> None:

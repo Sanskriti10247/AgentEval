@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     # At drain_timeout - cancel_grace, in-flight agent runs are cancelled
     # (reason worker_shutdown) and get cancel_grace to record and persist.
     worker_cancel_grace_s: int = 20
+    # Prometheus endpoint of the worker (ADR-010 A), served from a thread. 0
+    # disables it. Loopback by default: compose sets 0.0.0.0 and publishes no
+    # port, so only the compose network (Prometheus) can reach it.
+    worker_metrics_port: int = Field(default=9464, ge=0, le=65535)
+    worker_metrics_host: str = "127.0.0.1"
 
     # Leases (F7; ADR-008 D). Timing values come from the approved Step 1
     # plan: ttl 30 s, heartbeat 10 s, self-fence margin 10 s, reconciler tick

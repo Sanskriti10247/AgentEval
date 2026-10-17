@@ -28,6 +28,7 @@ from agenteval_core.models.base import new_id
 from agenteval_core.reliability.backoff import backoff_delay
 from agenteval_core.reliability.policy import (
     DeadLetterReason,
+    RunDecision,
     after_completed_attempt,
     after_failed_attempt,
     check_budget,
@@ -172,6 +173,9 @@ class RunRepository:
         # of the artifact rows it deleted. The caller unlinks them AFTER it
         # commits (ADR-008 C); a repository never touches the store itself.
         self.cancelled_storage_keys: list[str] = []
+        # Set by finish_attempt to the transition it applied (FINISHED or CANCELLED),
+        # None when fenced. Read by the caller AFTER it commits, for metrics only.
+        self.finish_decision: RunDecision | None = None
 
     async def get(self, run_id: uuid.UUID) -> Run | None:
         return await self._s.get(Run, run_id, populate_existing=True)
@@ -538,6 +542,7 @@ class RunRepository:
         """
         retryable = is_retryable(failure_reason) if failure_reason is not None else None
         self.cancelled_storage_keys = []
+        self.finish_decision = None
         fields = {
             "exit_code": exit_code,
             "oom_killed": oom_killed,
@@ -598,6 +603,7 @@ class RunRepository:
         ).scalar_one()
 
         if result == "finished":
+            self.finish_decision = decision
             return FinishOutcome.FINISHED
         if result == "restart_cancel":
             cancel_result = (
@@ -613,12 +619,16 @@ class RunRepository:
             ).one()
             if cancel_result.result == "cancelled":
                 self.cancelled_storage_keys = list(cancel_result.storage_keys or [])
+                self.finish_decision = RunDecision("R11", RunState.CANCELLED)
                 return FinishOutcome.CANCELLED
             log.warning("finish_fenced", attempt_id=str(attempt.id), via="restart_cancel")
             return FinishOutcome.FENCED
 
         assert result == "fenced"
-        return await self._ambiguous_commit_recheck(attempt, outcome, failure_reason)
+        rechecked = await self._ambiguous_commit_recheck(attempt, outcome, failure_reason)
+        if rechecked is FinishOutcome.FINISHED:
+            self.finish_decision = decision  # our own earlier commit, never counted yet
+        return rechecked
 
     async def _ambiguous_commit_recheck(
         self, attempt: RunAttempt, outcome: Outcome, failure_reason: FailureReason | None

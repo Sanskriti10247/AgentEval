@@ -113,6 +113,7 @@ from agenteval_core.models import (
     Task,
     TrajectoryEvent,
 )
+from agenteval_core.observability import metrics as prom
 from agenteval_core.reliability.backoff import backoff_delay
 from agenteval_core.reliability.policy import after_evaluation_error, after_evaluation_shutdown
 from agenteval_core.reliability.taxonomy import (
@@ -359,6 +360,7 @@ class EvaluationRunner:
                 log.info("evaluation_exists")
                 return None
             await s.commit()
+        prom.evaluation_transition("E1")
         return Recorded(evaluation_id, EvaluationStatus.PENDING)
 
     # -- grade: claim, check, finish -----------------------------------------------------
@@ -394,6 +396,7 @@ class EvaluationRunner:
         if claimed is None:
             log.info("evaluation_claim_lost")
             return None
+        prom.evaluation_transition("E4")
         log.info(
             "evaluation_claimed",
             eval_attempts=claimed.eval_attempts,
@@ -727,6 +730,7 @@ class EvaluationRunner:
             await s.commit()
         if evaluation_id is None:
             return None
+        prom.evaluation_transition("E2")
         log.info("evaluation_finished", status=verdict.status, category=verdict.category)
         return Recorded(evaluation_id, verdict.status)
 
@@ -754,6 +758,7 @@ class EvaluationRunner:
             await s.commit()
         if evaluation_id is None:
             return None
+        prom.evaluation_transition("E3")
         log.warning("evaluation_finished", status=EvaluationStatus.ERROR, error_reason=reason)
         return Recorded(evaluation_id, EvaluationStatus.ERROR)
 
@@ -795,6 +800,8 @@ class EvaluationRunner:
                 log.warning("evaluation_finish_lost", transition=decision.code)
                 return
             await s.commit()
+        prom.evaluation_transition(decision.code)
+        prom.evaluation_duration_ms(decision.status, fields.get("duration_ms"))
         log.warning(
             "evaluation_finished",
             status=decision.status,
@@ -834,6 +841,8 @@ class EvaluationRunner:
                     await s.rollback()
                     return
                 await s.commit()
+            prom.evaluation_transition(decision.code)
+            prom.evaluation_duration_ms(decision.status, _ms_since(started))
             log.warning("evaluation_finished", status=decision.status, transition=decision.code)
         except Exception:
             log.exception("evaluation_shutdown_release_failed")
@@ -866,6 +875,8 @@ class EvaluationRunner:
                     overall=graded.score.overall,
                 )
             await s.commit()
+        prom.evaluation_transition("E5")
+        prom.evaluation_duration_ms(EvaluationStatus.SUCCEEDED, fields.get("duration_ms"))
         log.info(
             "evaluation_finished",
             status=v.status,

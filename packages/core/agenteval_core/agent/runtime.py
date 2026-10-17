@@ -37,6 +37,7 @@ from agenteval_core.agent.prompts import RUNTIME_VERSION, TRUNCATED_TOOL_INPUT, 
 from agenteval_core.agent.result import AgentResult
 from agenteval_core.agent.retry import GiveUp, Retry, RetryPolicy, next_model_retry
 from agenteval_core.logging import get_logger
+from agenteval_core.observability import metrics as prom
 from agenteval_core.providers.base import (
     ModelError,
     ModelErrorKind,
@@ -108,11 +109,17 @@ class AgentRuntime:
         self._seq = 0
         self._step = 0
         self._pending: list[TrajectoryEventData] = []
+        # Metric labels. Only registered tool names and priced (provider, model)
+        # pairs ever become label values (observability/metrics.py).
+        self._known_tools = frozenset(toolset.names)
+        self._provider = self._model = "unknown"
 
     # -- entry point -------------------------------------------------------------------
 
     async def run(self, ctx: AgentContext) -> AgentResult:
         started = ctx.clock()
+        self._provider = str(ctx.config.get("model_provider", "unknown"))
+        self._model = str(ctx.config.get("model", "unknown"))
         budget = BudgetTracker(ctx.limits)
         final_answer: str | None = None
         failure_reason: FailureReason | None = None
@@ -178,6 +185,14 @@ class AgentRuntime:
             cost = cost_usd(self._price, turn.usage)
             budget.record_call(turn.usage, cost)
             self._emit_model_call(turn, cost)
+            prom.model_call(
+                self._provider,
+                self._model,
+                latency_s=turn.latency_ms / 1000,
+                tokens_in=turn.usage.total_input_tokens,
+                tokens_out=turn.usage.output_tokens,
+                cost_usd=float(cost),
+            )
             await self._flush()  # before tools run: a hang still shows what was requested
 
             if turn.stop is StopReason.REFUSAL:
@@ -218,6 +233,7 @@ class AgentRuntime:
                     # The call was only cut short because the attempt's time ran out.
                     await self._limit_reached("deadline", budget)
                     raise _Stop(Outcome.TIMEOUT, "deadline") from err
+                prom.model_error(self._provider, self._model, err.kind)
                 decision = next_model_retry(err, retries, self._retry, ctx.time_left_s(), self._rng)
                 self._emit_model_error(err, retries, decision)
                 await self._flush()
@@ -390,6 +406,7 @@ class AgentRuntime:
         )
 
     def _emit_tool_call(self, inv: ToolInvocation, error_class: str | None = None) -> None:
+        prom.tool_call(inv.tool, self._known_tools, inv.status, inv.duration_ms / 1000)
         self._emit(
             EventType.TOOL_CALL,
             tool=inv.tool,

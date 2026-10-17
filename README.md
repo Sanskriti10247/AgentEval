@@ -15,7 +15,7 @@ A platform for running, observing, evaluating and benchmarking AI agents inside 
 >
 > **Not built yet:**
 >
-> - **Phase 6:** metrics and tracing.
+> - **Phase 6 (in progress):** Prometheus metrics are built (below); tracing, the dashboard read API and the web UI are not.
 > - **Phase 7:** performance and throughput benchmarks of the platform itself (distinct from Phase 4's benchmark evaluations, which measure agents). No performance numbers are claimed anywhere in this repository yet.
 > - **Phase 8:** authentication, rate limiting, the web UI.
 > - **Deferred:** rescoring through the API, and LLM-as-judge.
@@ -152,6 +152,64 @@ The full design, the transition tables and the failure-semantics table are in [A
 - **CPU priority.** `docker-compose.yml` gives `postgres`, `api` and `worker` a `cpu_shares` weight of 4096 (four times Docker's default of 1024) so that, on a busy single host, sandbox containers cannot starve heartbeats and cancellations (ADR-008, deployment note). Sandbox containers keep the default weight. Weights only matter under contention.
 
 Settings are listed in [`.env.example`](.env.example) and in ADR-009.
+
+## Observability
+
+Metrics are exported in the Prometheus text format (ADR-010 A). Nothing here changes how runs behave: instrumentation is best-effort and adds no database round trips.
+
+```bash
+docker compose --profile observability up -d prometheus   # UI: http://127.0.0.1:9090
+curl -s localhost:8000/metrics | head                      # the API, directly
+```
+
+- **API:** `GET /metrics`. HTTP requests and latency are labelled by route *template* (`/api/v1/runs/{run_id}`, never the raw path; unmatched paths share one `unmatched` label). `/metrics` is not counted in its own numbers. The system-state gauges are read from Postgres and Redis **on every scrape**; if one source is down, `agenteval_scrape_errors_total{source}` is incremented, that source's gauges disappear, and the scrape still returns 200.
+- **Worker:** each worker serves its own endpoint on `AGENTEVAL_WORKER_METRICS_PORT` (default 9464, `0` disables it) from a thread. In compose the port is exposed to the compose network only (Prometheus), never published to the host. The Prometheus UI is bound to `127.0.0.1`. There is no authentication yet (Phase 8).
+- **Labels are closed sets** (status, outcome, failure reason and category, transition code, tool name, provider and model, stream), never ids; a tool name the model invented is `unknown`, an unpriced model is `other`.
+
+| Family | Type | Labels |
+|---|---|---|
+| `agenteval_http_requests_total`, `agenteval_http_request_duration_seconds` | counter, histogram | `method`, `route`, `status` (no `status` on the histogram) |
+| `agenteval_runs_by_status`, `agenteval_evaluations_by_status` | gauge | `status` (evaluations are the per-attempt grading rows) |
+| `agenteval_backlog`, `agenteval_backlog_oldest_age_seconds` | gauge | `kind`: `queued_run`, `retrying_run`, `pending_evaluation` |
+| `agenteval_workers_live` | gauge | workers not stopped and heartbeating within 3 lease TTLs |
+| `agenteval_stream_length`, `agenteval_stream_pending` | gauge | `stream` |
+| `agenteval_scrape_errors_total` | counter | `source`: `postgres`, `redis` |
+| `agenteval_runs_finished_total` | counter | `status` (terminal), `outcome` (`none` when cancelled) |
+| `agenteval_run_transitions_total` | counter | `code` (ADR-009: R1, R3, R7, R8 ...), `actor` (`worker`, `reconciler`). Retries are R8 and R9; recoveries are the reconciler's R4a, R4b, R5, R9, R10, R11, R12 |
+| `agenteval_attempt_failures_total` | counter | `failure_reason`, `category` |
+| `agenteval_run_dead_letters_total`, `agenteval_run_cancellations_total` | counter | `reason` |
+| `agenteval_run_queue_wait_seconds` | histogram | creation to first claim (a retry's backoff is not queueing) |
+| `agenteval_run_duration_seconds` | histogram | `outcome`: one finished attempt |
+| `agenteval_evaluation_transitions_total`, `agenteval_evaluation_duration_seconds` | counter, histogram | `code`; `status` |
+| `agenteval_model_call_duration_seconds`, `agenteval_model_tokens_total`, `agenteval_model_cost_usd_total`, `agenteval_model_call_errors_total` | histogram, counters | `provider`, `model`; `direction` (`input`, `output`); `kind` |
+| `agenteval_tool_calls_total`, `agenteval_tool_call_duration_seconds` | counter, histogram | `tool`, `status` |
+| `agenteval_lease_losses_total`, `agenteval_artifact_saves_total`, `agenteval_reconciler_step_errors_total` | counters | `kind`; `result`; `step` |
+| `agenteval_worker_inflight`, `agenteval_worker_concurrency` | gauge | `kind` (`run`, which includes its inline grading, and `evaluation`); the configured slots |
+
+Example PromQL:
+
+```promql
+# Run success rate over 15 minutes: completed / (completed + failed); cancelled runs are excluded
+sum(rate(agenteval_runs_finished_total{status="COMPLETED"}[15m]))
+  / sum(rate(agenteval_runs_finished_total{status=~"COMPLETED|FAILED"}[15m]))
+
+# p95 attempt duration, by outcome
+histogram_quantile(0.95, sum by (le, outcome) (rate(agenteval_run_duration_seconds_bucket[15m])))
+
+# Backlog now, and how long the oldest queued run has waited
+agenteval_backlog{kind="queued_run"}
+agenteval_backlog_oldest_age_seconds{kind="queued_run"}
+
+# Retries per minute, and dead letters by reason
+sum(rate(agenteval_run_transitions_total{code=~"R8|R9"}[5m])) * 60
+sum by (reason) (increase(agenteval_run_dead_letters_total[1h]))
+
+# Spend per hour by model, and worker saturation
+sum by (model) (increase(agenteval_model_cost_usd_total[1h]))
+sum(agenteval_worker_inflight{kind="run"}) / sum(agenteval_worker_concurrency)
+```
+
+Caveats: an age is measured from creation for a queued run (a run requeued after a retry or a recovery keeps its original `created_at`), and from the moment it became due for a retrying run or a pending evaluation. Counters reset when a worker restarts (use `rate`/`increase`), and a run recovered after a crash is counted by the process that applied each transition, so sums across workers are the system totals.
 
 ## Local setup
 
@@ -473,6 +531,12 @@ The standard suite uses only the fake provider and makes no real model calls. It
 - **Integration tests** (real Postgres, Redis and Docker): every transition and constraint, fencing of stale owners, lock behaviour (recovery never waits), each reconciler step, a worker killed mid-run and recovered by another, artifact save and sweep races, evaluation recovery, and the cancel, replay, run-listing and budget APIs.
 - **E2E reliability scenarios** (`tests/e2e/test_reliability_e2e.py`) on the compose stack: worker SIGKILL mid-run and mid-grading, a transient model failure retried with backoff, run and batch cancellation, dead letter and replay, and duplicate dispatch.
 
+**Phase 6 tests (metrics):**
+
+- **Unit tests:** every metric moves on its event, labels collapse into closed sets, a broken registry never raises into the caller, and no label value looks like an id.
+- **API tests:** `/metrics` exposition, route-template labels, `unmatched`, the endpoint excluded from its own numbers, and a 200 with both sources down.
+- **Integration tests** (real Postgres, Redis and Docker): the scrape-time gauges against seeded rows and streams, a broken Redis or Postgres counted without failing the scrape, and the executor, reconciler and evaluation runner moving the run, model, tool and evaluation metrics.
+
 **E2E configuration:**
 - **Short lease timings.** `make e2e` runs `docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --no-deps --wait worker` first, so the worker uses a 15 s lease, 2 s heartbeat and 1 s reconcile tick (`docker-compose.e2e.yml`, values that pass startup validation). The crash scenarios then recover in seconds, and the older scenarios behave the same. Those timings are only for this suite: run `make up` (or `docker compose up -d worker`) afterwards to go back to the 30 s defaults. The crash scenarios call `docker compose kill -s SIGKILL worker` and `docker compose up -d worker` with both files, so the timings survive the restart.
 - **Redis.** The duplicate-dispatch scenario also needs Redis, read from `AGENTEVAL_E2E_REDIS_URL` (default `redis://127.0.0.1:56379/0`).
@@ -521,7 +585,7 @@ This is a **research and portfolio sandbox, not a hardened multi-tenant security
   - **Failure handling is tested, not load-tested.** Behaviour under sustained load, many workers and throughput are Phase 7 and nothing about them is claimed.
   - **A batch created without `Idempotency-Key`** whose dispatch fails isn't re-dispatched by the client, but the reconciler republishes its `QUEUED` runs.
 - **No authentication or rate limiting (Phase 8).** Compose binds every port to `127.0.0.1`. No web UI yet (Phase 8).
-- **No metrics or tracing (Phase 6).** Observability is structured JSON logs (with `run_id`, `task_id`, `attempt_no`, `worker_id`), the trajectory, and the run, attempt, evaluation and `workers` rows.
+- **No tracing yet (Phase 6).** Metrics are exported (see [Observability](#observability)); traces are not. Beyond metrics, observability is structured JSON logs (with `run_id`, `task_id`, `attempt_no`, `worker_id`), the trajectory, and the run, attempt, evaluation and `workers` rows.
 - **Agent runs:**
   - Budgets are checked between model calls (the worst-case overshoot is one call).
   - Model calls are non-streaming.
