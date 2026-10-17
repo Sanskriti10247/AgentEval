@@ -1,5 +1,8 @@
 # AgentEval
 
+[![CI](https://github.com/Sanskriti10247/AgentEval/actions/workflows/ci.yml/badge.svg)](https://github.com/Sanskriti10247/AgentEval/actions/workflows/ci.yml)
+[![E2E](https://github.com/Sanskriti10247/AgentEval/actions/workflows/e2e.yml/badge.svg)](https://github.com/Sanskriti10247/AgentEval/actions/workflows/e2e.yml)
+
 A platform for running, observing, evaluating and benchmarking AI agents inside controlled execution environments.
 
 > **Status: Phase 5 complete (reliability and recovery).** Two kinds of task run through the same pipeline:
@@ -509,6 +512,16 @@ ANTHROPIC_API_KEY=sk-ant-...                # passed to the worker container onl
 - **The worker refuses to start** if the provider is enabled without a key.
 - **Live smoke test:** `apps/worker/tests/test_anthropic_live.py` makes one small real request. It runs only with **both** `AGENTEVAL_LIVE_ANTHROPIC=1` and `ANTHROPIC_API_KEY` set, under `-m live`, and it costs money.
 
+## Deployment
+
+`docker-compose.prod.yml` (used on top of `docker-compose.yml`) runs the stack for a single dedicated host: images by tag, no source mounts or reload, `restart: unless-stopped`, resource limits, secrets from an env file outside the repository (`.env.prod.example`), and a Caddy reverse proxy with automatic TLS as the **only** published service (ports 80 and 443). Postgres, Redis and the metrics ports stay on the internal network.
+
+```bash
+make prod-config     # sanity-check the production compose files (throwaway secrets, starts nothing)
+```
+
+First deploy, upgrades, backups and restore, rollback, the Docker-socket caveat and sizing notes: [docs/deployment.md](docs/deployment.md). Images are published to GHCR on version tags by `.github/workflows/release.yml`.
+
 ## Repository layout
 
 ```text
@@ -550,6 +563,8 @@ make test-unit   # no Docker needed
 make e2e         # needs `make up && make migrate`; recreates the worker with short lease timings
 make lint        # ruff + mypy
 ```
+
+**Continuous integration** (`.github/workflows/`): `ci.yml` runs on every push and pull request with these jobs: `lint` (ruff, format check, mypy including `benchmarks`), `unit` (no Docker: core tests, the bounded-buffer test and the benchmark-harness tests), `integration` (the full `pytest` run on a runner with Docker, after building the sandbox image), `web` (`npm ci`, typecheck, lint, test, build), `audit` (`pip-audit` on the locked Python dependencies and `npm audit --omit=dev --audit-level=high`) and `images` (builds the api, worker, web and sandbox images without pushing). `e2e.yml` runs the compose-stack suite (`make up && make migrate && make e2e`) on pushes to `main`, nightly and on demand. `make ci-local` runs the Docker-free checks locally.
 
 The standard suite uses only the fake provider and makes no real model calls. Its one `live` test is skipped unless explicitly enabled.
 

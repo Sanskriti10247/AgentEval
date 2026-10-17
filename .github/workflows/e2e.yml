@@ -1,0 +1,70 @@
+# Full-stack end-to-end suite against the real compose stack (ADR-012 E). Too slow for every
+# push, so it runs on main, nightly and on demand.
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NO_COLOR: "1"
+  UV_FROZEN: "1"
+
+jobs:
+  e2e:
+    name: E2E (compose stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --all-packages
+
+      # `make up` builds the sandbox image, builds api and worker, and waits for health.
+      - name: Start the stack
+        run: |
+          make up
+          make migrate
+
+      # Authentication (ADR-012 A/B) is opt-in via AGENTEVAL_AUTH_ENABLED. This step is a no-op
+      # until that variable exists in the code; once it does, it turns auth on, recreates the
+      # api, creates an admin key with the keys CLI and exports it for the suite as
+      # AGENTEVAL_E2E_API_KEY. The CLI prints the new key as the last line of stdout.
+      - name: Bootstrap an API key (when auth exists)
+        run: |
+          if grep -rq "AGENTEVAL_AUTH_ENABLED" packages apps --include='*.py' --include='*.yml'; then
+            echo "AGENTEVAL_AUTH_ENABLED=true" >> .env
+            docker compose up -d --no-deps --wait api
+            key="$(docker compose run --rm -T api python -m agenteval_api.keys create --name ci-e2e --role admin | tail -n 1)"
+            echo "::add-mask::${key}"
+            echo "AGENTEVAL_E2E_API_KEY=${key}" >> "$GITHUB_ENV"
+          else
+            echo "No authentication in this commit; skipping key bootstrap."
+          fi
+
+      # Recreates the worker with short lease timings (docker-compose.e2e.yml), then pytest.
+      - name: Run the E2E suite
+        run: make e2e
+
+      - name: Dump compose logs
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml ps -a
+          docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color --timestamps
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v --remove-orphans

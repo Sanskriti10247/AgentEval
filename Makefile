@@ -1,4 +1,4 @@
-.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up observability-up observability-down bench-smoke bench bench-report
+.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up observability-up observability-down bench-smoke bench bench-report prod-config ci-local
 
 COMPOSE := docker compose
 # The e2e suite runs the worker with short lease timings (docker-compose.e2e.yml).
@@ -74,3 +74,14 @@ bench:  ## Full ADR-011 matrix (hours; WIPES the stack's data, rescales the work
 
 bench-report:  ## Re-render docs/benchmarks/README.md from benchmarks/results/*.json
 	uv run python -m benchmarks.report
+
+prod-config:  ## Sanity-check the production compose files (throwaway secrets; nothing is started)
+	AGENTEVAL_DOMAIN=agenteval.example.com POSTGRES_PASSWORD=x REDIS_PASSWORD=x \
+		docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+
+ci-local:  ## The checks CI runs without Docker: lint, unit tests, dashboard checks
+	uv run ruff check .
+	uv run ruff format --check .
+	uv run mypy packages/core/agenteval_core apps/api/agenteval_api apps/worker/agenteval_worker benchmarks
+	NO_COLOR=1 uv run pytest packages/core/tests apps/worker/tests/test_bounded_buffer.py benchmarks/tests
+	$(MAKE) web-check

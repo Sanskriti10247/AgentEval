@@ -1,0 +1,38 @@
+# Reverse proxy for production (ADR-012 F). The only service with published ports.
+# AGENTEVAL_DOMAIN is passed in by docker-compose.prod.yml. A site address that is a real
+# domain turns on automatic HTTPS (certificate issuance, renewal, HTTP -> HTTPS redirect).
+{$AGENTEVAL_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# /metrics is for Prometheus on the compose network, never for the internet.
+	handle /metrics {
+		respond "Not Found" 404
+	}
+
+	# The REST API and its two unauthenticated probes. Everything under /api/ requires a key
+	# once authentication is on; /health and /ready are deliberately open.
+	handle /api/* {
+		request_body {
+			max_size 5MB
+		}
+		reverse_proxy api:8000
+	}
+	handle /health {
+		reverse_proxy api:8000
+	}
+	handle /ready {
+		reverse_proxy api:8000
+	}
+
+	# Everything else is the dashboard.
+	handle {
+		reverse_proxy web:3000
+	}
+}
