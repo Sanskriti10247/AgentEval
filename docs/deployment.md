@@ -92,8 +92,8 @@ export AEC='docker compose --env-file /etc/agenteval/prod.env -f docker-compose.
    key from inside the API container, where the database is reachable:
 
    ```bash
-   $AEC run --rm api python -m agenteval_api.keys --help        # flags, roles and scopes
-   $AEC run --rm api python -m agenteval_api.keys create ...    # an admin key; shown once
+   $AEC run --rm api python -m agenteval_api.keys create --name admin --scopes read,write,admin
+   # Optional: --expires-days N. `keys list` shows keys (never secrets); `keys revoke <prefix>` revokes one.
    ```
 
    The CLI prints the key once. Store it in a password manager; only its hash is kept. Then call the API:
@@ -102,11 +102,11 @@ export AEC='docker compose --env-file /etc/agenteval/prod.env -f docker-compose.
    curl -fsS -H "Authorization: Bearer $KEY" https://$AGENTEVAL_DOMAIN/api/v1/stats/overview
    ```
 
-7. **Create a limited key for the dashboard** (read/write, not admin) with the same CLI, and enter it in
-   the dashboard. Keep the admin key for key management only. Revoke keys with the CLI when someone leaves or a key leaks.
+7. **Create a limited key for the dashboard** (not admin) with the same CLI —
+   `keys create --name dashboard --scopes read,write` (or `--scopes read` for a view-only
+   dashboard) — and enter it in the dashboard's key screen; it is kept in the browser session only. Keep the admin key for key management only. Revoke keys with the CLI when someone leaves or a key leaks.
 
-The exact flags and role names of `keys create` are defined by the auth implementation: take them from
-`--help`, not from this page.
+Scopes are independent (`write` does not imply `read`); see [docs/api/auth.md](api/auth.md).
 
 ## Upgrades
 

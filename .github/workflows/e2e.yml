@@ -39,21 +39,14 @@ jobs:
           make up
           make migrate
 
-      # Authentication (ADR-012 A/B) is opt-in via AGENTEVAL_AUTH_ENABLED. This step is a no-op
-      # until that variable exists in the code; once it does, it turns auth on, recreates the
-      # api, creates an admin key with the keys CLI and exports it for the suite as
-      # AGENTEVAL_E2E_API_KEY. The CLI prints the new key as the last line of stdout.
-      - name: Bootstrap an API key (when auth exists)
+      # Authentication is on by default (ADR-012 A/B). Create an admin key with the keys CLI
+      # (it prints the key as its last line) and hand it to the suite as AGENTEVAL_E2E_API_KEY.
+      - name: Bootstrap an API key
         run: |
-          if grep -rq "AGENTEVAL_AUTH_ENABLED" packages apps --include='*.py' --include='*.yml'; then
-            echo "AGENTEVAL_AUTH_ENABLED=true" >> .env
-            docker compose up -d --no-deps --wait api
-            key="$(docker compose run --rm -T api python -m agenteval_api.keys create --name ci-e2e --role admin | tail -n 1)"
-            echo "::add-mask::${key}"
-            echo "AGENTEVAL_E2E_API_KEY=${key}" >> "$GITHUB_ENV"
-          else
-            echo "No authentication in this commit; skipping key bootstrap."
-          fi
+          key="$(docker compose exec -T api python -m agenteval_api.keys create --name ci-e2e --scopes read,write,admin | tail -n 1)"
+          case "$key" in ae_*) ;; *) echo "keys CLI did not print a key"; exit 1 ;; esac
+          echo "::add-mask::${key}"
+          echo "AGENTEVAL_E2E_API_KEY=${key}" >> "$GITHUB_ENV"
 
       # Recreates the worker with short lease timings (docker-compose.e2e.yml), then pytest.
       - name: Run the E2E suite
