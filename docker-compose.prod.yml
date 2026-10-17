@@ -1,0 +1,157 @@
+# Production override (ADR-012 F). Use it together with the base file, and with secrets from an
+# env file kept OUTSIDE the repository (copy .env.prod.example):
+#
+#   docker compose --env-file /etc/agenteval/prod.env \
+#     -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# What changes relative to the development stack:
+#   - no bind-mounted source, no `--reload`, no `watchfiles`: the images are what runs;
+#   - `restart: unless-stopped`, memory and CPU limits, healthchecks on /ready;
+#   - Postgres and Redis require passwords and publish no port; the API, the worker metrics
+#     port and the dashboard publish nothing either. The ONLY published ports are Caddy's
+#     80 and 443, which terminate TLS (automatic certificates for ${AGENTEVAL_DOMAIN}) and
+#     proxy to the API and the dashboard;
+#   - images come from a registry by tag (AGENTEVAL_IMAGE_PREFIX / AGENTEVAL_VERSION), and
+#     `build:` from the base file still works for building them on the host.
+#
+# The worker keeps /var/run/docker.sock: it creates sandbox containers as siblings through it.
+# That is root-equivalent on the host. See docs/deployment.md ("The Docker socket").
+x-prod-env: &prod-env
+  AGENTEVAL_DATABASE_URL: postgresql+asyncpg://agenteval:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/agenteval
+  AGENTEVAL_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+  AGENTEVAL_CORS_ORIGINS: '["https://${AGENTEVAL_DOMAIN:?set AGENTEVAL_DOMAIN}"]'
+  AGENTEVAL_LOG_JSON: "true"
+  AGENTEVAL_AUTH_ENABLED: ${AGENTEVAL_AUTH_ENABLED:-true}
+
+services:
+  postgres:
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    ports: !reset []
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 2g }
+
+  redis:
+    restart: unless-stopped
+    # Append-only persistence (as in the base file) plus a password. The password comes from
+    # the container environment so it never appears in the process list.
+    command: ["sh", "-c", 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    ports: !reset []
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+
+  api:
+    image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-api:${AGENTEVAL_VERSION:-latest}
+    restart: unless-stopped
+    environment: *prod-env
+    # No --reload. AGENTEVAL_API_WORKERS defaults to 1 on purpose: /metrics is served from a
+    # per-process registry, so with several processes each scrape sees one random process
+    # (docs/deployment.md, "Sizing"). --proxy-headers makes the client address the one Caddy
+    # forwards; only Caddy can reach this port, so trusting it is safe.
+    command: ["uvicorn", "agenteval_api.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "${AGENTEVAL_API_WORKERS:-1}",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]
+    ports: !reset []
+    volumes: !reset []
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+
+  worker:
+    image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-worker:${AGENTEVAL_VERSION:-latest}
+    restart: unless-stopped
+    environment: *prod-env
+    # The same entrypoint as the image's default CMD, with no file watcher: SIGTERM from
+    # `docker compose stop` triggers the worker's graceful drain (stop_grace_period: 340s).
+    command: ["python", "-m", "agenteval_worker.main"]
+    # Replaces the base list: no source mounts. The socket and the artifact volume stay.
+    volumes: !override
+      - /var/run/docker.sock:/var/run/docker.sock
+      - artifacts:/var/lib/agenteval/artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9464/metrics', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    # The limit covers the worker process itself (it runs the lease keeper and the reconciler).
+    # Sandbox containers are siblings created through the socket: they are NOT inside this
+    # limit; each gets its own cgroup limits from the sandbox configuration.
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 2g }
+
+  # The dashboard is a profile in the base file; production always runs it. It is built with
+  # the public origin baked in (the API is the same origin, behind Caddy).
+  web:
+    image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-web:${AGENTEVAL_VERSION:-latest}
+    profiles: !reset []
+    restart: unless-stopped
+    build:
+      args:
+        NEXT_PUBLIC_API_URL: https://${AGENTEVAL_DOMAIN:?set AGENTEVAL_DOMAIN}
+    ports: !reset []
+    healthcheck:
+      test: ["CMD", "node", "-e",
+             "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 15s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+
+  # The only published service. Caddy obtains and renews certificates for AGENTEVAL_DOMAIN
+  # itself (ports 80 and 443 must be reachable from the internet; DNS must point here).
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      AGENTEVAL_DOMAIN: ${AGENTEVAL_DOMAIN:?set AGENTEVAL_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account: losing this volume means re-issuing (rate limits).
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api: { condition: service_healthy }
+      web: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256m }
+
+  # Optional (`--profile observability`, see docs/deployment.md). Both stay bound to loopback.
+  prometheus:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+
+  jaeger:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+
+volumes:
+  caddy_data:
+  caddy_config:

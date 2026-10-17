@@ -1,0 +1,150 @@
+# Continuous integration (ADR-012 E). Every job is read-only; nothing is pushed.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request supersedes the running one. Pushes to
+# branches (including main) are never cancelled, so every commit gets a result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NO_COLOR: "1"
+  UV_FROZEN: "1"
+
+jobs:
+  lint:
+    name: Lint (ruff, mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --all-packages
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy packages/core/agenteval_core apps/api/agenteval_api apps/worker/agenteval_worker benchmarks
+
+  unit:
+    name: Unit tests (no Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --all-packages
+      # Same selection as `make test-unit`, plus the benchmark harness tests.
+      - run: uv run pytest packages/core/tests apps/worker/tests/test_bounded_buffer.py benchmarks/tests
+
+  integration:
+    name: Integration tests (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --all-packages
+      # The sandbox tests run real containers from this image (`make sandbox-image`).
+      - name: Build the sandbox image
+        run: docker build -t agenteval-sandbox:py312 infrastructure/docker/sandbox
+      # The full suite (unit, integration, sandbox). Testcontainers starts Postgres and Redis on
+      # the runner's Docker daemon. The `live` test is skipped unless explicitly enabled.
+      - run: uv run pytest
+
+  web:
+    name: Dashboard (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      # Audit exactly what uv.lock pins: the production dependencies of every workspace member
+      # (--no-emit-workspace leaves out our own packages, which are not on PyPI). pip-audit
+      # exits non-zero on any known vulnerability.
+      - name: pip-audit (locked Python dependencies)
+        run: |
+          uv export --frozen --all-packages --no-dev --no-emit-workspace --no-hashes \
+            --format requirements.txt -o "$RUNNER_TEMP/requirements-audit.txt"
+          uvx pip-audit --requirement "$RUNNER_TEMP/requirements-audit.txt" --no-deps --disable-pip
+      # Exits non-zero when a vulnerability at or above the level exists.
+      - name: npm audit (production dependencies)
+        working-directory: apps/web
+        run: npm audit --omit=dev --audit-level=high
+
+  images:
+    name: Build image (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            dockerfile: infrastructure/docker/api.Dockerfile
+            context: .
+          - name: worker
+            dockerfile: infrastructure/docker/worker.Dockerfile
+            context: .
+          - name: web
+            dockerfile: infrastructure/docker/web.Dockerfile
+            context: .
+          - name: sandbox
+            dockerfile: infrastructure/docker/sandbox/Dockerfile
+            context: infrastructure/docker/sandbox
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build ${{ matrix.name }} (no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+          tags: agenteval-${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

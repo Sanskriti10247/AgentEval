@@ -1,0 +1,79 @@
+# Release images (ADR-012 E): on a version tag, build api, worker, web and sandbox and push
+# them to GHCR as ghcr.io/<owner>/agenteval-<name>:<tag>.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default; only the job that pushes gets packages: write.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    name: Push image (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            dockerfile: infrastructure/docker/api.Dockerfile
+            context: .
+          - name: worker
+            dockerfile: infrastructure/docker/worker.Dockerfile
+            context: .
+          - name: web
+            dockerfile: infrastructure/docker/web.Dockerfile
+            context: .
+          - name: sandbox
+            dockerfile: infrastructure/docker/sandbox/Dockerfile
+            context: infrastructure/docker/sandbox
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags: the git tag (v1.2.3), the short commit sha, and, for a stable tag (no "-rc1"
+      # suffix), `latest`. metadata-action lower-cases the image name (owners may have capitals).
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/agenteval-${{ matrix.name }}
+          tags: |
+            type=ref,event=tag
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=agenteval-${{ matrix.name }}
+
+      # The dashboard bakes the API address into its bundle at build time, so a published web
+      # image only suits a deployment at that address. Set the repository variable
+      # AGENTEVAL_WEB_API_URL for the address you publish for; otherwise build web yourself on
+      # the deployment host (docs/deployment.md).
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ${{ matrix.name == 'web' && format('NEXT_PUBLIC_API_URL={0}', vars.AGENTEVAL_WEB_API_URL || 'http://localhost:8000') || '' }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
