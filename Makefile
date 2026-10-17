@@ -1,4 +1,4 @@
-.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt
+.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up
 
 COMPOSE := docker compose
 # The e2e suite runs the worker with short lease timings (docker-compose.e2e.yml).
@@ -47,3 +47,12 @@ lint:  ## Ruff lint + format check + mypy
 fmt:  ## Autoformat
 	uv run ruff format .
 	uv run ruff check --fix .
+
+web:  ## Run the dashboard dev server on :3000 (needs the API on :8000, e.g. make up)
+	cd apps/web && npm ci && npm run dev
+
+web-up:  ## Build and start the dashboard container on 127.0.0.1:3000 (compose profile "web")
+	$(COMPOSE) --profile web up -d --build web
+
+web-check:  ## Dashboard gates: typecheck, lint, test, build
+	cd apps/web && npm ci && npm run typecheck && npm run lint && npm test && npm run build

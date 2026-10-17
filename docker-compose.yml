@@ -89,6 +89,21 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
 
+  # Dashboard (ADR-010 D). The browser calls the API directly, so NEXT_PUBLIC_API_URL is the
+  # host-side API address, baked in at build time. No auth yet (Phase 8): bound to localhost.
+  web:
+    # Opt-in (`make web-up`), so `make up` and the e2e runs never pay for a Node build.
+    profiles: ["web"]
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${AGENTEVAL_WEB_API_URL:-http://localhost:8000}
+    ports:
+      - "127.0.0.1:${AGENTEVAL_WEB_HOST_PORT:-3000}:3000"
+    depends_on:
+      - api
+
 volumes:
   pgdata:
   redisdata:

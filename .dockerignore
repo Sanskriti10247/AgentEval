@@ -10,3 +10,5 @@ node_modules
 docs
 tests
 **/tests
+**/node_modules
+**/.next
