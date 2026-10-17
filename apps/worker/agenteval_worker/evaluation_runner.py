@@ -1,29 +1,56 @@
-"""EvaluationRunner: grades one finished agent attempt (Phase 4 step 5).
+"""EvaluationRunner: records and grades finished agent attempts (Phase 4
+step 5; split and made recoverable in Phase 5 step 7).
 
 Runs only after finish_attempt has COMMITTED (D1, A1), in its own
 transactions, so evaluation can never roll back or alter the attempt's
 outcome. Evaluation never writes runs, run_attempts or trajectory_events.
 
-    tx A  record   attempt_evaluations as
-                   SKIPPED   platform failure (never fairly tested) or no spec
-                   ERROR     invalid spec, or the workspace isn't available (A2, Step 6)
-                   PENDING   otherwise
-                   (ON CONFLICT DO NOTHING: a duplicate evaluator stops here)
-    tx B  claim    PENDING -> RUNNING (exactly one winner)
-          grade    fresh EvaluationSession (only if the spec needs the workspace,
-                   A6): evidence from the pristine snapshot, static checks, then
-                   Step 3 ExecPlans through EvaluationWorkspace; classify, score
-    tx C  finish   RUNNING -> SUCCEEDED (+ one scores row) | ERROR
+Two halves, so a different worker (or the reconciler) can finish what a dead
+one started - everything `grade` needs is loaded from Postgres and the
+artifact store, never handed over in memory:
+
+    record(attempt)     tx A: the attempt's one evaluation row, ON CONFLICT DO NOTHING
+                        (a duplicate recorder stops here), only for a FINISHED
+                        attempt (F11), with the grading budget pinned (F9)
+                          E1 PENDING   needs grading
+                          E2 SKIPPED   platform failure (never fairly tested) or no spec
+                          E3 ERROR     invalid spec or scoring config, or no usable
+                                       workspace capture: non-retryable, with a reason
+    grade(evaluation_id)
+      E4 claim          PENDING -> RUNNING, epoch + 1, eval_attempts + 1, a lease the
+                        keeper renews (kind "evaluation"); exactly one winner
+         grade          fresh EvaluationSession (only if the spec needs the workspace,
+                        A6): evidence from the pristine snapshot, static checks, then
+                        Step 3 ExecPlans through EvaluationWorkspace; classify, score
+      finish            fenced by (id, RUNNING, epoch), then the lease is released:
+                          E5 SUCCEEDED (+ one scores row, same tx)
+                          E6 ERROR     non-retryable reason, or budget spent
+                          E7 PENDING   retryable reason, budget left: backoff
+                          E8a/E8b      the worker was hard-cancelled mid-grading
+                        A lease lost mid-grading cancels the work, kills the
+                        evaluation container by its attempt label and writes nothing:
+                        the reconciler (E9a/E9b) owns the row from then on.
+
+The executor's fast path calls `evaluate` = record, then grade inline. The
+reconciler dispatches rows the fast path never finished (a worker that died, a
+retry whose backoff elapsed) on the evaluations stream; `grade` is the same code.
 
 Failure attribution: anything the evaluator itself could not do - capture the
 workspace, open/drive the container, finish within its budget - is ERROR /
 evaluation_error, never a candidate failure. A check that runs past its OWN
-timeout is the candidate's (judge() says tests_failed).
+timeout is the candidate's (judge() says tests_failed). The reason is a
+structured EvaluationErrorReason chosen where the failure is raised, never
+parsed from a message:
 
-Step 6 (O3d, ADR-008): the snapshot is no longer handed over in memory, and tx
-A no longer inserts it. The executor saved it BEFORE finish (T-artifact) and
-recorded `run_attempts.workspace_capture`; grading starts from those two rows,
-so any worker can grade any attempt:
+    spec_invalid, scoring_config_invalid        grading again cannot change that
+    capture_*  (too_large | incomplete | invalid | persist_failed | missing),
+    artifact_missing | artifact_corrupt         the snapshot row, file or capture state
+    check_error                                 a check could not run (the verdict is ERROR)
+    sandbox_failed, budget_timeout,
+    internal_unexpected                         transient: retried while budget is left
+
+Step 6 (O3d, ADR-008): the executor saved the snapshot BEFORE finish (T-artifact)
+and recorded `run_attempts.workspace_capture`; grading starts from those two rows:
 
     capture too_large | incomplete | invalid | persist_failed -> ERROR capture_<value>
     row with storage_key -> ArtifactStore.read (size + SHA-256 verified);
@@ -32,12 +59,7 @@ so any worker can grade any attempt:
     no row at all               -> ERROR capture_missing
     (a spec that needs no workspace never looks: not_needed grades without one)
 
-The reason goes in `error_reason`. Messages carry only the reason's name (D11).
-
-Known crash gap (A1, for the recovery phase): if the worker dies between the
-finish_attempt commit and tx A, the attempt has no evaluation row (its snapshot
-is safe on the volume); if it dies after tx A/B, the row stays PENDING or
-RUNNING. Both are detectable by query; nothing recovers them yet.
+Messages carry only the reason's name where they can (D11).
 
 D11: raw ExecResults live only inside the check loop. Logs carry ids, status,
 category and exception TYPES - never check names, paths, hidden content or
@@ -50,9 +72,9 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import docker
 import docker.errors
@@ -83,18 +105,31 @@ from agenteval_core.evaluation.scoring import (
 from agenteval_core.evaluation.spec import EvaluationSpec
 from agenteval_core.evaluation.taxonomy import EvaluationStatus, FailureCategory
 from agenteval_core.logging import get_logger
-from agenteval_core.models import AgentVersion, Evaluation, Run, RunAttempt, Task, TrajectoryEvent
+from agenteval_core.models import (
+    AgentVersion,
+    Evaluation,
+    Run,
+    RunAttempt,
+    Task,
+    TrajectoryEvent,
+)
+from agenteval_core.reliability.backoff import backoff_delay
+from agenteval_core.reliability.policy import after_evaluation_error, after_evaluation_shutdown
 from agenteval_core.reliability.taxonomy import (
     EvaluationErrorReason,
     FailureReason,
     WorkspaceCapture,
 )
-from agenteval_core.repositories.evaluations import EvaluationRepository
+from agenteval_core.repositories.evaluations import ClaimedEvaluation, EvaluationRepository
 from agenteval_core.repositories.trajectory import TrajectoryRepository
 from agenteval_core.states import AttemptStatus, Outcome
+from agenteval_core.tools.workspace import WorkspaceUnavailable as ToolWorkspaceUnavailable
 from agenteval_worker.sandbox.evaluation import EvaluationSession, WorkspaceSnapshot
-from agenteval_worker.sandbox.session import ContainerSpec
+from agenteval_worker.sandbox.session import ContainerSpec, SandboxError
 from agenteval_worker.sandbox.workspace import EvaluationWorkspace
+
+if TYPE_CHECKING:
+    from agenteval_worker.lease_manager import LeaseManager
 
 log = get_logger(__name__)
 
@@ -111,6 +146,11 @@ _CAPTURE_FAILURES: dict[WorkspaceCapture, EvaluationErrorReason] = {
     WorkspaceCapture.INVALID: EvaluationErrorReason.CAPTURE_INVALID,
     WorkspaceCapture.PERSIST_FAILED: EvaluationErrorReason.CAPTURE_PERSIST_FAILED,
 }
+
+
+# What a drive of the evaluation container can raise when the container (not the
+# grading logic) is at fault: retried, since a fresh container may well work.
+_SANDBOX_ERRORS = (SandboxError, ToolWorkspaceUnavailable, docker.errors.DockerException)
 
 
 class WorkspaceUnavailable(Exception):
@@ -160,17 +200,61 @@ def grade(
 
 
 class EvaluationFailed(Exception):
-    """The evaluator could not finish; becomes ERROR / evaluation_error."""
+    """The evaluator could not finish; becomes ERROR / evaluation_error (or a
+    retry), with the structured reason chosen where it is raised."""
+
+    def __init__(
+        self,
+        message: str,
+        reason: EvaluationErrorReason = EvaluationErrorReason.INTERNAL_UNEXPECTED,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class Recorded(NamedTuple):
+    """What `record` created: the row's id and the status it was created with."""
+
+    evaluation_id: uuid.UUID
+    status: EvaluationStatus
 
 
 @dataclass(frozen=True)
 class _Loaded:
     attempt_id: uuid.UUID
     run_id: uuid.UUID
+    task: Task
     facts: AttemptFacts
     metrics: TrajectoryMetrics
     config: ScoringConfig | None  # None: the batch's stored config is invalid
     capture: str | None  # run_attempts.workspace_capture
+    max_eval_attempts: int  # the batch's, or the ad hoc setting (F9)
+
+
+@dataclass(frozen=True)
+class _Done:
+    graded: Graded
+    integrity: IntegrityResult
+    config: ScoringConfig
+
+
+@dataclass(frozen=True)
+class _Failed:
+    reason: EvaluationErrorReason
+    message: str
+
+
+class _Slot:
+    """Per-grading state the lease callback (running on the event loop, not in
+    `grade`'s call stack) needs: the work to cancel, and whether the lease may
+    still be considered lost (not after the finish write began)."""
+
+    __slots__ = ("work", "lost", "finishing")
+
+    def __init__(self) -> None:
+        self.work: asyncio.Future[_Done | _Failed] | None = None
+        self.lost = False
+        self.finishing = False
 
 
 class EvaluationRunner:
@@ -184,6 +268,11 @@ class EvaluationRunner:
         workspace_tmpfs_mb: int = 64,
         pids_limit: int = 128,
         setup_grace_s: float = SETUP_GRACE_S,
+        worker_id: str = "evaluator",
+        eval_max_attempts: int = 1,
+        lease_manager: LeaseManager | None = None,
+        lease_ttl_s: float = 30.0,
+        kill_by_attempt_label: Callable[[str], int] | None = None,
     ) -> None:
         self._sm = sessionmaker
         self._artifacts = artifact_store
@@ -192,83 +281,254 @@ class EvaluationRunner:
         self._workspace_mb = workspace_tmpfs_mb
         self._pids_limit = pids_limit
         self._setup_grace_s = setup_grace_s
+        self._worker_id = worker_id
+        # F9: a direct construction keeps Phase 4's single try; main() passes the setting.
+        self._eval_max_attempts = eval_max_attempts
+        self._lease_manager = lease_manager
+        self._lease_ttl_s = lease_ttl_s
+        self._kill_by_attempt_label = kill_by_attempt_label
+        self._background: set[asyncio.Task[Any]] = set()
+
+    # -- the fast path -------------------------------------------------------------------
 
     async def evaluate(self, task: Task, attempt: RunAttempt) -> uuid.UUID | None:
-        """Evaluate a FINISHED agent attempt. Returns the evaluation id, or
-        None if another evaluator already owns it. Evaluator failures end as
-        ERROR rows; only infrastructure faults (the database) raise."""
-        loaded = await self._load(task, attempt)
+        """The executor's fast path: record, then grade inline. Returns the
+        evaluation id, or None if another evaluator already owns it. Evaluator
+        failures end as ERROR rows (or a PENDING retry the reconciler
+        dispatches); only infrastructure faults (the database) raise. `task` is
+        unused: record() loads it, as the reconciler's A1 recovery must."""
+        recorded = await self.record(attempt)
+        if recorded is None:
+            return None
+        if recorded.status is not EvaluationStatus.PENDING:
+            return recorded.evaluation_id
+        return await self.grade(recorded.evaluation_id)
+
+    # -- record: tx A --------------------------------------------------------------------
+
+    async def record(self, attempt: RunAttempt) -> Recorded | None:
+        return await self.record_attempt(attempt.id)
+
+    async def record_attempt(self, attempt_id: uuid.UUID) -> Recorded | None:
+        """E1 / E2 / E3 for a FINISHED attempt (F11), by id so the reconciler's
+        A1 recovery can call it. Returns None if the attempt isn't finished or
+        already has its row (a duplicate recorder stops here)."""
+        loaded = await self._load(attempt_id)
         if loaded is None:
             return None
-        facts, metrics = loaded.facts, loaded.metrics
-        base = {"metrics": metrics.model_dump(mode="json")}
+        facts, metrics, budget = loaded.facts, loaded.metrics, loaded.max_eval_attempts
+        base: dict[str, Any] = {"metrics": metrics.model_dump(mode="json")}
 
         try:
-            spec = parse_spec(task.evaluation)
+            spec = parse_spec(loaded.task.evaluation)
         except ValidationError as exc:
-            return await self._create_error(attempt, f"invalid evaluation spec: {exc}", base)
+            return await self._create_error(
+                attempt_id,
+                f"invalid evaluation spec: {exc}",
+                base,
+                EvaluationErrorReason.SPEC_INVALID,
+                budget,
+            )
 
         if spec is None or platform_category(facts) is not None:
             verdict = classify(facts, has_spec=spec is not None, metrics=metrics)
-            return await self._create_finished(attempt, verdict, base)
+            return await self._create_finished(attempt_id, verdict, base, budget)
 
         if loaded.config is None:
-            return await self._create_error(attempt, "invalid batch scoring config", base)
-        snapshot = None
+            return await self._create_error(
+                attempt_id,
+                "invalid batch scoring config",
+                base,
+                EvaluationErrorReason.SCORING_CONFIG_INVALID,
+                budget,
+            )
         if needs_workspace(spec):
-            try:
-                snapshot = await self._load_workspace(loaded)
-            except WorkspaceUnavailable as exc:
-                return await self._create_error(attempt, str(exc), base, reason=exc.reason)
+            failure = await self._capture_failure(loaded)
+            if failure is not None:
+                return await self._create_error(
+                    attempt_id, str(WorkspaceUnavailable(failure)), base, failure, budget
+                )
 
-        # tx A: the PENDING row.
+        # E1: the PENDING row.
         async with self._sm() as s:
-            repo = EvaluationRepository(s)
-            evaluation_id = await repo.create(attempt.id, EvaluationStatus.PENDING, **base)
+            evaluation_id = await EvaluationRepository(s).create(
+                attempt_id, EvaluationStatus.PENDING, max_eval_attempts=budget, **base
+            )
             if evaluation_id is None:
                 await s.rollback()
                 log.info("evaluation_exists")
                 return None
             await s.commit()
-        return await self._run(evaluation_id, task, spec, snapshot, loaded)
+        return Recorded(evaluation_id, EvaluationStatus.PENDING)
 
-    async def _run(
+    # -- grade: claim, check, finish -----------------------------------------------------
+
+    async def grade(
         self,
         evaluation_id: uuid.UUID,
-        task: Task,
-        spec: EvaluationSpec,
-        snapshot: WorkspaceSnapshot | None,
-        loaded: _Loaded,
+        *,
+        acknowledge: Callable[[], Awaitable[None]] | None = None,
     ) -> uuid.UUID | None:
-        assert loaded.config is not None
-        config = loaded.config
-        # tx B: exactly one evaluator grades.
+        """E4 claim -> grade -> finish. Returns the id if this call claimed the
+        row, None if it did not (not PENDING any more, or its backoff has not
+        elapsed): a duplicate or stale dispatch is harmless. `acknowledge` is
+        the stream message's ack: called once the claim has been decided, won or
+        not, and never if the claim itself failed (the message stays pending and
+        the reconciler's reclaim and dispatch cover it)."""
+        t_sent = time.monotonic()  # seeds the lease's self-stop deadline, like a run's
         async with self._sm() as s:
-            if not await EvaluationRepository(s).claim(evaluation_id):
-                await s.rollback()
-                log.info("evaluation_claim_lost")
-                return None
-            await s.commit()
-
-        started = time.monotonic()
-        try:
-            results, integrity = await self._check(task, spec, snapshot, loaded)
-            graded = grade(spec, loaded.facts, results, integrity, loaded.metrics, config)
-        except asyncio.CancelledError:
-            # Shutdown hard-cancelled us: record why (best effort), then go.
-            await asyncio.shield(
-                self._finish_error(evaluation_id, "interrupted: worker_shutdown", started)
+            claimed = await EvaluationRepository(s).claim(
+                evaluation_id, self._worker_id, ttl_s=self._lease_ttl_s
             )
+            if claimed is None:
+                await s.rollback()
+            else:
+                await s.commit()
+        if acknowledge is not None:
+            try:
+                await acknowledge()
+            except Exception as exc:
+                # The claim is already durable: a failed XACK must not abandon the
+                # grading. The entry stays pending and the reconciler reclaims it.
+                log.warning("evaluation_ack_failed", error_type=type(exc).__name__)
+        if claimed is None:
+            log.info("evaluation_claim_lost")
+            return None
+        log.info(
+            "evaluation_claimed",
+            eval_attempts=claimed.eval_attempts,
+            max_eval_attempts=claimed.max_eval_attempts,
+        )
+
+        slot = _Slot()
+        if self._lease_manager is not None:
+            self._lease_manager.hold(
+                "evaluation",
+                str(claimed.id),
+                claimed.lease_epoch,
+                t_sent,
+                on_lease_lost=lambda: self._on_lease_lost(slot, claimed),
+            )
+        try:
+            await self._grade_claimed(claimed, slot)
+        finally:
+            # Right after the finish write: a renewal after it would match 0 rows,
+            # look like a lost lease and kill containers for nothing.
+            if self._lease_manager is not None:
+                self._lease_manager.release("evaluation", str(claimed.id), claimed.lease_epoch)
+        return claimed.id
+
+    def _on_lease_lost(self, slot: _Slot, claimed: ClaimedEvaluation) -> None:
+        """Called from the lease manager's own tasks. The reconciler owns the row
+        now: stop the work, kill the container by its attempt label (best effort;
+        `_check`'s own cleanup usually got there first) and let `_grade_claimed`
+        write nothing."""
+        if slot.finishing:
+            return  # a beat that raced the finish: nothing left to stop
+        slot.lost = True
+        log.warning("evaluation_lease_lost", evaluation_id=str(claimed.id))
+        if slot.work is not None and not slot.work.done():
+            slot.work.cancel()
+        if self._kill_by_attempt_label is not None:
+            task = asyncio.create_task(
+                asyncio.to_thread(self._kill_by_attempt_label, str(claimed.attempt_id))
+            )
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+
+    async def _grade_claimed(self, claimed: ClaimedEvaluation, slot: _Slot) -> None:
+        started = time.monotonic()
+        slot.work = asyncio.ensure_future(self._work(claimed))
+        try:
+            outcome = await slot.work
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            outer_cancelled = current is not None and current.cancelling() > 0
+            if slot.lost:
+                log.warning("evaluation_lease_lost_skip_persist", evaluation_id=str(claimed.id))
+                if outer_cancelled:
+                    raise
+                return
+            # Shutdown hard-cancelled us (the work, cancelled with us, has already
+            # cleaned its container up): record why, best effort, then go.
+            await asyncio.shield(self._release_for_shutdown(claimed, started))
             raise
+        if slot.lost:
+            log.warning("evaluation_lease_lost_skip_persist", evaluation_id=str(claimed.id))
+            return
+        slot.finishing = True
+        if (
+            isinstance(outcome, _Done)
+            and outcome.graded.verdict.status is EvaluationStatus.SUCCEEDED
+        ):
+            await self._finish_succeeded(claimed, outcome, started)
+        elif isinstance(outcome, _Done):
+            v = outcome.graded.verdict
+            reason = (
+                EvaluationErrorReason.CHECK_ERROR
+                if v.status is EvaluationStatus.ERROR
+                else EvaluationErrorReason.INTERNAL_UNEXPECTED
+            )
+            fields = {
+                "checks": [c.model_dump(mode="json") for c in outcome.graded.checks],
+                "integrity": outcome.integrity.model_dump(mode="json"),
+                **_verdict_fields(v),
+                "error_message": v.detail,
+                "duration_ms": _ms_since(started),
+            }
+            await self._finish_failed(claimed, reason, v.detail, fields)
+        else:
+            await self._finish_failed(
+                claimed,
+                outcome.reason,
+                outcome.message,
+                {
+                    "failure_category": FailureCategory.EVALUATION_ERROR,
+                    "failure_tags": [],
+                    "error_message": outcome.message,
+                    "duration_ms": _ms_since(started),
+                },
+            )
+
+    async def _work(self, claimed: ClaimedEvaluation) -> _Done | _Failed:
+        """Load everything, run the checks and classify. Every failure becomes a
+        `_Failed` with a structured reason; only cancellation propagates."""
+        try:
+            loaded = await self._load(claimed.attempt_id)
+            if loaded is None:
+                return _Failed(
+                    EvaluationErrorReason.INTERNAL_UNEXPECTED, "the attempt is not finished"
+                )
+            try:
+                spec = parse_spec(loaded.task.evaluation)
+            except ValidationError as exc:
+                return _Failed(
+                    EvaluationErrorReason.SPEC_INVALID, f"invalid evaluation spec: {exc}"
+                )
+            if spec is None or platform_category(loaded.facts) is not None:
+                return _Failed(
+                    EvaluationErrorReason.INTERNAL_UNEXPECTED, "the attempt needs no grading"
+                )
+            if loaded.config is None:
+                return _Failed(
+                    EvaluationErrorReason.SCORING_CONFIG_INVALID, "invalid batch scoring config"
+                )
+            snapshot = None
+            if needs_workspace(spec):
+                try:
+                    snapshot = await self._load_workspace(loaded)
+                except WorkspaceUnavailable as exc:
+                    return _Failed(exc.reason, str(exc))
+            results, integrity = await self._check(loaded.task, spec, snapshot, loaded)
+            graded = grade(spec, loaded.facts, results, integrity, loaded.metrics, loaded.config)
+            return _Done(graded, integrity, loaded.config)
         except EvaluationFailed as exc:
-            await self._finish_error(evaluation_id, str(exc), started)
-            return evaluation_id
+            return _Failed(exc.reason, str(exc))
         except Exception as exc:
             log.exception("evaluator_error", error_type=type(exc).__name__)
-            await self._finish_error(evaluation_id, f"{type(exc).__name__}: {exc}", started)
-            return evaluation_id
-        await self._finish_graded(evaluation_id, graded, integrity, config, started)
-        return evaluation_id
+            return _Failed(
+                EvaluationErrorReason.INTERNAL_UNEXPECTED, f"{type(exc).__name__}: {exc}"
+            )
 
     # -- grading -------------------------------------------------------------------------
 
@@ -328,11 +588,22 @@ class EvaluationRunner:
                     results[c.name] = judge(c, await ws.run_plan(plan(c)))
             return results, integrity
         except TimeoutError as exc:
-            raise EvaluationFailed(f"evaluation did not finish within {budget:g}s") from exc
+            raise EvaluationFailed(
+                f"evaluation did not finish within {budget:g}s",
+                EvaluationErrorReason.BUDGET_TIMEOUT,
+            ) from exc
+        except _SANDBOX_ERRORS as exc:
+            # SandboxError/SnapshotError from open(), WorkspaceUnavailable from a
+            # drive, or Docker itself: the container, not the grading logic.
+            raise EvaluationFailed(
+                f"evaluation failed: {type(exc).__name__}: {exc}",
+                EvaluationErrorReason.SANDBOX_FAILED,
+            ) from exc
         except Exception as exc:
-            # WorkspaceUnavailable, SandboxError/SnapshotError from open(),
-            # Docker errors, or missing evidence for a protected path.
-            raise EvaluationFailed(f"evaluation failed: {type(exc).__name__}: {exc}") from exc
+            raise EvaluationFailed(
+                f"evaluation failed: {type(exc).__name__}: {exc}",
+                EvaluationErrorReason.INTERNAL_UNEXPECTED,
+            ) from exc
         finally:
             await asyncio.shield(self._close(opening, session))
 
@@ -351,13 +622,24 @@ class EvaluationRunner:
         # remove(force=True) also ends any exec still streaming in a thread.
         await asyncio.to_thread(session.close)
 
-    async def _load_workspace(self, loaded: _Loaded) -> WorkspaceSnapshot:
-        """The snapshot the attempt's executor saved (ADR-008 A): by its row,
-        verified. Raises WorkspaceUnavailable with the reason otherwise."""
+    async def _capture_failure(self, loaded: _Loaded) -> EvaluationErrorReason | None:
+        """The reason the attempt has no usable snapshot, decided from rows alone
+        (no file read): a failed capture, or no artifact row at all. None when a
+        row exists; whether its file is intact is `_load_workspace`'s to find out."""
         if loaded.capture is not None:
             failure = _CAPTURE_FAILURES.get(WorkspaceCapture(loaded.capture))
             if failure is not None:
-                raise WorkspaceUnavailable(failure)
+                return failure
+        async with self._sm() as s:
+            row = await EvaluationRepository(s).get_artifact(loaded.attempt_id)
+        return EvaluationErrorReason.CAPTURE_MISSING if row is None else None
+
+    async def _load_workspace(self, loaded: _Loaded) -> WorkspaceSnapshot:
+        """The snapshot the attempt's executor saved (ADR-008 A): by its row,
+        verified. Raises WorkspaceUnavailable with the reason otherwise."""
+        failure = await self._capture_failure(loaded)
+        if failure is not None:
+            raise WorkspaceUnavailable(failure)
         async with self._sm() as s:
             row = await EvaluationRepository(s).get_artifact(loaded.attempt_id)
             if row is None:
@@ -380,21 +662,28 @@ class EvaluationRunner:
 
     # -- loading -------------------------------------------------------------------------
 
-    async def _load(self, task: Task, attempt: RunAttempt) -> _Loaded | None:
+    async def _load(self, attempt_id: uuid.UUID) -> _Loaded | None:
+        """The attempt, its task, trajectory and scoring config, all from
+        Postgres: nothing is handed over from the executor (that is what lets
+        another worker grade it)."""
         async with self._sm() as s:
-            row = await s.get(RunAttempt, attempt.id, populate_existing=True)
+            row = await s.get(RunAttempt, attempt_id, populate_existing=True)
             if row is None or row.status != AttemptStatus.FINISHED or row.outcome is None:
                 log.warning("evaluation_attempt_not_finished")
                 return None
             run = await s.get(Run, row.run_id)
             assert run is not None
+            task = await s.get(Task, run.task_id)
+            assert task is not None
             version = (
                 await s.get(AgentVersion, run.agent_version_id) if run.agent_version_id else None
             )
             config: ScoringConfig | None = DEFAULT_SCORING_CONFIG
+            budget = self._eval_max_attempts
             if run.evaluation_id is not None:
                 batch = await s.get(Evaluation, run.evaluation_id)
                 assert batch is not None
+                budget = batch.eval_max_attempts  # F9, G1: pinned by the batch
                 try:
                     config = ScoringConfig.model_validate(batch.scoring_config)
                 except ValidationError:
@@ -416,88 +705,163 @@ class EvaluationRunner:
             max_cost_usd=limits.max_cost_usd if limits else None,
             failure_reason=FailureReason(row.failure_reason) if row.failure_reason else None,
         )
-        return _Loaded(row.id, row.run_id, facts, compute(events), config, row.workspace_capture)
+        return _Loaded(
+            row.id, row.run_id, task, facts, compute(events), config, row.workspace_capture, budget
+        )
 
     # -- persistence ---------------------------------------------------------------------
 
     async def _create_finished(
-        self, attempt: RunAttempt, verdict: Verdict, base: dict[str, Any]
-    ) -> uuid.UUID | None:
+        self, attempt_id: uuid.UUID, verdict: Verdict, base: dict[str, Any], budget: int
+    ) -> Recorded | None:
+        """E2: SKIPPED, created finished."""
         async with self._sm() as s:
             evaluation_id = await EvaluationRepository(s).create(
-                attempt.id, verdict.status, **base, **_verdict_fields(verdict), duration_ms=0
+                attempt_id,
+                verdict.status,
+                max_eval_attempts=budget,
+                **base,
+                **_verdict_fields(verdict),
+                duration_ms=0,
             )
             await s.commit()
-        if evaluation_id is not None:
-            log.info("evaluation_finished", status=verdict.status, category=verdict.category)
-        return evaluation_id
+        if evaluation_id is None:
+            return None
+        log.info("evaluation_finished", status=verdict.status, category=verdict.category)
+        return Recorded(evaluation_id, verdict.status)
 
     async def _create_error(
         self,
-        attempt: RunAttempt,
+        attempt_id: uuid.UUID,
         message: str,
         base: dict[str, Any],
-        *,
-        reason: EvaluationErrorReason | None = None,
-    ) -> uuid.UUID | None:
+        reason: EvaluationErrorReason,
+        budget: int,
+    ) -> Recorded | None:
+        """E3: a non-retryable ERROR created finished, with its reason."""
         async with self._sm() as s:
             evaluation_id = await EvaluationRepository(s).create(
-                attempt.id,
+                attempt_id,
                 EvaluationStatus.ERROR,
+                max_eval_attempts=budget,
                 **base,
-                error_reason=reason.value if reason else None,
+                error_reason=reason.value,
                 failure_category=FailureCategory.EVALUATION_ERROR,
                 failure_tags=[],
                 error_message=message,
                 duration_ms=0,
             )
             await s.commit()
-        if evaluation_id is not None:
-            log.warning("evaluation_finished", status=EvaluationStatus.ERROR)
-        return evaluation_id
+        if evaluation_id is None:
+            return None
+        log.warning("evaluation_finished", status=EvaluationStatus.ERROR, error_reason=reason)
+        return Recorded(evaluation_id, EvaluationStatus.ERROR)
 
-    async def _finish_error(self, evaluation_id: uuid.UUID, message: str, started: float) -> None:
-        async with self._sm() as s:
-            await EvaluationRepository(s).finish(
-                evaluation_id,
-                EvaluationStatus.ERROR,
-                failure_category=FailureCategory.EVALUATION_ERROR,
-                failure_tags=[],
-                error_message=message,
-                duration_ms=_ms_since(started),
-            )
-            await s.commit()
-        log.warning("evaluation_finished", status=EvaluationStatus.ERROR)
-
-    async def _finish_graded(
+    async def _finish_failed(
         self,
-        evaluation_id: uuid.UUID,
-        graded: Graded,
-        integrity: IntegrityResult,
-        config: ScoringConfig,
-        started: float,
+        claimed: ClaimedEvaluation,
+        reason: EvaluationErrorReason,
+        message: str,
+        fields: dict[str, Any],
     ) -> None:
-        v = graded.verdict
+        """E6 (ERROR) or E7 (PENDING with backoff), fenced by the claim's epoch.
+        `fields` are the ERROR columns; a retry writes none of them."""
+        decision = after_evaluation_error(
+            reason,
+            eval_attempts=claimed.eval_attempts,
+            max_eval_attempts=claimed.max_eval_attempts,
+        )
+        async with self._sm() as s:
+            repo = EvaluationRepository(s)
+            if decision.status == EvaluationStatus.PENDING:  # E7
+                applied = await repo.release(
+                    claimed.id,
+                    claimed.lease_epoch,
+                    error_reason=reason.value,
+                    retry_in_s=backoff_delay(claimed.eval_attempts),
+                )
+            else:  # E6
+                assert decision.error_kind is not None
+                applied = await repo.finish(
+                    claimed.id,
+                    claimed.lease_epoch,
+                    EvaluationStatus.ERROR,
+                    error_reason=reason.value,
+                    error_kind=decision.error_kind.value,
+                    **fields,
+                )
+            if not applied:
+                await s.rollback()
+                log.warning("evaluation_finish_lost", transition=decision.code)
+                return
+            await s.commit()
+        log.warning(
+            "evaluation_finished",
+            status=decision.status,
+            transition=decision.code,
+            error_reason=reason,
+            eval_attempts=claimed.eval_attempts,
+        )
+
+    async def _release_for_shutdown(self, claimed: ClaimedEvaluation, started: float) -> None:
+        """E8a / E8b: the worker is going away mid-grading. Best effort: if this
+        write is lost too, the lease expires and the reconciler (E9) decides."""
+        decision = after_evaluation_shutdown(
+            eval_attempts=claimed.eval_attempts, max_eval_attempts=claimed.max_eval_attempts
+        )
+        reason = EvaluationErrorReason.WORKER_SHUTDOWN
+        try:
+            async with self._sm() as s:
+                repo = EvaluationRepository(s)
+                if decision.status == EvaluationStatus.PENDING:  # E8a: due at once
+                    applied = await repo.release(
+                        claimed.id, claimed.lease_epoch, error_reason=reason.value, retry_in_s=0
+                    )
+                else:  # E8b
+                    assert decision.error_kind is not None
+                    applied = await repo.finish(
+                        claimed.id,
+                        claimed.lease_epoch,
+                        EvaluationStatus.ERROR,
+                        error_reason=reason.value,
+                        error_kind=decision.error_kind.value,
+                        failure_category=FailureCategory.EVALUATION_ERROR,
+                        failure_tags=[],
+                        error_message="interrupted: worker_shutdown",
+                        duration_ms=_ms_since(started),
+                    )
+                if not applied:
+                    await s.rollback()
+                    return
+                await s.commit()
+            log.warning("evaluation_finished", status=decision.status, transition=decision.code)
+        except Exception:
+            log.exception("evaluation_shutdown_release_failed")
+
+    async def _finish_succeeded(
+        self, claimed: ClaimedEvaluation, done: _Done, started: float
+    ) -> None:
+        """E5: the terminal state and its score, together, fenced by epoch."""
+        graded, v = done.graded, done.graded.verdict
         fields: dict[str, Any] = {
             "checks": [c.model_dump(mode="json") for c in graded.checks],
-            "integrity": integrity.model_dump(mode="json"),
+            "integrity": done.integrity.model_dump(mode="json"),
             **_verdict_fields(v),
             "duration_ms": _ms_since(started),
         }
-        if v.status is EvaluationStatus.ERROR:  # a check could not run
-            fields["error_message"] = v.detail
-        # tx C: the terminal state and its score, together.
         async with self._sm() as s:
             repo = EvaluationRepository(s)
-            if not await repo.finish(evaluation_id, v.status, **fields):
-                await s.rollback()
-                log.warning("evaluation_finish_lost")
+            if not await repo.finish(
+                claimed.id, claimed.lease_epoch, EvaluationStatus.SUCCEEDED, **fields
+            ):
+                await s.rollback()  # fenced: a stale grader writes no score either
+                log.warning("evaluation_finish_lost", transition="E5")
                 return
             if graded.score is not None:
                 await repo.add_score(
-                    evaluation_id,
+                    claimed.id,
                     scoring_config_hash=graded.score.scoring_config_hash,
-                    scoring_config=config.model_dump(mode="json"),
+                    scoring_config=done.config.model_dump(mode="json"),
                     components=graded.score.components.model_dump(mode="json"),
                     overall=graded.score.overall,
                 )

@@ -103,9 +103,11 @@ class Executor:
         artifact_store: ArtifactStore | None = None,
         artifact_insert_timeout_s: float = DEFAULT_ARTIFACT_INSERT_TIMEOUT_S,
         artifact_save_deadline_s: float = DEFAULT_ARTIFACT_SAVE_DEADLINE_S,
+        evaluation_queue: RunQueue | None = None,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
+        self._evaluation_queue = evaluation_queue
         self._run_sandbox = run_sandbox
         self.worker_id = worker_id
         self._agent_runner = agent_runner
@@ -195,6 +197,28 @@ class Executor:
                         await self._evaluate(task, attempt)
             finally:
                 self._release(slot, run)
+
+    async def handle_evaluation(self, msg: DispatchMessage) -> None:
+        """One message from the evaluations stream (Step 7): the id of a PENDING
+        evaluation to grade. The runner's claim (E4) decides everything, so a
+        duplicate or stale message is harmless; the message is acked once the
+        claim is decided - won or not - and left pending if the claim itself
+        failed (the reconciler's reclaim and dispatch cover it). Grading happens
+        inline under the caller's concurrency slot, like a run."""
+        queue = self._evaluation_queue
+        if queue is None:
+            log.error("evaluation_stream_not_configured", message_id=msg.message_id)
+            return
+        if msg.evaluation_id is None or self._evaluation_runner is None:
+            log.warning("malformed_message", message_id=msg.message_id, stream=queue.stream)
+            await queue.ack(msg.message_id)
+            return
+        with structlog.contextvars.bound_contextvars(
+            evaluation_id=str(msg.evaluation_id), worker_id=self.worker_id
+        ):
+            await self._evaluation_runner.grade(
+                msg.evaluation_id, acknowledge=lambda: queue.ack(msg.message_id)
+            )
 
     def _release(self, slot: _LeaseSlot, run: Run) -> None:
         if self._lease_manager is not None and not slot.released:

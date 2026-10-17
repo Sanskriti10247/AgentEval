@@ -13,10 +13,14 @@ strictly after the transaction commits, so a rolled-back step publishes and
 kills nothing. Each step is wrapped separately: an exception is logged and the
 loop carries on with the remaining steps and the next tick.
 
-Steps (the numbering follows PROGRESS.md section 17):
+Steps (the numbering follows PROGRESS.md sections 17 and 19):
   1a/1b  recover expired CLAIMED / RUNNING leases   (R4a R4b R5 / A3 R9 R10 R11)
+  2      recover expired RUNNING evaluations         (E9a E9b), and A1: FINISHED agent
+         attempts that never got an evaluation row are recorded (its own lock key)
   3      retries whose backoff elapsed              (R12)
   4      redispatch lost QUEUED runs; reclaim idle pending stream entries
+         (both streams)
+  6      dispatch due PENDING evaluations on the evaluations stream
   7      mark silent workers lost; delete dead consumers
   5      sweep orphaned artifact files (its own timer; ADR-008)
   8      sweep orphaned containers
@@ -25,7 +29,8 @@ Steps (the numbering follows PROGRESS.md section 17):
 import asyncio
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING
 
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,9 +38,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from agenteval_core.artifacts import ArtifactStore
 from agenteval_core.logging import get_logger
 from agenteval_core.queue.streams import RunQueue
+from agenteval_core.repositories.evaluations import EvaluationRepository
 from agenteval_core.repositories.recovery import (
     STEP_ARTIFACTS,
     STEP_CLAIMED,
+    STEP_EVAL_A1,
+    STEP_EVAL_DISPATCH,
+    STEP_EVAL_RECOVERY,
     STEP_REDISPATCH,
     STEP_RETRIES_DUE,
     STEP_RUNNING,
@@ -43,6 +52,9 @@ from agenteval_core.repositories.recovery import (
     RecoveryRepository,
 )
 from agenteval_core.repositories.runs import RunRepository
+
+if TYPE_CHECKING:
+    from agenteval_worker.evaluation_runner import Recorded
 
 log = get_logger(__name__)
 
@@ -71,9 +83,18 @@ class Reconciler:
         artifact_store: ArtifactStore | None = None,
         artifact_sweep_grace_s: float = 120.0,
         wall_clock: Callable[[], float] = time.time,
+        evaluation_queue: RunQueue | None = None,
+        record_attempt: "Callable[[uuid.UUID], Awaitable[Recorded | None]] | None" = None,
+        a1_grace_s: float = 60.0,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
+        # Step 7. The evaluations stream, and the worker's own `record()` (the
+        # reconciler runs inside the worker, so it is injected, not imported).
+        self._evaluation_queue = evaluation_queue
+        self._queues = [queue] if evaluation_queue is None else [queue, evaluation_queue]
+        self._record_attempt = record_attempt
+        self._a1_grace_s = a1_grace_s
         self._worker_id = worker_id
         self._interval_s = interval_s
         self._ttl_s = lease_ttl_s
@@ -100,12 +121,17 @@ class Reconciler:
 
     async def tick(self) -> None:
         """One pass over every step. Order matters: step 1 and 3 publish and
-        stamp their runs before step 4 looks for unstamped ones."""
+        stamp their runs before step 4 looks for unstamped ones, and step 2
+        (which makes evaluations PENDING with a backoff) runs before step 6
+        (which publishes them once due)."""
         for name, step in (
             ("recover_claimed", self.step_recover_claimed),
             ("recover_running", self.step_recover_running),
+            ("recover_evaluations", self.step_recover_evaluations),
+            ("record_missing_evaluations", self.step_record_missing_evaluations),
             ("retries_due", self.step_retries_due),
             ("redispatch", self.step_redispatch),
+            ("dispatch_evaluations", self.step_dispatch_evaluations),
             ("reclaim_pending", self.step_reclaim_pending),
             ("workers", self.step_workers),
             ("orphan_sweep", self.step_orphan_sweep),
@@ -146,6 +172,62 @@ class Reconciler:
                 log.exception("recovery_kill_failed", attempt_id=str(attempt_id))
         return recovery.attempt_ids
 
+    # -- step 2 -----------------------------------------------------------------------------
+
+    async def step_recover_evaluations(self) -> list[uuid.UUID]:
+        """E9a / E9b: RUNNING evaluations whose lease expired go back to PENDING
+        with a backoff (published by step 6 once due) or to ERROR. Returns the
+        attempt ids whose containers were killed after commit."""
+        async with self._sm() as s, s.begin():
+            repo = RecoveryRepository(s)
+            if not await repo.begin_step(STEP_EVAL_RECOVERY):
+                return []
+            recovery = await repo.recover_expired_evaluations()
+        for attempt_id in recovery.attempt_ids:
+            try:
+                await asyncio.to_thread(self._kill, str(attempt_id))
+            except Exception:
+                log.exception("recovery_kill_failed", attempt_id=str(attempt_id))
+        return recovery.attempt_ids
+
+    async def step_record_missing_evaluations(self) -> list[uuid.UUID]:
+        """A1 recovery (its own advisory key, 21: the scan only reads): FINISHED
+        agent attempts older than `a1_grace_s` with no evaluation row - the
+        worker died between the finish commit and the evaluation insert. Each is
+        recorded by the worker's own `record()` (the same E1/E2/E3 decision as the
+        fast path, ON CONFLICT DO NOTHING, so a race leaves exactly one row), and
+        a PENDING one is published and stamped. Returns the evaluation ids
+        created."""
+        if self._record_attempt is None:
+            return []
+        async with self._sm() as s, s.begin():
+            repo = RecoveryRepository(s)
+            if not await repo.begin_step(STEP_EVAL_A1):
+                return []
+            attempts = await repo.attempts_missing_evaluation(self._a1_grace_s)
+        created: list[uuid.UUID] = []
+        pending: list[uuid.UUID] = []
+        for attempt_id in attempts:
+            try:
+                recorded = await self._record_attempt(attempt_id)
+            except Exception:
+                log.exception("a1_record_failed", attempt_id=str(attempt_id))
+                continue
+            if recorded is None:
+                continue
+            created.append(recorded.evaluation_id)
+            log.info(
+                "evaluation_recovered",
+                attempt_id=str(attempt_id),
+                evaluation_id=str(recorded.evaluation_id),
+                transition="A1",
+                status=recorded.status,
+            )
+            if recorded.status == "PENDING":
+                pending.append(recorded.evaluation_id)
+        await self._publish_evaluations(pending)
+        return created
+
     # -- step 3 -----------------------------------------------------------------------------
 
     async def step_retries_due(self) -> list[uuid.UUID]:
@@ -167,31 +249,50 @@ class Reconciler:
             candidates = await repo.redispatch_candidates(self._redispatch_after_s)
         return await self._publish_and_stamp(candidates)
 
+    # -- step 6 -----------------------------------------------------------------------------
+
+    async def step_dispatch_evaluations(self) -> list[uuid.UUID]:
+        """Publish due PENDING evaluations (never published, lost in transit, or
+        a retry whose backoff elapsed) to the evaluations stream, then stamp
+        `dispatched_at`. The fast path does not publish: it grades inline, and
+        the age threshold keeps this from racing it."""
+        if self._evaluation_queue is None:
+            return []
+        async with self._sm() as s, s.begin():
+            repo = RecoveryRepository(s)
+            if not await repo.begin_step(STEP_EVAL_DISPATCH):
+                return []
+            candidates = await repo.evaluation_dispatch_candidates(self._redispatch_after_s)
+        return await self._publish_evaluations(candidates)
+
     async def step_reclaim_pending(self) -> int:
         """XAUTOCLAIM entries idle for `redispatch_after_s` to this reconciler's
         consumer and ack every one: Postgres is the truth, and a run still
-        QUEUED is covered by redispatch. The ids XAUTOCLAIM reports as deleted
-        are already gone from the PEL and are never acked (G8). Returns the
-        number acked."""
+        QUEUED (or an evaluation still PENDING) is covered by redispatch. The
+        ids XAUTOCLAIM reports as deleted are already gone from the PEL and are
+        never acked (G8). Covers both streams. Returns the number acked."""
+        return sum([await self._reclaim(queue) for queue in self._queues])
+
+    async def _reclaim(self, queue: RunQueue) -> int:
         cursor = "0-0"
         acked = 0
         for _ in range(RECLAIM_MAX_PAGES):
-            claimed = await self._queue.autoclaim(
+            claimed = await queue.autoclaim(
                 self.consumer,
                 int(self._redispatch_after_s * 1000),
                 start_id=cursor,
                 count=RECLAIM_PAGE,
             )
             for msg in claimed.messages:
-                await self._queue.ack(msg.message_id)
+                await queue.ack(msg.message_id)
                 acked += 1
             if claimed.deleted_ids:
-                log.info("pending_entries_deleted", ids=claimed.deleted_ids)
+                log.info("pending_entries_deleted", ids=claimed.deleted_ids, stream=queue.stream)
             cursor = claimed.next_cursor
             if cursor == "0-0":
                 break
         if acked:
-            log.info("pending_reclaimed", acked=acked, consumer=self.consumer)
+            log.info("pending_reclaimed", acked=acked, consumer=self.consumer, stream=queue.stream)
         return acked
 
     # -- step 7 -----------------------------------------------------------------------------
@@ -200,28 +301,38 @@ class Reconciler:
         """Mark silent workers lost, then delete consumers nobody will read
         again. Returns (workers marked lost, consumers deleted)."""
         silence_s = LOST_AFTER_TTLS * self._ttl_s
-        # A Redis read, kept out of the transaction so the DB timeouts never wait on it.
-        candidates = [
-            c.name
-            for c in await self._queue.consumers()
-            if c.pending == 0
-            and c.idle_ms > silence_s * 1000
-            and c.name not in (self._worker_id, self.consumer)
-        ]
+        # Redis reads, kept out of the transaction so the DB timeouts never wait on
+        # them. A consumer exists per stream (a worker reads both); one with pending
+        # entries on a stream is kept on that stream only.
+        candidates: dict[str, list[str]] = {}  # stream -> deletable-looking consumers
+        for queue in self._queues:
+            candidates[queue.stream] = [
+                c.name
+                for c in await queue.consumers()
+                if c.pending == 0
+                and c.idle_ms > silence_s * 1000
+                and c.name not in (self._worker_id, self.consumer)
+            ]
+        names = sorted({name for found in candidates.values() for name in found})
         async with self._sm() as s, s.begin():
             repo = RecoveryRepository(s)
             if not await repo.begin_step(STEP_WORKERS):
                 return [], []
             lost = await repo.mark_workers_lost(silence_s)
-            dead = await repo.stopped_or_unknown([_worker_of(name) for name in candidates])
+            dead = await repo.stopped_or_unknown([_worker_of(name) for name in names])
         for worker_id in lost:
             log.warning("worker_lost", worker_id=worker_id)
         # After commit. A live worker's consumer (and its reconciler consumer)
         # is never deleted: only stopped or unregistered owners qualify.
-        deleted = [name for name in candidates if _worker_of(name) in dead]
-        for name in deleted:
-            await self._queue.delete_consumer(name)
-            log.info("consumer_deleted", consumer=name)
+        deleted: list[str] = []
+        for queue in self._queues:
+            for name in candidates[queue.stream]:
+                if _worker_of(name) not in dead:
+                    continue
+                await queue.delete_consumer(name)
+                log.info("consumer_deleted", consumer=name, stream=queue.stream)
+                if name not in deleted:
+                    deleted.append(name)
         return lost, deleted
 
     # -- step 8 -----------------------------------------------------------------------------
@@ -285,6 +396,28 @@ class Reconciler:
         return removed
 
     # -- helpers ----------------------------------------------------------------------------
+
+    async def _publish_evaluations(self, evaluation_ids: Sequence[uuid.UUID]) -> list[uuid.UUID]:
+        """After commit: XADD each evaluation id, then stamp `dispatched_at` on
+        those that made it (guarded by PENDING). A failed publish leaves the
+        stamp as it was, so the dispatch step retries it."""
+        queue = self._evaluation_queue
+        if queue is None:
+            return []
+        published: list[uuid.UUID] = []
+        for evaluation_id in evaluation_ids:
+            try:
+                await queue.publish(evaluation_id)
+            except RedisError as exc:
+                log.error(
+                    "reconciler_publish_failed", evaluation_id=str(evaluation_id), error=str(exc)
+                )
+                continue
+            published.append(evaluation_id)
+        if published:
+            async with self._sm() as s, s.begin():
+                await EvaluationRepository(s).mark_dispatched(published)
+        return published
 
     async def _publish_and_stamp(self, run_ids: Sequence[uuid.UUID]) -> list[uuid.UUID]:
         """After commit: XADD each run, then stamp `dispatched_at` on those that

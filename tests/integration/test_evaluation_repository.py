@@ -30,14 +30,15 @@ async def create(
 
 async def claim(sm: SM, eid: uuid.UUID) -> bool:
     async with sm() as s:
-        won = await EvaluationRepository(s).claim(eid)
+        won = await EvaluationRepository(s).claim(eid, "w-test")
         await s.commit()
-    return won
+    return won is not None
 
 
 async def finish(sm: SM, eid: uuid.UUID, status: EvaluationStatus, **kw: object) -> bool:
     async with sm() as s:
-        done = await EvaluationRepository(s).finish(eid, status, **kw)
+        epoch = (await s.get(AttemptEvaluation, eid, populate_existing=True)).lease_epoch  # type: ignore[union-attr]
+        done = await EvaluationRepository(s).finish(eid, epoch, status, **kw)
         await s.commit()
     return done
 
@@ -85,7 +86,11 @@ async def test_finish_happens_once_and_only_from_running(sessionmaker: SM) -> No
     assert not await finish(sessionmaker, eid, EvaluationStatus.SUCCEEDED, **graded)  # PENDING
     assert await claim(sessionmaker, eid)
     assert await finish(sessionmaker, eid, EvaluationStatus.SUCCEEDED, **graded)
-    error = {"failure_category": FailureCategory.EVALUATION_ERROR, "error_message": "late"}
+    error = {
+        "failure_category": FailureCategory.EVALUATION_ERROR,
+        "error_message": "late",
+        "error_reason": "check_error",
+    }
     assert not await finish(sessionmaker, eid, EvaluationStatus.ERROR, **error)
     async with sessionmaker() as s:
         row = await s.get(AttemptEvaluation, eid)
@@ -101,7 +106,11 @@ async def test_finish_happens_once_and_only_from_running(sessionmaker: SM) -> No
         (EvaluationStatus.SKIPPED, {}),  # no spec, no limit hit: no category
         (
             EvaluationStatus.ERROR,
-            {"failure_category": FailureCategory.EVALUATION_ERROR, "error_message": "x"},
+            {
+                "failure_category": FailureCategory.EVALUATION_ERROR,
+                "error_message": "x",
+                "error_reason": "check_error",
+            },
         ),
     ],
     ids=["skipped-platform", "skipped-no-spec", "error"],

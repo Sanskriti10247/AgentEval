@@ -26,11 +26,11 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-# (table, status predicate, whether the table has a cancel_requested_at column
-# the worker should react to). Only "run" is exercised before Step 7.
+# (table, status IN-list, whether the table has a cancel_requested_at column
+# the worker should react to). The IN-list is parenthesised for the SQL below.
 _TABLES: dict[LeaseKind, tuple[str, str, bool]] = {
     "run": ("runs", "('CLAIMED','RUNNING')", True),
-    "evaluation": ("attempt_evaluations", "'RUNNING'", False),
+    "evaluation": ("attempt_evaluations", "('RUNNING')", False),
 }
 
 

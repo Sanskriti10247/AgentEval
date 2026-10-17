@@ -298,7 +298,7 @@ def evaluation(attempt_id: uuid.UUID, **kw: Any) -> dict[str, Any]:
 
 VALID = [
     {"status": "PENDING"},
-    {"status": "RUNNING", "started_at": NOW},
+    {"status": "RUNNING", "started_at": NOW, "lease_expires_at": NOW},
     {
         "status": "SUCCEEDED",
         "task_success": True,
@@ -318,6 +318,7 @@ VALID = [
         "status": "ERROR",
         "failure_category": "evaluation_error",
         "error_message": "eval container lost",
+        "error_reason": "sandbox_failed",
         "finished_at": NOW,
     },
     {"status": "SKIPPED", "failure_category": "platform_sandbox", "finished_at": NOW},
@@ -335,8 +336,14 @@ async def test_valid_evaluation_states(sessionmaker: SM, values: dict[str, Any])
 INVALID = [
     ({"status": "DONE"}, "ck_attempt_evaluations_status"),
     ({"status": "PENDING", "failure_category": "passed"}, "ck_attempt_evaluations_unfinished"),
-    ({"status": "RUNNING", "task_success": False}, "ck_attempt_evaluations_unfinished"),
-    ({"status": "RUNNING", "finished_at": NOW}, "ck_attempt_evaluations_unfinished"),
+    (
+        {"status": "RUNNING", "task_success": False, "lease_expires_at": NOW},
+        "ck_attempt_evaluations_unfinished",
+    ),  # fmt: skip
+    (
+        {"status": "RUNNING", "finished_at": NOW, "lease_expires_at": NOW},
+        "ck_attempt_evaluations_unfinished",
+    ),  # fmt: skip
     (
         {"status": "SUCCEEDED", "failure_category": "passed", "finished_at": NOW},
         "ck_attempt_evaluations_succeeded",

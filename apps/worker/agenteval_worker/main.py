@@ -19,7 +19,7 @@ from agenteval_core.artifacts import LocalArtifactStore
 from agenteval_core.config import get_settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.logging import configure_logging, get_logger
-from agenteval_core.queue.streams import RunQueue, redis_for_blocking_reads
+from agenteval_core.queue.streams import EVALUATION_FIELD, RunQueue, redis_for_blocking_reads
 from agenteval_core.repositories.workers import WorkerRepository
 from agenteval_worker.agent_runner import AgentRunner
 from agenteval_worker.consumer import Consumer
@@ -32,7 +32,7 @@ from agenteval_worker.sandbox.docker_sandbox import DockerSandbox
 
 log = get_logger(__name__)
 
-WORKER_VERSION = "phase5-step6"
+WORKER_VERSION = "phase5-step7"
 REGISTRY_HEARTBEAT_S = 10.0
 
 
@@ -61,6 +61,14 @@ async def main() -> None:
     queue = RunQueue(
         redis, settings.dispatch_stream, settings.consumer_group, maxlen=settings.stream_maxlen
     )
+    # Step 7: evaluation ids travel on their own stream, same consumer group name.
+    evaluation_queue = RunQueue(
+        redis,
+        settings.evaluation_stream,
+        settings.consumer_group,
+        maxlen=settings.stream_maxlen,
+        field=EVALUATION_FIELD,
+    )
     sessionmaker = create_sessionmaker(engine)
     providers = build_providers(settings)
     agent_runner = AgentRunner(
@@ -71,15 +79,6 @@ async def main() -> None:
         workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
         pids_limit=settings.pids_limit,
     )
-    evaluation_runner = EvaluationRunner(
-        sessionmaker=sessionmaker,
-        docker_client=docker_client,
-        artifact_store=artifact_store,
-        max_output_bytes=settings.max_output_bytes,
-        workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
-        pids_limit=settings.pids_limit,
-    )
-
     async with sessionmaker() as s:
         await WorkerRepository(s).register(
             worker_id,
@@ -92,6 +91,20 @@ async def main() -> None:
 
     lease_manager = LeaseManager(settings.database_url, timing, worker_id)
     await lease_manager.start()
+
+    evaluation_runner = EvaluationRunner(
+        sessionmaker=sessionmaker,
+        docker_client=docker_client,
+        artifact_store=artifact_store,
+        max_output_bytes=settings.max_output_bytes,
+        workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
+        pids_limit=settings.pids_limit,
+        worker_id=worker_id,
+        eval_max_attempts=settings.eval_max_attempts,
+        lease_manager=lease_manager,
+        lease_ttl_s=timing.ttl_s,
+        kill_by_attempt_label=sandbox.kill_attempt,
+    )
 
     executor = Executor(
         sessionmaker,
@@ -107,10 +120,12 @@ async def main() -> None:
         artifact_store=artifact_store,
         artifact_insert_timeout_s=settings.artifact_insert_timeout_s,
         artifact_save_deadline_s=settings.artifact_save_deadline_s,
+        evaluation_queue=evaluation_queue,
     )
     consumer = Consumer(
         queue,
         executor,
+        evaluation_queue=evaluation_queue,
         concurrency=settings.worker_concurrency,
         block_ms=settings.worker_block_ms,
         drain_timeout_s=settings.worker_drain_timeout_s,
@@ -129,6 +144,9 @@ async def main() -> None:
         sweep_orphans=sandbox.sweep_orphans,
         artifact_store=artifact_store,
         artifact_sweep_grace_s=settings.artifact_sweep_grace_s,
+        evaluation_queue=evaluation_queue,
+        record_attempt=evaluation_runner.record_attempt,
+        a1_grace_s=settings.a1_grace_s,
     )
 
     stop = asyncio.Event()
@@ -140,6 +158,7 @@ async def main() -> None:
     # The consumer group must exist before the first XAUTOCLAIM/XINFO: Consumer.run
     # creates it lazily, so make sure here (idempotent) and only then start ticking.
     await queue.ensure_group()
+    await evaluation_queue.ensure_group()
     reconciler_task = asyncio.create_task(reconciler.run(stop))
 
     log.info(
