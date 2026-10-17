@@ -287,6 +287,19 @@ What it prints (real output, trimmed):
 - **The quitter** gets `graded 2, passed 0`, with `failure_categories {"tests_failed": 1, "wrong_answer": 1}`.
 - **Each result row** carries only the public projection: status, category, tags, per-position check results, score components and metrics. Hidden tests, check names and expected values never appear.
 
+## Dashboard
+
+A Next.js dashboard (`apps/web`) reads the public REST API: KPIs and charts, agents and their versions, tasks, evaluations (detail and A vs B vs C comparison), runs (with the dead-letter view, trajectory, cancel and replay) and workers. It holds no secrets and has no database access.
+
+```bash
+make up && make migrate     # the API on http://localhost:8000
+make web-up                 # the dashboard container on http://localhost:3000 (compose profile "web")
+make web                    # or: a dev server with hot reload on :3000 (npm ci + npm run dev)
+make web-check              # typecheck, lint, tests and production build
+```
+
+The dashboard service is opt-in (profile `web`), so `make up` and the e2e runs never pay for a Node build. With compose it is served on `127.0.0.1:${AGENTEVAL_WEB_HOST_PORT:-3000}`. The browser calls the API directly, so `NEXT_PUBLIC_API_URL` (build arg `AGENTEVAL_WEB_API_URL`, default `http://localhost:8000`) is baked into the bundle at build time, and the API's CORS list (`AGENTEVAL_CORS_ORIGINS`) must contain the dashboard's origin. There is **no authentication yet** (Phase 8): keep both ports bound to localhost. Details: [apps/web/README.md](apps/web/README.md).
+
 ## API
 
 The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style `application/problem+json`.

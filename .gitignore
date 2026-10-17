@@ -10,3 +10,9 @@ dist/
 build/
 .DS_Store
 node_modules/
+
+# Web dashboard (apps/web)
+apps/web/node_modules
+apps/web/.next
+apps/web/next-env.d.ts
+apps/web/*.tsbuildinfo
