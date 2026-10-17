@@ -26,7 +26,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import fields
+from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -34,11 +34,13 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agenteval_core.agent.context import CancelToken
+from agenteval_core.artifacts import ArtifactStore
 from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, Run, RunAttempt, Task
 from agenteval_core.queue.streams import DispatchMessage, RunQueue
-from agenteval_core.reliability.taxonomy import FailureReason
+from agenteval_core.reliability.taxonomy import FailureReason, WorkspaceCapture
 from agenteval_core.repositories.agents import AgentVersionRepository
+from agenteval_core.repositories.artifacts import ArtifactRepository, SaveResult
 from agenteval_core.repositories.runs import FinishOutcome, RunRepository, StartOutcome
 from agenteval_core.repositories.tasks import TaskRepository
 from agenteval_core.states import Outcome, status_for
@@ -61,6 +63,8 @@ SANDBOX_GRACE_S = 60
 TRANSIENT_DB_ERRORS = (OperationalError, InterfaceError, OSError, TimeoutError)
 FINISH_RETRY_BACKOFF_S = (0.2, 0.5, 1.0, 2.0)
 
+DEFAULT_ARTIFACT_INSERT_TIMEOUT_S = 10.0
+DEFAULT_ARTIFACT_SAVE_DEADLINE_S = 15.0
 DEFAULT_LEASE_TTL_S = 30.0
 DEFAULT_LEASE_MARGIN_S = 10.0
 
@@ -96,6 +100,9 @@ class Executor:
         lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
         lease_margin_s: float = DEFAULT_LEASE_MARGIN_S,
         kill_by_attempt_label: Callable[[str], int] | None = None,
+        artifact_store: ArtifactStore | None = None,
+        artifact_insert_timeout_s: float = DEFAULT_ARTIFACT_INSERT_TIMEOUT_S,
+        artifact_save_deadline_s: float = DEFAULT_ARTIFACT_SAVE_DEADLINE_S,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
@@ -109,6 +116,9 @@ class Executor:
         self._lease_ttl_s = lease_ttl_s
         self._lease_margin_s = lease_margin_s
         self._kill_by_attempt_label = kill_by_attempt_label
+        self._artifacts = artifact_store
+        self._artifact_insert_timeout_s = artifact_insert_timeout_s
+        self._artifact_save_deadline_s = artifact_save_deadline_s
         # In-flight agent runs, so shutdown can cancel them cooperatively.
         self._active: dict[uuid.UUID, CancelToken] = {}
 
@@ -168,6 +178,13 @@ class Executor:
                         # avoids the call and the "finish_fenced" noise.
                         log.warning("lease_lost_skip_persist", attempt_id=str(attempt.id))
                         return
+                    result = await self._save_workspace(attempt, result)
+                    if slot.token.reason == "lease_lost":
+                        # Lost while saving: T-finish would be fenced. Any row the
+                        # save inserted stays (the attempt is abandoned and never
+                        # graded); an orphan file is the sweeper's.
+                        log.warning("lease_lost_skip_persist", attempt_id=str(attempt.id))
+                        return
                     outcome = await self._persist(attempt, result)
                     # The run is terminal (or RETRYING) now and holds no lease: stop
                     # renewing before grading, or the next renewal would match 0 rows,
@@ -175,7 +192,7 @@ class Executor:
                     # carries the same agenteval.attempt_id label).
                     self._release(slot, run)
                     if outcome is FinishOutcome.FINISHED and task.task_type == "agent":
-                        await self._evaluate(task, attempt, result)
+                        await self._evaluate(task, attempt)
             finally:
                 self._release(slot, run)
 
@@ -319,13 +336,13 @@ class Executor:
         for try_no in range(len(self._finish_backoff_s) + 1):
             try:
                 async with self._sm() as s:
-                    outcome = await RunRepository(s).finish_attempt(
-                        attempt, **_finish_fields(result)
-                    )
+                    repo = RunRepository(s)
+                    outcome = await repo.finish_attempt(attempt, **_finish_fields(result))
                     if outcome is FinishOutcome.FENCED:
                         await s.rollback()
                         return outcome
                     await s.commit()
+                    cancelled_keys = repo.cancelled_storage_keys
                 break
             except TRANSIENT_DB_ERRORS as exc:
                 if try_no == len(self._finish_backoff_s):
@@ -350,19 +367,67 @@ class Executor:
             duration_ms=result.duration_ms,
             oom_killed=result.oom_killed,
         )
+        # ADR-008 C: after the CANCEL commit, never before; best effort (the
+        # sweeper removes what this misses).
+        for key in cancelled_keys:
+            await self._unlink(key)
         return outcome
 
-    async def _evaluate(
-        self, task: Task, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
-    ) -> None:
+    async def _save_workspace(
+        self, attempt: RunAttempt, result: "ExecutionResult | AgentAttemptResult"
+    ) -> "ExecutionResult | AgentAttemptResult":
+        """T-artifact (O3d): save the exported snapshot while the attempt is
+        still RUNNING, and record what became of it as `workspace_capture`.
+        Only an agent result carries a snapshot; anything else passes through.
+        A save that fails, times out, misses its deadline, is fenced or loses
+        to a pending cancel yields `persist_failed` and nothing else: it never
+        changes the attempt's outcome (T-finish or T-cancel decide that)."""
+        from agenteval_worker.agent_runner import AgentAttemptResult  # not at import: docker
+
+        if not isinstance(result, AgentAttemptResult) or result.snapshot is None:
+            return result
+        snapshot = result.snapshot
+        capture = WorkspaceCapture.PERSIST_FAILED
+        if self._artifacts is None:
+            log.error("artifact_store_missing", attempt_id=str(attempt.id))
+        else:
+            try:
+                async with self._sm() as s:
+                    saved = await ArtifactRepository(s, self._artifacts).save(
+                        run_id=attempt.run_id,
+                        attempt_id=attempt.id,
+                        epoch=attempt.lease_epoch,
+                        data=snapshot.data,
+                        metadata={"normalized_paths": list(snapshot.normalized_paths)},
+                        insert_timeout_s=self._artifact_insert_timeout_s,
+                        deadline_s=self._artifact_save_deadline_s,
+                    )
+                    if saved is SaveResult.STORED:
+                        await s.commit()
+                        capture = WorkspaceCapture.STORED
+                    # Otherwise leaving the block rolls back: after a statement
+                    # timeout the transaction is aborted anyway.
+            except Exception as exc:
+                # A failed commit is ambiguous, so the file is left to the sweeper
+                # (it never deletes a referenced one).
+                log.warning("artifact_commit_failed", error_type=type(exc).__name__)
+        return replace(result, workspace_capture=capture, snapshot=None)
+
+    async def _unlink(self, key: str) -> None:
+        if self._artifacts is None:
+            return
+        try:
+            await self._artifacts.delete(key)
+        except Exception as exc:
+            log.warning("artifact_unlink_failed", key=key, error=str(exc))
+
+    async def _evaluate(self, task: Task, attempt: RunAttempt) -> None:
         """Never raises: the attempt is already durable, and nothing about
         evaluation may affect it. The runner records its own failures."""
         if self._evaluation_runner is None:
             return
         try:
-            await self._evaluation_runner.evaluate(
-                task, attempt, getattr(result, "workspace", None)
-            )
+            await self._evaluation_runner.evaluate(task, attempt)
         except Exception as exc:
             log.exception("evaluation_crashed", error_type=type(exc).__name__)
 
@@ -376,9 +441,9 @@ class Executor:
 
 
 def _finish_fields(result: "ExecutionResult | AgentAttemptResult") -> dict[str, Any]:
-    """The finish_attempt columns: every field except the evaluator's
-    workspace capture (shallow, so a snapshot's bytes are never copied)."""
-    return {f.name: getattr(result, f.name) for f in fields(result) if f.name != "workspace"}
+    """The finish_attempt columns: every field except the transient exported
+    snapshot (shallow, so its bytes are never copied)."""
+    return {f.name: getattr(result, f.name) for f in fields(result) if f.name != "snapshot"}
 
 
 def _internal_error(message: str, reason: FailureReason) -> ExecutionResult:

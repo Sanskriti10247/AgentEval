@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from agenteval_core.artifacts import LocalArtifactStore
 from agenteval_core.models import AgentVersion
 from agenteval_core.queue.streams import RunQueue
 from tests.integration.conftest import SANDBOX_IMAGE
@@ -50,7 +51,12 @@ async def make_dataset(client: httpx.AsyncClient) -> tuple[str, dict[str, str]]:
 
 
 async def evaluate(
-    client: httpx.AsyncClient, sm: SM, queue: RunQueue, ds: str, script: list[dict[str, Any]]
+    client: httpx.AsyncClient,
+    sm: SM,
+    queue: RunQueue,
+    store: LocalArtifactStore,
+    ds: str,
+    script: list[dict[str, Any]],
 ) -> str:
     version = await agent_version(sm)
     async with sm() as s:  # give the version its script
@@ -66,18 +72,21 @@ async def evaluate(
         json={"name": "calc-bench", "dataset_id": ds, "agent_version_id": str(version)},
     )
     assert resp.status_code == 202, resp.text
-    ex, _ = build(sm, queue)
+    ex, _ = build(sm, queue, store)
     for _ in range(resp.json()["progress"]["runs_total"]):
         await handle_next(ex, queue)
     return str(resp.json()["id"])
 
 
 async def test_benchmark_flow_through_the_api(
-    client: httpx.AsyncClient, sessionmaker: SM, queue: RunQueue
+    client: httpx.AsyncClient,
+    sessionmaker: SM,
+    queue: RunQueue,
+    artifact_store: LocalArtifactStore,
 ) -> None:
     ds, tasks = await make_dataset(client)
-    fixer = await evaluate(client, sessionmaker, queue, ds, FIX_THE_BUG)
-    quitter = await evaluate(client, sessionmaker, queue, ds, GIVE_UP)
+    fixer = await evaluate(client, sessionmaker, queue, artifact_store, ds, FIX_THE_BUG)
+    quitter = await evaluate(client, sessionmaker, queue, artifact_store, ds, GIVE_UP)
 
     progress = (await client.get(f"/api/v1/evaluations/{fixer}")).json()["progress"]
     assert progress["complete"] is True and progress["runs_by_status"]["COMPLETED"] == 3

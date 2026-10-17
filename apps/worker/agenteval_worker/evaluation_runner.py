@@ -4,9 +4,9 @@ Runs only after finish_attempt has COMMITTED (D1, A1), in its own
 transactions, so evaluation can never roll back or alter the attempt's
 outcome. Evaluation never writes runs, run_attempts or trajectory_events.
 
-    tx A  record   attempt_artifacts (the snapshot) + attempt_evaluations as
+    tx A  record   attempt_evaluations as
                    SKIPPED   platform failure (never fairly tested) or no spec
-                   ERROR     invalid spec, or the workspace couldn't be captured (A2)
+                   ERROR     invalid spec, or the workspace isn't available (A2, Step 6)
                    PENDING   otherwise
                    (ON CONFLICT DO NOTHING: a duplicate evaluator stops here)
     tx B  claim    PENDING -> RUNNING (exactly one winner)
@@ -20,9 +20,23 @@ workspace, open/drive the container, finish within its budget - is ERROR /
 evaluation_error, never a candidate failure. A check that runs past its OWN
 timeout is the candidate's (judge() says tests_failed).
 
+Step 6 (O3d, ADR-008): the snapshot is no longer handed over in memory, and tx
+A no longer inserts it. The executor saved it BEFORE finish (T-artifact) and
+recorded `run_attempts.workspace_capture`; grading starts from those two rows,
+so any worker can grade any attempt:
+
+    capture too_large | incomplete | invalid | persist_failed -> ERROR capture_<value>
+    row with storage_key -> ArtifactStore.read (size + SHA-256 verified);
+        missing file -> ERROR artifact_missing, wrong bytes -> ERROR artifact_corrupt
+    row with content (Phase 4)  -> those bytes
+    no row at all               -> ERROR capture_missing
+    (a spec that needs no workspace never looks: not_needed grades without one)
+
+The reason goes in `error_reason`. Messages carry only the reason's name (D11).
+
 Known crash gap (A1, for the recovery phase): if the worker dies between the
-finish_attempt commit and tx A, the attempt has no evaluation row and the
-in-memory snapshot is lost; if it dies after tx A/B, the row stays PENDING or
+finish_attempt commit and tx A, the attempt has no evaluation row (its snapshot
+is safe on the volume); if it dies after tx A/B, the row stays PENDING or
 RUNNING. Both are detectable by query; nothing recovers them yet.
 
 D11: raw ExecResults live only inside the check loop. Logs carry ids, status,
@@ -46,6 +60,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agenteval_core.agent.limits import AgentLimits
+from agenteval_core.artifacts import ArtifactCorrupt, ArtifactMissing, ArtifactStore
 from agenteval_core.evaluation.checks import (
     evaluator_files,
     execution_order,
@@ -69,7 +84,11 @@ from agenteval_core.evaluation.spec import EvaluationSpec
 from agenteval_core.evaluation.taxonomy import EvaluationStatus, FailureCategory
 from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, Evaluation, Run, RunAttempt, Task, TrajectoryEvent
-from agenteval_core.reliability.taxonomy import FailureReason
+from agenteval_core.reliability.taxonomy import (
+    EvaluationErrorReason,
+    FailureReason,
+    WorkspaceCapture,
+)
 from agenteval_core.repositories.evaluations import EvaluationRepository
 from agenteval_core.repositories.trajectory import TrajectoryRepository
 from agenteval_core.states import AttemptStatus, Outcome
@@ -85,13 +104,22 @@ SETUP_GRACE_S = 60
 EVENT_PAGE = 1000
 
 
-@dataclass(frozen=True)
-class WorkspaceCapture:
-    """What AgentRunner captured from the agent's container before closing
-    it: the snapshot, or why it couldn't be taken (A2: an evaluator failure)."""
+# A capture that left no usable snapshot: grading it again cannot change that.
+_CAPTURE_FAILURES: dict[WorkspaceCapture, EvaluationErrorReason] = {
+    WorkspaceCapture.TOO_LARGE: EvaluationErrorReason.CAPTURE_TOO_LARGE,
+    WorkspaceCapture.INCOMPLETE: EvaluationErrorReason.CAPTURE_INCOMPLETE,
+    WorkspaceCapture.INVALID: EvaluationErrorReason.CAPTURE_INVALID,
+    WorkspaceCapture.PERSIST_FAILED: EvaluationErrorReason.CAPTURE_PERSIST_FAILED,
+}
 
-    snapshot: WorkspaceSnapshot | None = None
-    error: str | None = None
+
+class WorkspaceUnavailable(Exception):
+    """The attempt's workspace can't be loaded: ERROR with this reason (A2,
+    never the candidate's fault). The message is D11-safe: reason name only."""
+
+    def __init__(self, reason: EvaluationErrorReason) -> None:
+        super().__init__(f"workspace capture failed: {reason.value}")
+        self.reason = reason
 
 
 def parse_spec(raw: Mapping[str, Any] | None) -> EvaluationSpec | None:
@@ -142,6 +170,7 @@ class _Loaded:
     facts: AttemptFacts
     metrics: TrajectoryMetrics
     config: ScoringConfig | None  # None: the batch's stored config is invalid
+    capture: str | None  # run_attempts.workspace_capture
 
 
 class EvaluationRunner:
@@ -150,21 +179,21 @@ class EvaluationRunner:
         *,
         sessionmaker: async_sessionmaker[AsyncSession],
         docker_client: docker.DockerClient,
+        artifact_store: ArtifactStore,
         max_output_bytes: int = 64 * 1024,
         workspace_tmpfs_mb: int = 64,
         pids_limit: int = 128,
         setup_grace_s: float = SETUP_GRACE_S,
     ) -> None:
         self._sm = sessionmaker
+        self._artifacts = artifact_store
         self._docker = docker_client
         self._max_output = max_output_bytes
         self._workspace_mb = workspace_tmpfs_mb
         self._pids_limit = pids_limit
         self._setup_grace_s = setup_grace_s
 
-    async def evaluate(
-        self, task: Task, attempt: RunAttempt, workspace: WorkspaceCapture | None
-    ) -> uuid.UUID | None:
+    async def evaluate(self, task: Task, attempt: RunAttempt) -> uuid.UUID | None:
         """Evaluate a FINISHED agent attempt. Returns the evaluation id, or
         None if another evaluator already owns it. Evaluator failures end as
         ERROR rows; only infrastructure faults (the database) raise."""
@@ -187,16 +216,14 @@ class EvaluationRunner:
             return await self._create_error(attempt, "invalid batch scoring config", base)
         snapshot = None
         if needs_workspace(spec):
-            if workspace is None or workspace.snapshot is None:
-                why = workspace.error if workspace and workspace.error else "no snapshot captured"
-                return await self._create_error(attempt, f"workspace capture failed: {why}", base)
-            snapshot = workspace.snapshot
+            try:
+                snapshot = await self._load_workspace(loaded)
+            except WorkspaceUnavailable as exc:
+                return await self._create_error(attempt, str(exc), base, reason=exc.reason)
 
-        # tx A: the snapshot and a PENDING row, together.
+        # tx A: the PENDING row.
         async with self._sm() as s:
             repo = EvaluationRepository(s)
-            if snapshot is not None:
-                await repo.add_artifact(attempt.id, snapshot.data, snapshot.sha256)
             evaluation_id = await repo.create(attempt.id, EvaluationStatus.PENDING, **base)
             if evaluation_id is None:
                 await s.rollback()
@@ -324,6 +351,33 @@ class EvaluationRunner:
         # remove(force=True) also ends any exec still streaming in a thread.
         await asyncio.to_thread(session.close)
 
+    async def _load_workspace(self, loaded: _Loaded) -> WorkspaceSnapshot:
+        """The snapshot the attempt's executor saved (ADR-008 A): by its row,
+        verified. Raises WorkspaceUnavailable with the reason otherwise."""
+        if loaded.capture is not None:
+            failure = _CAPTURE_FAILURES.get(WorkspaceCapture(loaded.capture))
+            if failure is not None:
+                raise WorkspaceUnavailable(failure)
+        async with self._sm() as s:
+            row = await EvaluationRepository(s).get_artifact(loaded.attempt_id)
+            if row is None:
+                raise WorkspaceUnavailable(EvaluationErrorReason.CAPTURE_MISSING)
+            key, size, sha, content = row.storage_key, row.size_bytes, row.sha256, row.content
+            raw_paths = row.artifact_metadata.get("normalized_paths", [])
+        normalized = tuple(str(p) for p in raw_paths)
+        if key is None:  # a Phase 4 row: the bytes are inline
+            assert content is not None  # ck_attempt_artifacts_one_location
+            return WorkspaceSnapshot(content, sha, normalized)
+        try:
+            data = await self._artifacts.read(key, size, sha)
+        except ArtifactMissing:
+            log.warning("artifact_missing", attempt_id=str(loaded.attempt_id))
+            raise WorkspaceUnavailable(EvaluationErrorReason.ARTIFACT_MISSING) from None
+        except ArtifactCorrupt:
+            log.warning("artifact_corrupt", attempt_id=str(loaded.attempt_id))
+            raise WorkspaceUnavailable(EvaluationErrorReason.ARTIFACT_CORRUPT) from None
+        return WorkspaceSnapshot(data, sha, normalized)
+
     # -- loading -------------------------------------------------------------------------
 
     async def _load(self, task: Task, attempt: RunAttempt) -> _Loaded | None:
@@ -362,7 +416,7 @@ class EvaluationRunner:
             max_cost_usd=limits.max_cost_usd if limits else None,
             failure_reason=FailureReason(row.failure_reason) if row.failure_reason else None,
         )
-        return _Loaded(row.id, row.run_id, facts, compute(events), config)
+        return _Loaded(row.id, row.run_id, facts, compute(events), config, row.workspace_capture)
 
     # -- persistence ---------------------------------------------------------------------
 
@@ -379,13 +433,19 @@ class EvaluationRunner:
         return evaluation_id
 
     async def _create_error(
-        self, attempt: RunAttempt, message: str, base: dict[str, Any]
+        self,
+        attempt: RunAttempt,
+        message: str,
+        base: dict[str, Any],
+        *,
+        reason: EvaluationErrorReason | None = None,
     ) -> uuid.UUID | None:
         async with self._sm() as s:
             evaluation_id = await EvaluationRepository(s).create(
                 attempt.id,
                 EvaluationStatus.ERROR,
                 **base,
+                error_reason=reason.value if reason else None,
                 failure_category=FailureCategory.EVALUATION_ERROR,
                 failure_tags=[],
                 error_message=message,

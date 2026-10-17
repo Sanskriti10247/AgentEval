@@ -72,6 +72,8 @@ services:
       - ./apps/worker:/app/apps/worker
       # Host-root equivalent: see README "Security model".
       - /var/run/docker.sock:/var/run/docker.sock
+      # Workspace snapshot files (ADR-008 A); every worker mounts the same volume.
+      - artifacts:/var/lib/agenteval/artifacts
     # Let in-flight runs (max timeout 300s) drain on `docker compose stop`.
     stop_grace_period: 340s
     depends_on:
@@ -81,3 +83,4 @@ services:
 volumes:
   pgdata:
   redisdata:
+  artifacts:

@@ -31,7 +31,7 @@ from agenteval_core.reliability.policy import (
     after_completed_attempt,
     after_failed_attempt,
 )
-from agenteval_core.reliability.taxonomy import FailureReason, is_retryable
+from agenteval_core.reliability.taxonomy import FailureReason, WorkspaceCapture, is_retryable
 from agenteval_core.reliability.transitions import RunState
 from agenteval_core.states import (
     COMPLETED_OUTCOMES,
@@ -103,6 +103,10 @@ def _attempt_payload(fields: dict[str, Any]) -> str:
 class RunRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
+        # Set by finish_attempt when a pending cancel won (p5_cancel): the files
+        # of the artifact rows it deleted. The caller unlinks them AFTER it
+        # commits (ADR-008 C); a repository never touches the store itself.
+        self.cancelled_storage_keys: list[str] = []
 
     async def get(self, run_id: uuid.UUID) -> Run | None:
         return await self._s.get(Run, run_id, populate_existing=True)
@@ -273,6 +277,7 @@ class RunRepository:
         cost_usd: Decimal | None = None,
         final_answer: str | None = None,
         sandbox_image_id: str | None = None,
+        workspace_capture: WorkspaceCapture | None = None,
     ) -> FinishOutcome:
         """T-finish (Step 3): calls p5_finish, with the target (R7/R8/R10)
         decided by reliability.policy. A failed outcome must carry its
@@ -280,12 +285,18 @@ class RunRepository:
         never passed in, so it can't disagree with the reason. A completed
         outcome carries neither.
 
+        `workspace_capture` (O3d, G10) is what became of the workspace snapshot
+        and is only ever set for a completed outcome (ck_run_attempts_capture):
+        the worker saves the snapshot first, while the attempt is still RUNNING
+        (repositories/artifacts.py), and passes the result here.
+
         'restart_cancel' (a cancel beat us to it) runs p5_cancel and reports
         CANCELLED; 'fenced' triggers the ambiguous-commit re-read (design §6
         rule 6) before being trusted, since the caller may be retrying after a
         lost acknowledgement of its own earlier commit.
         """
         retryable = is_retryable(failure_reason) if failure_reason is not None else None
+        self.cancelled_storage_keys = []
         fields = {
             "exit_code": exit_code,
             "oom_killed": oom_killed,
@@ -307,6 +318,7 @@ class RunRepository:
         if outcome in COMPLETED_OUTCOMES:
             decision = after_completed_attempt(cancel_requested=False)
         else:
+            assert workspace_capture is None, "only a completed outcome has a workspace capture"
             assert failure_reason is not None, "a failed outcome must carry a failure_reason"
             run = await self._s.get(Run, attempt.run_id)
             assert run is not None
@@ -335,8 +347,7 @@ class RunRepository:
                     "outcome": outcome.value,
                     "failure_reason": failure_reason.value if failure_reason else None,
                     "retryable": retryable,
-                    # O3d (Step 6): the snapshot is never taken yet.
-                    "workspace_capture": None,
+                    "workspace_capture": workspace_capture.value if workspace_capture else None,
                     "next_attempt_at": next_attempt_at,
                     "dead_letter_reason": dead_letter_reason,
                     "error_message": error_message,
@@ -360,14 +371,7 @@ class RunRepository:
                 )
             ).one()
             if cancel_result.result == "cancelled":
-                if cancel_result.storage_keys:
-                    # No artifact directory setting exists yet (O3d is Step 6):
-                    # nothing is persisted to delete files for, so just log.
-                    log.info(
-                        "cancelled_attempt_artifact_keys",
-                        attempt_id=str(attempt.id),
-                        storage_keys=list(cancel_result.storage_keys),
-                    )
+                self.cancelled_storage_keys = list(cancel_result.storage_keys or [])
                 return FinishOutcome.CANCELLED
             log.warning("finish_fenced", attempt_id=str(attempt.id), via="restart_cancel")
             return FinishOutcome.FENCED

@@ -14,9 +14,10 @@ from agenteval_core.evaluation.scoring import (
 )
 from agenteval_core.evaluation.spec import EvaluationSpec
 from agenteval_core.evaluation.taxonomy import EvaluationStatus, FailureCategory
+from agenteval_core.reliability.taxonomy import WorkspaceCapture
 from agenteval_core.states import Outcome
 from agenteval_worker.agent_runner import AgentAttemptResult
-from agenteval_worker.evaluation_runner import WorkspaceCapture, grade, needs_workspace
+from agenteval_worker.evaluation_runner import grade, needs_workspace
 from agenteval_worker.executor import _finish_fields
 from agenteval_worker.sandbox.evaluation import WorkspaceSnapshot
 
@@ -150,15 +151,19 @@ def test_a6_only_workspace_specs_need_a_container(spec: dict[str, object], neede
     assert needs_workspace(EvaluationSpec.model_validate(spec)) is needed
 
 
-def test_the_workspace_capture_is_never_a_finish_attempt_field() -> None:
+def test_the_exported_snapshot_is_never_a_finish_attempt_field() -> None:
+    """O3d: the capture value is a finish field (it rides into p5_finish); the
+    snapshot bytes are transient and never are."""
     snap = WorkspaceSnapshot(data=b"x" * 1024, sha256="0" * 64)
     r = AgentAttemptResult(
         outcome=Outcome.AGENT_FINISHED,
         duration_ms=5,
         sandbox_image_id="sha256:abc",
-        workspace=WorkspaceCapture(snapshot=snap),
+        workspace_capture=WorkspaceCapture.STORED,
+        snapshot=snap,
     )
     fields = _finish_fields(r)
-    assert "workspace" not in fields
+    assert "snapshot" not in fields
+    assert fields["workspace_capture"] is WorkspaceCapture.STORED
     assert fields["sandbox_image_id"] == "sha256:abc"
     assert fields["outcome"] is Outcome.AGENT_FINISHED
