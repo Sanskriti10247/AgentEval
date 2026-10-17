@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Body, Header, Query, Response, status
 
+from agenteval_api.auth import READ, WRITE
 from agenteval_api.deps import EvaluationServiceDep, RunServiceDep
 from agenteval_core.schemas.agent import TrajectoryEventRead, TrajectoryPage
 from agenteval_core.schemas.evaluation import AttemptEvaluationRead
@@ -17,6 +18,7 @@ router = APIRouter(prefix="/runs", tags=["runs"])
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RunRead,
     responses={200: {"description": "Replay of an earlier request with the same Idempotency-Key"}},
+    dependencies=[WRITE],
 )
 async def submit_run(
     body: RunCreate,
@@ -36,7 +38,7 @@ async def submit_run(
     return RunRead.model_validate(result.run)
 
 
-@router.get("", response_model=RunPage)
+@router.get("", response_model=RunPage, dependencies=[READ])
 async def list_runs(
     runs: RunServiceDep,
     status: Annotated[RunStatus | None, Query()] = None,
@@ -60,7 +62,7 @@ async def list_runs(
     return RunPage(runs=[RunRead.model_validate(r) for r in page], next_after=next_after)
 
 
-@router.get("/{run_id}", response_model=RunRead)
+@router.get("/{run_id}", response_model=RunRead, dependencies=[READ])
 async def get_run(run_id: uuid.UUID, runs: RunServiceDep) -> RunRead:
     return RunRead.model_validate(await runs.get(run_id))
 
@@ -73,6 +75,7 @@ async def get_run(run_id: uuid.UUID, runs: RunServiceDep) -> RunRead:
         200: {"description": "Already cancelled or already flagged: nothing changed"},
         409: {"description": "The run already COMPLETED or FAILED; nothing was written"},
     },
+    dependencies=[WRITE],
 )
 async def cancel_run(run_id: uuid.UUID, runs: RunServiceDep, response: Response) -> RunRead:
     """Request cancellation. A QUEUED or RETRYING run is CANCELLED at once
@@ -94,6 +97,7 @@ async def cancel_run(run_id: uuid.UUID, runs: RunServiceDep, response: Response)
         409: {"description": "The run is not FAILED, or the key was used for something else"},
         422: {"description": "The run would exceed 10 attempts in total"},
     },
+    dependencies=[WRITE],
 )
 async def replay_run(
     run_id: uuid.UUID,
@@ -112,12 +116,14 @@ async def replay_run(
     return RunRead.model_validate(result.run)
 
 
-@router.get("/{run_id}/attempts", response_model=list[RunAttemptRead])
+@router.get("/{run_id}/attempts", response_model=list[RunAttemptRead], dependencies=[READ])
 async def list_attempts(run_id: uuid.UUID, runs: RunServiceDep) -> list[RunAttemptRead]:
     return [RunAttemptRead.model_validate(a) for a in await runs.list_attempts(run_id)]
 
 
-@router.get("/{run_id}/attempts/{attempt_no}/events", response_model=TrajectoryPage)
+@router.get(
+    "/{run_id}/attempts/{attempt_no}/events", response_model=TrajectoryPage, dependencies=[READ]
+)
 async def list_events(
     run_id: uuid.UUID,
     attempt_no: int,
@@ -134,7 +140,11 @@ async def list_events(
     )
 
 
-@router.get("/{run_id}/attempts/{attempt_no}/evaluation", response_model=AttemptEvaluationRead)
+@router.get(
+    "/{run_id}/attempts/{attempt_no}/evaluation",
+    response_model=AttemptEvaluationRead,
+    dependencies=[READ],
+)
 async def get_attempt_evaluation(
     run_id: uuid.UUID, attempt_no: int, evaluations: EvaluationServiceDep
 ) -> AttemptEvaluationRead:

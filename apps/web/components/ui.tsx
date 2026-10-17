@@ -103,9 +103,14 @@ export function Loading({ label = "Loading" }: { label?: string }) {
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   const message = error instanceof Error ? error.message : "Something went wrong.";
   const status = error instanceof ApiError && error.status > 0 ? ` (HTTP ${error.status})` : "";
+  // 403 is an authorization problem of the key, not a failed load: say so.
+  const heading = error instanceof ApiError && error.status === 403 ? "Not permitted" : "Could not load data";
   return (
     <div role="alert" className="rounded border border-bad/40 bg-bad/10 px-3 py-3 text-sm">
-      <div className="font-medium text-bad">Could not load data{status}</div>
+      <div className="font-medium text-bad">
+        {heading}
+        {status}
+      </div>
       <div className="mt-1 break-words text-muted">{message}</div>
       {onRetry ? (
         <Button className="mt-3" onClick={onRetry}>

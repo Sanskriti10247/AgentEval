@@ -2,13 +2,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
+from agenteval_api.auth import READ
 from agenteval_api.deps import ReadServiceDep
 from agenteval_core.schemas.read import StatsOverview
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
 
-@router.get("/overview", response_model=StatsOverview)
+@router.get("/overview", response_model=StatsOverview, dependencies=[READ])
 async def overview(
     read: ReadServiceDep,
     window_h: Annotated[int, Query(ge=1, le=720)] = 24,

@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query, status
 
+from agenteval_api.auth import READ, WRITE
 from agenteval_api.deps import ReadServiceDep, TaskServiceDep
 from agenteval_core.schemas.read import TaskPage
 from agenteval_core.schemas.task_api import TaskCreate, TaskRead
@@ -10,14 +11,14 @@ from agenteval_core.schemas.task_api import TaskCreate, TaskRead
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 
-@router.post("", status_code=status.HTTP_201_CREATED, response_model=TaskRead)
+@router.post("", status_code=status.HTTP_201_CREATED, response_model=TaskRead, dependencies=[WRITE])
 async def create_task(body: TaskCreate, tasks: TaskServiceDep) -> TaskRead:
     """Agent tasks may join a DRAFT dataset and carry an evaluation spec.
     The spec is write-only: no response ever contains it (D11)."""
     return TaskRead.from_task(await tasks.create(body))
 
 
-@router.get("", response_model=TaskPage)
+@router.get("", response_model=TaskPage, dependencies=[READ])
 async def list_tasks(
     read: ReadServiceDep,
     dataset_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -34,6 +35,6 @@ async def list_tasks(
     )
 
 
-@router.get("/{task_id}", response_model=TaskRead)
+@router.get("/{task_id}", response_model=TaskRead, dependencies=[READ])
 async def get_task(task_id: uuid.UUID, tasks: TaskServiceDep) -> TaskRead:
     return TaskRead.from_task(await tasks.get(task_id))

@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response, status
 
+from agenteval_api.auth import READ, WRITE
 from agenteval_api.deps import AgentServiceDep, ReadServiceDep
 from agenteval_core.schemas.agent import (
     AgentCreate,
@@ -15,13 +16,15 @@ from agenteval_core.schemas.read import AgentPage
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
-@router.post("", status_code=status.HTTP_201_CREATED, response_model=AgentRead)
+@router.post(
+    "", status_code=status.HTTP_201_CREATED, response_model=AgentRead, dependencies=[WRITE]
+)
 async def create_agent(body: AgentCreate, agents: AgentServiceDep) -> AgentRead:
     """409 if the name is taken."""
     return AgentRead.model_validate(await agents.create_agent(body))
 
 
-@router.get("", response_model=AgentPage)
+@router.get("", response_model=AgentPage, dependencies=[READ])
 async def list_agents(
     read: ReadServiceDep,
     after: Annotated[str | None, Query(max_length=100)] = None,
@@ -32,7 +35,7 @@ async def list_agents(
     return await read.agents(after, limit)
 
 
-@router.get("/{agent_id}", response_model=AgentRead)
+@router.get("/{agent_id}", response_model=AgentRead, dependencies=[READ])
 async def get_agent(agent_id: uuid.UUID, agents: AgentServiceDep) -> AgentRead:
     return AgentRead.model_validate(await agents.get_agent(agent_id))
 
@@ -42,6 +45,7 @@ async def get_agent(agent_id: uuid.UUID, agents: AgentServiceDep) -> AgentRead:
     status_code=status.HTTP_201_CREATED,
     response_model=AgentVersionRead,
     responses={200: {"description": "An identical config already exists; it is returned"}},
+    dependencies=[WRITE],
 )
 async def create_version(
     agent_id: uuid.UUID, body: AgentVersionCreate, agents: AgentServiceDep, response: Response
@@ -54,12 +58,12 @@ async def create_version(
     return AgentVersionRead.model_validate(result.version)
 
 
-@router.get("/{agent_id}/versions", response_model=list[AgentVersionRead])
+@router.get("/{agent_id}/versions", response_model=list[AgentVersionRead], dependencies=[READ])
 async def list_versions(agent_id: uuid.UUID, agents: AgentServiceDep) -> list[AgentVersionRead]:
     return [AgentVersionRead.model_validate(v) for v in await agents.list_versions(agent_id)]
 
 
-@router.get("/{agent_id}/versions/{number}", response_model=AgentVersionRead)
+@router.get("/{agent_id}/versions/{number}", response_model=AgentVersionRead, dependencies=[READ])
 async def get_version(
     agent_id: uuid.UUID, number: int, agents: AgentServiceDep
 ) -> AgentVersionRead:

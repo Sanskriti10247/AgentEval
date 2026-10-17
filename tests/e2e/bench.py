@@ -25,11 +25,21 @@ from typing import Any
 import asyncpg
 import httpx
 
+from benchmarks.apikey import auth_headers
+
 BASE_URL = os.environ.get("AGENTEVAL_E2E_URL", "http://localhost:8000")
 DATABASE_URL = os.environ.get(
     "AGENTEVAL_E2E_DATABASE_URL", "postgresql://agenteval:agenteval@127.0.0.1:55432/agenteval"
 )
 API = "/api/v1"
+
+
+def api_headers() -> dict[str, str]:
+    """Authorization header for the stack under test: AGENTEVAL_E2E_API_KEY, else a key
+    created once per session through the CLI in the api container (ADR-012)."""
+    return auth_headers("AGENTEVAL_E2E_API_KEY", "e2e")
+
+
 IMAGE = "agenteval-sandbox:py312"
 MARKER = "HIDDEN_MARKER_e2e_5f1c"
 COST_PER_CALL = Decimal("0.000200")  # FakeProvider: 100 in + 20 out tokens at $1 / $5 per M

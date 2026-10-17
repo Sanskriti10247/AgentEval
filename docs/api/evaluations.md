@@ -4,7 +4,7 @@ These are the dataset, evaluation-spec, benchmark-evaluation, result and run-man
 
 - **Errors** are RFC 7807-style `application/problem+json`: `{type, title, status, detail}`.
 - **Validation errors (422)** are sanitised; see [below](#validation-errors-422).
-- **There is no authentication or rate limiting yet (Phase 8).**
+- **Authentication:** every route needs an API key (`Authorization: Bearer <key>`): `read` for `GET`, `write` for creating, freezing, cancelling and replaying. Over-budget callers get 429. See [auth.md](auth.md).
 
 Examples are trimmed from real responses of the README walkthrough (FakeProvider); ids and timings are elided (`…`).
 

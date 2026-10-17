@@ -1,6 +1,6 @@
 # Read API for the dashboard (Phase 6)
 
-List endpoints and `GET /stats/overview`, which the web dashboard reads (ADR-010 C). All paths are under `/api/v1`; errors are RFC 7807-style `application/problem+json`; there is no authentication yet (Phase 8). Every response is built from a public schema (D11): no evaluation spec, lease field, storage key, failure detail or check internals can appear.
+List endpoints and `GET /stats/overview`, which the web dashboard reads (ADR-010 C). All paths are under `/api/v1`; errors are RFC 7807-style `application/problem+json`; every route needs an API key with the `read` scope ([auth.md](auth.md)). Every response is built from a public schema (D11): no evaluation spec, lease field, storage key, failure detail or check internals can appear.
 
 ## Lists
 

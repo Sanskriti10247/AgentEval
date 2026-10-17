@@ -20,6 +20,7 @@ from agenteval_core.services.errors import (
     DispatchUnavailable,
     IdempotencyConflict,
     InvalidAgentVersion,
+    InvalidApiKeyRequest,
     InvalidCursor,
     InvalidEvaluation,
     InvalidRun,
@@ -34,6 +35,7 @@ _STATUS: dict[type[ServiceError], tuple[int, str]] = {
     InvalidAgentVersion: (422, "Invalid Agent Version"),
     InvalidRun: (422, "Invalid Run"),
     InvalidCursor: (422, "Invalid Cursor"),
+    InvalidApiKeyRequest: (422, "Invalid API Key Request"),
     InvalidEvaluation: (422, "Invalid Evaluation"),
     IdempotencyConflict: (409, "Idempotency Conflict"),
     Conflict: (409, "Conflict"),
@@ -56,7 +58,27 @@ def problem(status: int, title: str, detail: str) -> JSONResponse:
     )
 
 
+class ApiError(Exception):
+    """An error the API raises itself (authentication, authorization, rate limit):
+    a problem+json response with optional headers (WWW-Authenticate, Retry-After)."""
+
+    def __init__(
+        self, status: int, title: str, detail: str, headers: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.title = title
+        self.detail = detail
+        self.headers = headers or {}
+
+
 def install_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(ApiError)
+    async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
+        resp = problem(exc.status, exc.title, exc.detail)
+        resp.headers.update(exc.headers)
+        return resp
+
     @app.exception_handler(ServiceError)
     async def _service_error(_: Request, exc: ServiceError) -> JSONResponse:
         status, title = _status_for(exc)

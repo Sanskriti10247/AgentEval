@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, Query, Response, status
 
+from agenteval_api.auth import READ, WRITE
 from agenteval_api.deps import EvaluationServiceDep, ReadServiceDep
 from agenteval_core.schemas.evaluation import (
     Compare,
@@ -25,6 +26,7 @@ router = APIRouter(prefix="/evaluations", tags=["evaluations"])
     status_code=status.HTTP_202_ACCEPTED,
     response_model=EvaluationRead,
     responses={200: {"description": "Replay of an earlier request with the same Idempotency-Key"}},
+    dependencies=[WRITE],
 )
 async def create_evaluation(
     body: EvaluationCreate,
@@ -41,7 +43,7 @@ async def create_evaluation(
     return result.evaluation
 
 
-@router.get("", response_model=EvaluationPage)
+@router.get("", response_model=EvaluationPage, dependencies=[READ])
 async def list_evaluations(
     read: ReadServiceDep,
     agent_version_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -57,7 +59,7 @@ async def list_evaluations(
 
 
 # Declared before /{evaluation_id} so "compare" isn't parsed as an id.
-@router.get("/compare", response_model=Compare)
+@router.get("/compare", response_model=Compare, dependencies=[READ])
 async def compare_evaluations(
     evaluations: EvaluationServiceDep,
     ids: Annotated[str, Query(min_length=1, max_length=400)],
@@ -70,7 +72,7 @@ async def compare_evaluations(
     return await evaluations.compare(parsed)
 
 
-@router.get("/{evaluation_id}", response_model=EvaluationRead)
+@router.get("/{evaluation_id}", response_model=EvaluationRead, dependencies=[READ])
 async def get_evaluation(
     evaluation_id: uuid.UUID, evaluations: EvaluationServiceDep
 ) -> EvaluationRead:
@@ -82,6 +84,7 @@ async def get_evaluation(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=EvaluationRead,
     responses={200: {"description": "Already cancelled: nothing changed"}},
+    dependencies=[WRITE],
 )
 async def cancel_evaluation(
     evaluation_id: uuid.UUID, evaluations: EvaluationServiceDep, response: Response
@@ -95,7 +98,7 @@ async def cancel_evaluation(
     return result.evaluation
 
 
-@router.get("/{evaluation_id}/results", response_model=ResultPage)
+@router.get("/{evaluation_id}/results", response_model=ResultPage, dependencies=[READ])
 async def list_results(
     evaluation_id: uuid.UUID,
     evaluations: EvaluationServiceDep,
@@ -106,6 +109,6 @@ async def list_results(
     return await evaluations.results(evaluation_id, after, limit)
 
 
-@router.get("/{evaluation_id}/summary", response_model=Summary)
+@router.get("/{evaluation_id}/summary", response_model=Summary, dependencies=[READ])
 async def get_summary(evaluation_id: uuid.UUID, evaluations: EvaluationServiceDep) -> Summary:
     return await evaluations.summary(evaluation_id)

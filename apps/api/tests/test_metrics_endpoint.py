@@ -16,6 +16,7 @@ DEAD = Settings(
     database_url="postgresql+asyncpg://x:x@127.0.0.1:1/x",
     redis_url="redis://127.0.0.1:1/0",
     log_json=False,
+    auth_enabled=False,  # no database to look keys up in; these tests are about /metrics
 )
 RUN_ID = "0b6c8f6a-79c1-4a2e-9d0f-3f0a4a1b2c3d"
 

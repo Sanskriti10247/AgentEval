@@ -25,6 +25,13 @@ from tests.integration.eval_seed import MARKER, SM, SPEC, agent_task, create_eva
 
 RESPONSE_MODELS: dict[str, list[str]] = {
     "AgentPage": ["agents", "next_after"],
+    "ApiKeyCreated": [
+        "created_at", "expires_at", "id", "key", "last_used_at", "name", "prefix", "revoked_at",
+        "scopes",
+    ],
+    "ApiKeyRead": [
+        "created_at", "expires_at", "id", "last_used_at", "name", "prefix", "revoked_at", "scopes",
+    ],
     "AgentRead": ["created_at", "id", "name"],
     "AgentSummary": ["created_at", "id", "latest_version", "name"],
     "AgentVersionRead": [
@@ -247,6 +254,10 @@ async def test_no_route_returns_hidden_evaluation_data(
         ("GET", "/api/v1/runs", "/api/v1/runs", {"params": {"after": "garbage"}}),
         ("POST", "/api/v1/runs/{run_id}/replay", f"/api/v1/runs/{s.runs['B3']}/replay", {}),
         ("POST", "/api/v1/runs/{run_id}/replay", f"/api/v1/runs/{b2}/replay", {}),
+        ("POST", "/api/v1/keys", "/api/v1/keys",
+         {"json": {"name": "sweep", "scopes": ["read"]}}),
+        ("GET", "/api/v1/keys", "/api/v1/keys", {}),
+        ("DELETE", "/api/v1/keys/{prefix}", "/api/v1/keys/deadbeef", {}),
         ("POST", "/api/v1/runs/{run_id}/cancel", f"/api/v1/runs/{s.runs['C3']}/cancel", {}),
         ("POST", "/api/v1/runs/{run_id}/cancel", f"/api/v1/runs/{b2}/cancel", {}),
         ("POST", "/api/v1/evaluations/{evaluation_id}/cancel",

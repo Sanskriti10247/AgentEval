@@ -8,6 +8,7 @@ import { RunDetailView } from "@/components/views/run-detail";
 import { RunsView } from "@/components/views/runs";
 import { TasksView } from "@/components/views/tasks";
 import { WorkersView } from "@/components/views/workers";
+import { getApiKey, setApiKey } from "@/lib/auth";
 import * as F from "./fixtures";
 import { mockApi, renderWithClient, respond } from "./helpers";
 
@@ -405,6 +406,32 @@ describe("Run detail", () => {
     renderWithClient(<RunDetailView id={F.IDS.run} />);
     await userEvent.click(await screen.findByRole("button", { name: "Replay" }));
     expect(await screen.findByText(/run is not FAILED/)).toBeInTheDocument();
+  });
+
+  it("explains a 403 on replay: the key lacks the write scope", async () => {
+    setApiKey("ae_0a1b2c3d_readonlykey");
+    mockApi({
+      ...routes,
+      [`/runs/${F.IDS.run}/replay`]: respond(403, { title: "Forbidden", status: 403, detail: "This API key lacks the write scope" }),
+    });
+    renderWithClient(<RunDetailView id={F.IDS.run} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Replay" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Not permitted");
+    expect(alert).toHaveTextContent("This API key lacks the write scope");
+    expect(getApiKey()).toBe("ae_0a1b2c3d_readonlykey"); // a 403 does not sign the user out
+  });
+
+  it("explains a 403 on cancel", async () => {
+    const id = F.runningRun.id;
+    mockApi({
+      [`/runs/${id}`]: F.runningRun,
+      [`/runs/${id}/attempts`]: [],
+      [`/runs/${id}/cancel`]: respond(403, { title: "Forbidden", status: 403, detail: "This API key lacks the write scope" }),
+    });
+    renderWithClient(<RunDetailView id={id} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(await screen.findByText(/lacks the write scope/)).toBeInTheDocument();
   });
 
   it("shows an error state", async () => {

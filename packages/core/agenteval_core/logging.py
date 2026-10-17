@@ -12,6 +12,10 @@ from opentelemetry import trace
 
 # Anthropic API keys look like sk-ant-...; redact them wherever they appear.
 _SECRET_VALUE = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
+# AgentEval API keys (ae_<prefix>_<secret>, ADR-012) and bearer credentials in any text.
+# The 8-hex prefix is not secret, but a log line never needs the key at all.
+_AE_KEY = re.compile(r"ae_[0-9a-f]{8}_[A-Za-z0-9_\-]{8,}")
+_BEARER = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=\-]{8,}")
 # Log keys whose values are always secret (exact names, case-insensitive).
 _SECRET_KEYS = frozenset(
     {"api_key", "anthropic_api_key", "x-api-key", "authorization", "password", "secret"}
@@ -19,13 +23,25 @@ _SECRET_KEYS = frozenset(
 REDACTED = "[REDACTED]"
 
 
+def _is_secret_name(name: Any) -> bool:
+    if isinstance(name, bytes):
+        name = name.decode("latin-1")
+    return isinstance(name, str) and name.lower() in _SECRET_KEYS
+
+
 def _redact(value: Any) -> Any:
     if isinstance(value, str):
-        return _SECRET_VALUE.sub("sk-ant-" + REDACTED, value)
+        value = _SECRET_VALUE.sub("sk-ant-" + REDACTED, value)
+        value = _AE_KEY.sub("ae_" + REDACTED, value)
+        return _BEARER.sub(lambda m: m.group(1) + REDACTED, value)
     if isinstance(value, dict):
         return {k: REDACTED if str(k).lower() in _SECRET_KEYS else _redact(v)
                 for k, v in value.items()}  # fmt: skip
     if isinstance(value, list | tuple):
+        # A header as a (name, value) pair, as ASGI and httpx carry them.
+        if len(value) == 2 and _is_secret_name(value[0]):
+            pair = (value[0], REDACTED)
+            return pair if isinstance(value, tuple) else list(pair)
         return type(value)(_redact(v) for v in value)
     return value
 

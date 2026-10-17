@@ -21,7 +21,7 @@ from agenteval_worker.agent_runner import AgentRunner
 from agenteval_worker.executor import Executor
 from agenteval_worker.sandbox.docker_sandbox import DockerSandbox
 from agenteval_worker.trajectory import TrajectoryWriter
-from tests.integration.conftest import SANDBOX_IMAGE
+from tests.integration.conftest import SANDBOX_IMAGE, bearer
 
 API = "/api/v1"
 SCRIPT = [{"type": "turn", "text": "done"}]
@@ -193,11 +193,13 @@ async def test_version_for_unknown_agent_is_404(client: httpx.AsyncClient) -> No
     assert resp.status_code == 404
 
 
-async def test_fake_provider_can_be_disabled(settings: Settings) -> None:
+async def test_fake_provider_can_be_disabled(settings: Settings, api_key: str) -> None:
     app = create_app(settings.model_copy(update={"enable_fake_provider": False}))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", headers=bearer(api_key)
+        ) as c:
             agent_id = await new_agent(c)
             resp = await c.post(f"{API}/agents/{agent_id}/versions", json=version_body())
             assert resp.status_code == 422 and "'fake' is not enabled" in resp.json()["detail"]
@@ -398,12 +400,14 @@ async def test_create_run_and_inspect_an_agent_over_http(
     assert [e["tool"] for e in events["events"] if e["tool"]] == ["write_file", "run_tests"]
 
 
-async def test_anthropic_versions_when_enabled(settings: Settings) -> None:
+async def test_anthropic_versions_when_enabled(settings: Settings, api_key: str) -> None:
     """The API validates Anthropic configs without the SDK (and without a key)."""
     app = create_app(settings.model_copy(update={"enable_anthropic_provider": True}))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", headers=bearer(api_key)
+        ) as c:
             agent_id = await new_agent(c)
             base = {"model_provider": "anthropic", "tools": ["read_file"]}
 

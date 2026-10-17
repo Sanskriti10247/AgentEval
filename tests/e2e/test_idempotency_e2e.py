@@ -14,6 +14,7 @@ from tests.e2e.bench import (
     SPECS,
     ReadOnlyDB,
     all_results,
+    api_headers,
     create_agent,
     create_dataset,
     ok,
@@ -36,7 +37,7 @@ def test_s6_one_batch_one_attempt_one_evaluation_per_run(
     key = f"e2e-{uuid.uuid4().hex}"
 
     def create(_: int) -> httpx.Response:
-        with httpx.Client(base_url=BASE_URL, timeout=30) as c:
+        with httpx.Client(base_url=BASE_URL, timeout=30, headers=api_headers()) as c:
             return c.post(
                 f"{API}/evaluations",
                 json={"name": "calc-bench", "dataset_id": ds, "agent_version_id": version,

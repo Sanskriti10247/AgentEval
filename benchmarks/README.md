@@ -14,9 +14,13 @@ profile off (`make observability-down`).
 
 ```bash
 make up && make migrate
+# Authentication is ON: the driver uses AGENTEVAL_BENCH_API_KEY, or creates a short-lived key
+# through `docker compose exec api python -m agenteval_api.keys create` by itself.
 make bench-smoke            # 5 noop runs on 1 worker; seconds
 make bench                  # the whole matrix, then renders docs/benchmarks/README.md
 ```
+
+The rate limiter (ADR-012 C) would throttle a benchmark: `make bench` first recreates the `api` with `AGENTEVAL_RATE_LIMIT_READ_PER_MIN=0` and `AGENTEVAL_RATE_LIMIT_WRITE_PER_MIN=0` (it keeps authentication on), and a single scenario started by hand needs the same (the driver stops with a message if it sees a 429). `make up` restores the defaults.
 
 `make bench` runs, per ADR-011 (3 repeats per cell; each repeat starts from empty tables):
 

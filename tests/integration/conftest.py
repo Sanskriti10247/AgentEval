@@ -26,9 +26,11 @@ from testcontainers.community.redis import RedisContainer
 
 from agenteval_api.main import create_app
 from agenteval_core.artifacts import LocalArtifactStore
+from agenteval_core.auth import Scope
 from agenteval_core.config import Settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.queue.streams import RunQueue
+from agenteval_core.services.api_keys import ApiKeyService
 
 ROOT = Path(__file__).resolve().parents[2]
 SANDBOX_IMAGE = "agenteval-sandbox:py312"
@@ -59,6 +61,10 @@ def settings(pg_url: str, redis_url: str) -> Settings:
         image_allowlist=[SANDBOX_IMAGE, "agenteval-missing-image:none"],
         log_json=False,
         worker_block_ms=200,
+        # Auth stays ON (the default); the budgets are off so a burst of test requests is
+        # never throttled. tests/integration/test_rate_limit.py turns them on.
+        rate_limit_read_per_min=0,
+        rate_limit_write_per_min=0,
     )
 
 
@@ -88,7 +94,7 @@ async def clean_state(engine: AsyncEngine, settings: Settings) -> AsyncIterator[
             text(
                 "TRUNCATE scores, attempt_evaluations, attempt_artifacts, trajectory_events, "
                 "run_attempts, run_replays, runs, evaluations, tasks, datasets, agent_versions, "
-                "agents, workers"
+                "agents, workers, api_keys"
             )
         )
     r = Redis.from_url(settings.redis_url)
@@ -113,11 +119,25 @@ async def queue(redis: Redis, settings: Settings) -> RunQueue:
 
 
 @pytest.fixture
-async def client(settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
+async def api_key(sessionmaker: async_sessionmaker[AsyncSession]) -> str:
+    """The plaintext of a fresh admin key (read, write, admin); every API client sends it."""
+    async with sessionmaker() as session:
+        created = await ApiKeyService(session).create("tests", list(Scope))
+    return created.plaintext
+
+
+def bearer(key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {key}"}
+
+
+@pytest.fixture
+async def client(settings: Settings, api_key: str) -> AsyncIterator[httpx.AsyncClient]:
     app = create_app(settings)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", headers=bearer(api_key)
+        ) as c:
             c.app = app  # type: ignore[attr-defined]
             yield c
 

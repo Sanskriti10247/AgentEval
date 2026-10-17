@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agenteval_core.config import Settings
 from agenteval_core.queue.streams import RunQueue
 from agenteval_core.services.agents import AgentService
+from agenteval_core.services.api_keys import ApiKeyService
 from agenteval_core.services.datasets import DatasetService
 from agenteval_core.services.evaluations import EvaluationService
 from agenteval_core.services.read import ReadService
@@ -61,6 +62,11 @@ def get_read_service(session: SessionDep, settings: SettingsDep) -> ReadService:
     return ReadService(session, settings)
 
 
+def get_api_key_service(session: SessionDep) -> ApiKeyService:
+    return ApiKeyService(session)
+
+
+ApiKeyServiceDep = Annotated[ApiKeyService, Depends(get_api_key_service)]
 ReadServiceDep = Annotated[ReadService, Depends(get_read_service)]
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
