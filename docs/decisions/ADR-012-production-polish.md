@@ -50,7 +50,7 @@ The dashboard asks for an API key on first use and keeps it in `sessionStorage` 
 
 ### G. Security review
 
-`docs/security-review.md`: threat model (untrusted agent code, untrusted API callers, a compromised worker), the controls per threat, findings from a review of the code and configuration with their fixes or accepted risks (notably: the worker mounts the Docker socket, which is root-equivalent on the host), and the residual risks.
+[`docs/security-review.md`](../security-review.md): threat model (untrusted agent code, untrusted API callers, a compromised worker), the controls per threat, findings from a review of the code and configuration with their fixes or accepted risks (notably: the worker mounts the Docker socket, which is root-equivalent on the host), and the residual risks.
 
 ## Consequences
 

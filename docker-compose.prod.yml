@@ -50,6 +50,11 @@ services:
     image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-api:${AGENTEVAL_VERSION:-latest}
     restart: unless-stopped
     environment: *prod-env
+    # Security review F-P3: the API needs no privileges at all (it is non-root already).
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m"]
     # No --reload. AGENTEVAL_API_WORKERS defaults to 1 on purpose: /metrics is served from a
     # per-process registry, so with several processes each scrape sees one random process
     # (docs/deployment.md, "Sizing"). --proxy-headers makes the client address the one Caddy
@@ -74,6 +79,10 @@ services:
     image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-worker:${AGENTEVAL_VERSION:-latest}
     restart: unless-stopped
     environment: *prod-env
+    # Security review F-P3. The worker stays root (the Docker socket), but it keeps no Linux
+    # capabilities it does not use and cannot gain any.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
     # The same entrypoint as the image's default CMD, with no file watcher: SIGTERM from
     # `docker compose stop` triggers the worker's graceful drain (stop_grace_period: 340s).
     command: ["python", "-m", "agenteval_worker.main"]
@@ -101,6 +110,8 @@ services:
     image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-web:${AGENTEVAL_VERSION:-latest}
     profiles: !reset []
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
     build:
       args:
         NEXT_PUBLIC_API_URL: https://${AGENTEVAL_DOMAIN:?set AGENTEVAL_DOMAIN}
@@ -121,6 +132,10 @@ services:
   caddy:
     image: caddy:2.10.2-alpine
     restart: unless-stopped
+    # Only what binding 80/443 needs.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
     environment:
       AGENTEVAL_DOMAIN: ${AGENTEVAL_DOMAIN:?set AGENTEVAL_DOMAIN}
     ports:

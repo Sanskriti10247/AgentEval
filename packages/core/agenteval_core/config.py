@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     rate_limit_read_per_min: int = Field(default=600, ge=0)
     rate_limit_write_per_min: int = Field(default=120, ge=0)
 
+    # Largest request body the API reads (bytes); bigger gets 413 before it is parsed. Must stay
+    # above the biggest legitimate body (a task: 1 MB of files + a 2 MiB evaluation spec).
+    max_request_bytes: int = Field(default=5 * 1024 * 1024, ge=1024)
+
     # Sandbox
     image_allowlist: list[str] = Field(default_factory=lambda: ["agenteval-sandbox:py312"])
     max_output_bytes: int = 64 * 1024

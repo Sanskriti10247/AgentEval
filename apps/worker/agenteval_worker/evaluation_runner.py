@@ -72,7 +72,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -276,7 +276,9 @@ class EvaluationRunner:
         lease_manager: LeaseManager | None = None,
         lease_ttl_s: float = 30.0,
         kill_by_attempt_label: Callable[[str], int] | None = None,
+        image_allowlist: Iterable[str] | None = None,
     ) -> None:
+        self._allowlist = None if image_allowlist is None else frozenset(image_allowlist)
         self._sm = sessionmaker
         self._artifacts = artifact_store
         self._docker = docker_client
@@ -594,6 +596,7 @@ class EvaluationRunner:
                         "agenteval.run_id": str(loaded.run_id),
                         "agenteval.attempt_id": str(loaded.attempt_id),
                     },
+                    image_allowlist=self._allowlist,
                 ),
                 snapshot,
                 {**spec.hidden_files, **evaluator_files(spec)},

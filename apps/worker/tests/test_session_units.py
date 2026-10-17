@@ -43,3 +43,18 @@ def test_build_tar_uses_the_given_mtime() -> None:
 )
 def test_seconds_formatting_for_coreutils_timeout(value: float, text: str) -> None:
     assert _seconds(value) == text
+
+
+def test_a_worker_refuses_an_image_that_is_not_on_its_allowlist() -> None:
+    """Security review F-W1: the worker checks the allowlist again before creating a
+    container, with a reason that is never retried."""
+    from agenteval_core.reliability.taxonomy import FailureReason, is_retryable
+    from agenteval_worker.sandbox.session import ContainerSpec, SandboxError, check_image_allowed
+
+    spec = ContainerSpec("evil:latest", 10, 64, 1.0, image_allowlist=frozenset({"ok:1"}))
+    with pytest.raises(SandboxError) as err:
+        check_image_allowed(spec)
+    assert err.value.reason is FailureReason.SANDBOX_IMAGE_NOT_FOUND
+    assert not is_retryable(err.value.reason)
+    check_image_allowed(ContainerSpec("ok:1", 10, 64, 1.0, image_allowlist=frozenset({"ok:1"})))
+    check_image_allowed(ContainerSpec("anything", 10, 64, 1.0))  # no allowlist: no check

@@ -136,7 +136,7 @@ release is **restore the pre-upgrade backup** and run the older images ([Rollbac
 
 ## Backups and restore
 
-State lives in three places, and two of them must be backed up **together** ([ADR-008](decisions/ADR-008-artifacts-and-sandbox.md)):
+State lives in three places, and two of them must be backed up **together** ([ADR-008](decisions/ADR-008-artifact-storage-and-trajectory-fence.md)):
 
 1. **Postgres** (source of truth for runs, attempts, evaluations, results, keys).
 2. **The `artifacts` volume** (workspace snapshot files; Postgres only holds the rows). A restored database
@@ -213,7 +213,11 @@ a compromised worker. Consequences:
 - Do not mount the socket into any other service, and do not give agent code a path to the worker.
 - A socket proxy that allows only the container calls the worker needs would reduce the exposure; it is not built here.
 
-Details: the README's security model and `docs/security-review.md` (when present).
+The production override also drops every Linux capability from the api, worker, web and Caddy containers, sets
+`no-new-privileges` on them, and gives the API a read-only root filesystem (Caddy keeps only `NET_BIND_SERVICE`). The worker
+still runs as root inside its container, because of the socket.
+
+Details: the README's [security model](../README.md#12-security-model) and [docs/security-review.md](security-review.md).
 
 ## Sizing
 

@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
 from agenteval_api.errors import install_error_handlers
-from agenteval_api.middleware import MetricsMiddleware
+from agenteval_api.middleware import BodyLimitMiddleware, MetricsMiddleware
 from agenteval_api.ratelimit import RateLimiter
 from agenteval_api.routes import (
     agents,
@@ -58,6 +58,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tracing.shutdown()
 
     app = FastAPI(title="AgentEval API", version="0.1.0", lifespan=lifespan)
+    # Innermost, so the 413 is still counted by the metrics middleware and gets CORS headers.
+    app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
     app.add_middleware(MetricsMiddleware)
     install_error_handlers(app)
     # The dashboard's origin(s) only; no cookies (the key travels in the Authorization

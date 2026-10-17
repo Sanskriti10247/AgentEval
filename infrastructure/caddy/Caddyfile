@@ -5,9 +5,15 @@
 	encode zstd gzip
 
 	header {
-		Strict-Transport-Security "max-age=31536000"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
 		Referrer-Policy "same-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		# Clickjacking, <base> and plugin injection, form hijacking. script-src is NOT set:
+		# Next.js emits inline bootstrap scripts, and a nonce-based policy needs per-request
+		# rendering (docs/security-review.md, finding F-P5, accepted).
+		Content-Security-Policy "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"
 		-Server
 	}
 

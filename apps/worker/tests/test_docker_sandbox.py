@@ -176,3 +176,77 @@ def test_sweep_removes_only_expired_containers(
                 c.remove(force=True)
             except docker.errors.NotFound:
                 pass
+
+
+# -- security review: hardening the controls above do not already prove ------------------------
+
+
+def test_no_new_privileges_and_default_seccomp(sandbox: DockerSandbox) -> None:
+    r = sandbox.run(spec(["sh", "-c", "grep -E '^(NoNewPrivs|Seccomp):' /proc/self/status"]))
+    fields = dict(line.split(":\t") for line in r.stdout.strip().split("\n"))
+    assert fields["NoNewPrivs"] == "1"
+    assert fields["Seccomp"] == "2"  # filter mode: Docker's default profile is applied
+
+
+def test_the_workers_environment_never_reaches_the_sandbox(
+    sandbox: DockerSandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model credential lives in the worker's environment only (README Security model)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SHOULD-NOT-LEAK")
+    monkeypatch.setenv("AGENTEVAL_DATABASE_URL", "postgresql://SHOULD-NOT-LEAK")
+    r = sandbox.run(spec(["sh", "-c", "env; cat /proc/1/environ | tr '\\0' '\\n'"]))
+    assert "SHOULD-NOT-LEAK" not in r.stdout
+    assert "ANTHROPIC" not in r.stdout and "AGENTEVAL" not in r.stdout.replace("AGENTEVAL_TEST", "")
+
+
+def test_the_docker_socket_is_not_visible_in_the_sandbox(sandbox: DockerSandbox) -> None:
+    r = sandbox.run(
+        spec(["sh", "-c", "test -e /var/run/docker.sock && echo present || echo absent"])
+    )
+    assert r.stdout.strip() == "absent"
+
+
+def test_the_sandbox_cannot_reach_the_internal_services(sandbox: DockerSandbox) -> None:
+    r = sandbox.run(
+        py(
+            "import socket\n"
+            "for host in ('postgres', 'redis', 'api'):\n"
+            "    try:\n"
+            "        socket.getaddrinfo(host, 5432)\n"
+            "        print(host, 'resolved')\n"
+            "    except OSError:\n"
+            "        print(host, 'unreachable')\n"
+        )
+    )
+    assert r.stdout.split() == [
+        "postgres",
+        "unreachable",
+        "redis",
+        "unreachable",
+        "api",
+        "unreachable",
+    ]
+
+
+def test_a_sandbox_refuses_an_image_outside_the_workers_allowlist(
+    client: docker.DockerClient,
+) -> None:
+    from agenteval_core.reliability.taxonomy import FailureReason
+
+    strict = DockerSandbox(client, image_allowlist=["some-other-image:1"])
+    r = strict.run(spec(["true"]))  # IMAGE exists locally but is not allowed
+    assert r.outcome is Outcome.SANDBOX_ERROR
+    assert r.failure_reason is FailureReason.SANDBOX_IMAGE_NOT_FOUND
+    assert "allowlist" in (r.error_message or "")
+    assert_no_leftovers(client)
+
+
+def test_writable_mounts_are_noexec_nosuid_nodev(sandbox: DockerSandbox) -> None:
+    """Docker's tmpfs defaults, relied on rather than set (verified here so an engine change
+    would be noticed)."""
+    r = sandbox.run(spec(["sh", "-c", "grep -E ' /(workspace|tmp) ' /proc/mounts"]))
+    lines = r.stdout.strip().split("\n")
+    assert len(lines) == 2
+    for line in lines:
+        flags = set(line.split()[3].split(","))
+        assert {"nosuid", "nodev", "noexec"} <= flags, line
