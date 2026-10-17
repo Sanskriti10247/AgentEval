@@ -25,11 +25,12 @@ from agenteval_worker.evaluation_runner import EvaluationRunner
 from agenteval_worker.executor import Executor
 from agenteval_worker.lease_manager import LeaseManager
 from agenteval_worker.providers import build_providers
+from agenteval_worker.reconciler import Reconciler
 from agenteval_worker.sandbox.docker_sandbox import DockerSandbox
 
 log = get_logger(__name__)
 
-WORKER_VERSION = "phase5-step4"
+WORKER_VERSION = "phase5-step5"
 REGISTRY_HEARTBEAT_S = 10.0
 
 
@@ -52,7 +53,9 @@ async def main() -> None:
         pids_limit=settings.pids_limit,
     )
     swept = await asyncio.to_thread(sandbox.sweep_orphans)
-    queue = RunQueue(redis, settings.dispatch_stream, settings.consumer_group)
+    queue = RunQueue(
+        redis, settings.dispatch_stream, settings.consumer_group, maxlen=settings.stream_maxlen
+    )
     sessionmaker = create_sessionmaker(engine)
     providers = build_providers(settings)
     agent_runner = AgentRunner(
@@ -105,12 +108,28 @@ async def main() -> None:
         cancel_grace_s=settings.worker_cancel_grace_s,
     )
 
+    reconciler = Reconciler(
+        sessionmaker,
+        queue,
+        worker_id,
+        interval_s=timing.reconcile_interval_s,
+        lease_ttl_s=timing.ttl_s,
+        redispatch_after_s=settings.redispatch_after_s,
+        orphan_sweep_interval_s=settings.orphan_sweep_interval_s,
+        kill_attempt=sandbox.kill_attempt,
+        sweep_orphans=sandbox.sweep_orphans,
+    )
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, functools.partial(_request_stop, stop, sig))
 
     registry_task = asyncio.create_task(_registry_heartbeat(sessionmaker, worker_id, stop))
+    # The consumer group must exist before the first XAUTOCLAIM/XINFO: Consumer.run
+    # creates it lazily, so make sure here (idempotent) and only then start ticking.
+    await queue.ensure_group()
+    reconciler_task = asyncio.create_task(reconciler.run(stop))
 
     log.info(
         "worker_started",
@@ -123,11 +142,15 @@ async def main() -> None:
     try:
         await consumer.run(stop)
     finally:
-        registry_task.cancel()
-        try:
-            await registry_task
-        except asyncio.CancelledError:
-            pass
+        # The reconciler stops with the worker: another worker's reconciler (or
+        # this one after a restart) covers anything left unrecovered.
+        stop.set()
+        for task in (reconciler_task, registry_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await lease_manager.stop()
         async with sessionmaker() as s:
             await WorkerRepository(s).stop(worker_id)

@@ -59,6 +59,7 @@ from agenteval_core.schemas.evaluation import (
     TaskSummary,
     TokenTotals,
 )
+from agenteval_core.services.dispatch import stamp_dispatched
 from agenteval_core.services.errors import (
     Conflict,
     DispatchUnavailable,
@@ -319,6 +320,7 @@ class EvaluationService:
         except RedisError as exc:
             log.error("evaluation_dispatch_failed", evaluation_id=str(batch.id), error=str(exc))
             raise DispatchUnavailable(batch.id, what="evaluation") from exc
+        await stamp_dispatched(self._s, queued)
         log.info(
             "evaluation_dispatched",
             evaluation_id=str(batch.id),

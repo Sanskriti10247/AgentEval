@@ -25,7 +25,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.sessionmaker = create_sessionmaker(app.state.engine)
         app.state.redis = Redis.from_url(settings.redis_url)
         app.state.queue = RunQueue(
-            app.state.redis, settings.dispatch_stream, settings.consumer_group
+            app.state.redis,
+            settings.dispatch_stream,
+            settings.consumer_group,
+            maxlen=settings.stream_maxlen,
         )
         log.info("api_started")
         try:

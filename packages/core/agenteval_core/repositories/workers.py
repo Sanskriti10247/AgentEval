@@ -37,7 +37,9 @@ class WorkerRepository:
 
     async def stop(self, worker_id: str) -> None:
         await self._s.execute(
-            update(Worker).where(Worker.id == worker_id).values(stopped_at=func.now())
+            update(Worker)
+            .where(Worker.id == worker_id)
+            .values(stopped_at=func.now(), stop_reason="shutdown")
         )
 
     async def get(self, worker_id: str) -> Worker | None:

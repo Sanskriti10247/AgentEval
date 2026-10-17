@@ -86,7 +86,7 @@ async def clean_state(engine: AsyncEngine, settings: Settings) -> AsyncIterator[
         await conn.execute(
             text(
                 "TRUNCATE scores, attempt_evaluations, attempt_artifacts, trajectory_events, "
-                "run_attempts, runs, evaluations, tasks, datasets, agent_versions, agents"
+                "run_attempts, runs, evaluations, tasks, datasets, agent_versions, agents, workers"
             )
         )
     r = Redis.from_url(settings.redis_url)
@@ -97,7 +97,9 @@ async def clean_state(engine: AsyncEngine, settings: Settings) -> AsyncIterator[
 
 @pytest.fixture
 async def queue(redis: Redis, settings: Settings) -> RunQueue:
-    q = RunQueue(redis, settings.dispatch_stream, settings.consumer_group)
+    q = RunQueue(
+        redis, settings.dispatch_stream, settings.consumer_group, maxlen=settings.stream_maxlen
+    )
     await q.ensure_group()
     return q
 
