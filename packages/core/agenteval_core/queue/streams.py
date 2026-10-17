@@ -11,8 +11,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+from opentelemetry.trace import SpanKind
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
+
+from agenteval_core.observability import tracing
 
 # Headroom between XREADGROUP's BLOCK and the client socket timeout.
 BLOCKING_READ_HEADROOM_S = 5.0
@@ -39,6 +42,8 @@ class DispatchMessage:
     # evaluations-stream message sets evaluation_id.
     run_id: uuid.UUID | None = None
     evaluation_id: uuid.UUID | None = None
+    # The publisher's W3C trace context (ADR-010 B); None from an older publisher.
+    traceparent: str | None = None
 
 
 def _text(value: Any) -> str:
@@ -53,9 +58,11 @@ def _parse_entry(
         item_id: uuid.UUID | None = uuid.UUID(_text(raw))
     except (ValueError, AttributeError):
         item_id = None
+    tp = (fields or {}).get(tracing.TRACEPARENT_FIELD.encode(), (fields or {}).get("traceparent"))
+    traceparent = _text(tp) if tp is not None else None
     if field == EVALUATION_FIELD:
-        return DispatchMessage(_text(msg_id), evaluation_id=item_id)
-    return DispatchMessage(_text(msg_id), run_id=item_id)
+        return DispatchMessage(_text(msg_id), evaluation_id=item_id, traceparent=traceparent)
+    return DispatchMessage(_text(msg_id), run_id=item_id, traceparent=traceparent)
 
 
 @dataclass(frozen=True)
@@ -103,16 +110,37 @@ class RunQueue:
                 raise
 
     async def publish(self, item_id: uuid.UUID) -> str:
-        # MAXLEN ~ N: the stream never grows without bound, and the trim is cheap
-        # because Redis only drops whole macro nodes. Trimmed entries are always
-        # safe to lose: Postgres is the truth and redispatch republishes.
-        if self.maxlen is None:
-            msg_id = await self._r.xadd(self.stream, {self.field: str(item_id)})
-        else:
-            msg_id = await self._r.xadd(
-                self.stream, {self.field: str(item_id)}, maxlen=self.maxlen, approximate=True
-            )
-        return _text(msg_id)
+        # A producer span, whose context travels in the message as `traceparent`
+        # (ADR-010 B) so the worker's spans join this trace. With no span open
+        # (or tracing unconfigured) the field is simply absent.
+        with tracing.span(
+            "queue.publish",
+            kind=SpanKind.PRODUCER,
+            attributes={
+                "messaging.system": "redis",
+                "messaging.operation.type": "publish",
+                "messaging.destination.name": self.stream,
+                self.field: item_id,
+            },
+        ) as sp:
+            fields: dict[Any, Any] = {self.field: str(item_id)}
+            traceparent = tracing.current_traceparent()
+            if traceparent is not None:
+                fields[tracing.TRACEPARENT_FIELD] = traceparent
+            # MAXLEN ~ N: the stream never grows without bound, and the trim is cheap
+            # because Redis only drops whole macro nodes. Trimmed entries are always
+            # safe to lose: Postgres is the truth and redispatch republishes.
+            if self.maxlen is None:
+                msg_id = await self._r.xadd(self.stream, fields)
+            else:
+                msg_id = await self._r.xadd(
+                    self.stream,
+                    fields,
+                    maxlen=self.maxlen,
+                    approximate=True,
+                )
+            sp.set(message_id=_text(msg_id))
+            return _text(msg_id)
 
     async def read(
         self, consumer: str, *, count: int = 1, block_ms: int = 5000

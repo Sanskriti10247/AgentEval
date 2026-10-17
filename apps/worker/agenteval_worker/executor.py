@@ -30,6 +30,7 @@ from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from opentelemetry.trace import SpanKind
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -38,6 +39,7 @@ from agenteval_core.artifacts import ArtifactStore
 from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, Run, RunAttempt, Task
 from agenteval_core.observability import metrics as prom
+from agenteval_core.observability import tracing
 from agenteval_core.queue.streams import DispatchMessage, RunQueue
 from agenteval_core.reliability.policy import RunDecision
 from agenteval_core.reliability.taxonomy import FailureReason, WorkspaceCapture
@@ -147,10 +149,26 @@ class Executor:
             log.warning("malformed_message", message_id=msg.message_id)
             await self._queue.ack(msg.message_id)
             return
-        with structlog.contextvars.bound_contextvars(
-            run_id=str(msg.run_id), worker_id=self.worker_id
+        with (
+            structlog.contextvars.bound_contextvars(
+                run_id=str(msg.run_id), worker_id=self.worker_id
+            ),
+            # The consumer span: a child of the publisher's `queue.publish` when the
+            # message carried a traceparent, otherwise a new root (ADR-010 B).
+            tracing.span(
+                "run.execute",
+                kind=SpanKind.CONSUMER,
+                remote=True,
+                traceparent=msg.traceparent,
+                run_id=msg.run_id,
+                worker_id=self.worker_id,
+                message_id=msg.message_id,
+                attributes={"messaging.system": "redis", "messaging.operation.type": "process"},
+            ),
         ):
-            claimed = await self._claim(msg)
+            with tracing.span("run.claim") as claim_span:
+                claimed = await self._claim(msg)
+                claim_span.set(result="claimed" if claimed is not None else "skipped")
             if claimed is None:
                 return
             run, t_sent = claimed
@@ -181,26 +199,38 @@ class Executor:
                     attempt_no=attempt.attempt_no,
                     task_type=task.task_type,
                 ):
-                    result: ExecutionResult | AgentAttemptResult
-                    if task.task_type == "agent":
-                        assert version is not None
-                        result = await self._execute_agent(task, attempt, version, slot.token)
-                    else:
-                        result = await self._execute(task, attempt)
-                    if slot.token.reason == "lease_lost":
-                        # The lease is gone: no further writes (design §6 rule 3).
-                        # Epoch fencing would refuse T-finish anyway; skipping it
-                        # avoids the call and the "finish_fenced" noise.
-                        log.warning("lease_lost_skip_persist", attempt_id=str(attempt.id))
-                        return
-                    result = await self._save_workspace(attempt, result)
-                    if slot.token.reason == "lease_lost":
-                        # Lost while saving: T-finish would be fenced. Any row the
-                        # save inserted stays (the attempt is abandoned and never
-                        # graded); an orphan file is the sweeper's.
-                        log.warning("lease_lost_skip_persist", attempt_id=str(attempt.id))
-                        return
-                    outcome = await self._persist(attempt, result, cancel_reason=slot.token.reason)
+                    with tracing.span(
+                        "attempt",
+                        attempt_no=attempt.attempt_no,
+                        attempt_id=attempt.id,
+                        task_id=task.id,
+                    ) as attempt_span:
+                        result: ExecutionResult | AgentAttemptResult
+                        if task.task_type == "agent":
+                            assert version is not None
+                            result = await self._execute_agent(task, attempt, version, slot.token)
+                        else:
+                            result = await self._execute(task, attempt)
+                        attempt_span.set(
+                            outcome=result.outcome,
+                            failure_reason=getattr(result, "failure_reason", None),
+                        )
+                        if slot.token.reason == "lease_lost":
+                            # The lease is gone: no further writes (design §6 rule 3).
+                            # Epoch fencing would refuse T-finish anyway; skipping it
+                            # avoids the call and the "finish_fenced" noise.
+                            log.warning("lease_lost_skip_persist", attempt_id=str(attempt.id))
+                            return
+                        result = await self._save_workspace(attempt, result)
+                        if slot.token.reason == "lease_lost":
+                            # Lost while saving: T-finish would be fenced. Any row the
+                            # save inserted stays (the attempt is abandoned and never
+                            # graded); an orphan file is the sweeper's.
+                            log.warning("lease_lost_skip_persist", attempt_id=str(attempt.id))
+                            return
+                        outcome = await self._persist(
+                            attempt, result, cancel_reason=slot.token.reason
+                        )
                     # The run is terminal (or RETRYING) now and holds no lease: stop
                     # renewing before grading, or the next renewal would match 0 rows,
                     # look like a lost lease, and kill the evaluation container (it
@@ -233,7 +263,9 @@ class Executor:
             ),
         ):
             await self._evaluation_runner.grade(
-                msg.evaluation_id, acknowledge=lambda: queue.ack(msg.message_id)
+                msg.evaluation_id,
+                acknowledge=lambda: queue.ack(msg.message_id),
+                traceparent=msg.traceparent,
             )
 
     def _release(self, slot: _LeaseSlot, run: Run) -> None:
@@ -399,6 +431,22 @@ class Executor:
         *,
         cancel_reason: str | None = None,
     ) -> FinishOutcome:
+        with tracing.span("run.finish", attempt_no=attempt.attempt_no) as sp:
+            outcome = await self._persist_finish(attempt, result, cancel_reason=cancel_reason)
+            sp.set(
+                finish_outcome=outcome.value,
+                outcome=result.outcome,
+                duration_ms=result.duration_ms,
+            )
+            return outcome
+
+    async def _persist_finish(
+        self,
+        attempt: RunAttempt,
+        result: "ExecutionResult | AgentAttemptResult",
+        *,
+        cancel_reason: str | None = None,
+    ) -> FinishOutcome:
         """T-finish (Step 3): calls finish_attempt (p5_finish), retrying a
         transient DB error with backoff - a CHECK violation or any other
         unexpected error is not retried, and leaves the run RUNNING for Phase
@@ -457,6 +505,7 @@ class Executor:
         try:
             if decision is None:
                 return
+            tracing.set_attributes(status=decision.status, transition=decision.code)
             terminal_outcome = (
                 result.outcome if decision.status in (RunState.COMPLETED, RunState.FAILED) else None
             )

@@ -1,4 +1,4 @@
-.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up
+.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up observability-up observability-down
 
 COMPOSE := docker compose
 # The e2e suite runs the worker with short lease timings (docker-compose.e2e.yml).
@@ -53,6 +53,13 @@ web:  ## Run the dashboard dev server on :3000 (needs the API on :8000, e.g. mak
 
 web-up:  ## Build and start the dashboard container on 127.0.0.1:3000 (compose profile "web")
 	$(COMPOSE) --profile web up -d --build web
+
+observability-up:  ## Start Prometheus + Jaeger and make the api and worker export traces (UI: :9090, :16686)
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.observability.yml --profile observability up -d --build
+
+observability-down:  ## Remove Prometheus + Jaeger and recreate api and worker without trace export
+	$(COMPOSE) --profile observability rm -sf jaeger prometheus
+	$(COMPOSE) up -d --no-deps api worker
 
 web-check:  ## Dashboard gates: typecheck, lint, test, build
 	cd apps/web && npm ci && npm run typecheck && npm run lint && npm test && npm run build

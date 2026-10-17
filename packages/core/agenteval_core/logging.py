@@ -8,6 +8,7 @@ from collections.abc import MutableMapping
 from typing import Any
 
 import structlog
+from opentelemetry import trace
 
 # Anthropic API keys look like sk-ant-...; redact them wherever they appear.
 _SECRET_VALUE = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
@@ -41,6 +42,21 @@ def redact_secrets(
     return event_dict
 
 
+def add_trace_context(
+    _logger: Any, _method: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """structlog processor: inside a span, tag the line with its trace and span id
+    (lowercase hex, as trace UIs show them) so a log line finds its trace."""
+    try:
+        ctx = trace.get_current_span().get_span_context()
+        if ctx.is_valid:
+            event_dict["trace_id"] = format(ctx.trace_id, "032x")
+            event_dict["span_id"] = format(ctx.span_id, "016x")
+    except Exception:  # logging must never fail because tracing did
+        pass
+    return event_dict
+
+
 def configure_logging(level: str = "INFO", json: bool = True) -> None:
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level.upper())
     renderer: structlog.types.Processor = (
@@ -49,6 +65,7 @@ def configure_logging(level: str = "INFO", json: bool = True) -> None:
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
+            add_trace_context,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.format_exc_info,

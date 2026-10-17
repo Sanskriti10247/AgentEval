@@ -211,6 +211,39 @@ sum(agenteval_worker_inflight{kind="run"}) / sum(agenteval_worker_concurrency)
 
 Caveats: an age is measured from creation for a queued run (a run requeued after a retry or a recovery keeps its original `created_at`), and from the moment it became due for a retrying run or a pending evaluation. Counters reset when a worker restarts (use `rate`/`increase`), and a run recovered after a crash is counted by the process that applied each transition, so sums across workers are the system totals.
 
+### Tracing
+
+Traces use OpenTelemetry (ADR-010 B). Spans are **always created** (cheap, in process), so `trace_id` and `span_id` appear on every log line written inside one, and the trace context travels through Redis. **Nothing leaves the process** unless `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set; `OTEL_TRACES_EXPORTER=none` forces it off. The standard `OTEL_*` variables (service name, sampler, batch tuning, headers) are honoured by the SDK. The services are named `agenteval-api` and `agenteval-worker`.
+
+```bash
+make observability-up     # Prometheus + Jaeger; api and worker export traces to Jaeger
+# Jaeger UI: http://127.0.0.1:16686   (service: agenteval-api or agenteval-worker)
+make observability-down   # removes both, recreates api and worker without export
+```
+
+`make observability-up` applies `docker-compose.observability.yml` (which only sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` on `api` and `worker`) on top of the base file and starts the `observability` profile. An override file, rather than a variable defaulting to empty in the base file, keeps the default stack free of any `OTEL_*` setting: it exports nothing by construction, and `make up` and `make e2e` never depend on a collector. Jaeger keeps traces in memory (gone on restart); its OTLP port is internal to the compose network and the UI is bound to `127.0.0.1`. There is no authentication yet (Phase 8).
+
+A run submitted through the API is one trace, across the Redis hop (a W3C `traceparent` travels as a field of the stream message):
+
+```text
+POST /api/v1/runs                      (server span; named by the route template)
+└─ queue.publish                       (producer)
+   └─ run.execute                      (consumer, in the worker)
+      ├─ run.claim
+      ├─ attempt
+      │  ├─ agent.step                 (one per model turn)
+      │  │  ├─ model.call              (one per provider call, retries included)
+      │  │  └─ tool.call               (one per tool call)
+      │  ├─ artifact.save
+      │  └─ run.finish
+      └─ evaluation.grade
+         └─ evaluation.check
+```
+
+Every reconciler step is its own root span, `reconciler.<step>` (recoveries, retries due, redispatch, sweeps); its `queue.publish` is a child, so a redispatched run's next `run.execute` hangs off that reconciler trace. Steps that found nothing to do are marked `idle` and not exported (there are several per second). A grading delivered on the evaluations stream (after a recovery) is an `evaluation.grade` consumer span joined to its publisher the same way. A message with **no** `traceparent` (published before tracing was configured, or by an older publisher) makes `run.execute` a new root with `trace_origin=new_root`; its `run_id` attribute links it to everything else about the run.
+
+**What is never recorded.** Attributes come from an allow-list in `agenteval_core/observability/tracing.py`: ids (`run_id`, `attempt_no`, `evaluation_id`, `worker_id`), enums (status, outcome, failure reason, transition code, tool name, provider, model), and sizes, durations, token counts and cost. A key outside the list is dropped, so there is nowhere to put prompts, model output, tool inputs or outputs, file contents, hidden checks or error messages from candidate code (D11, ADR-007). A tool name the model invented is recorded as `unknown`, an unpriced model is omitted. An exception is recorded as its **type name only**, never its message or traceback. Spans are best-effort: an exporter failure costs a warning in the log, never a run.
+
 ## Local setup
 
 Prerequisites: [uv](https://docs.astral.sh/uv/), and Docker with Compose v2 (Docker Desktop on macOS works).
@@ -585,7 +618,7 @@ This is a **research and portfolio sandbox, not a hardened multi-tenant security
   - **Failure handling is tested, not load-tested.** Behaviour under sustained load, many workers and throughput are Phase 7 and nothing about them is claimed.
   - **A batch created without `Idempotency-Key`** whose dispatch fails isn't re-dispatched by the client, but the reconciler republishes its `QUEUED` runs.
 - **No authentication or rate limiting (Phase 8).** Compose binds every port to `127.0.0.1`. No web UI yet (Phase 8).
-- **No tracing yet (Phase 6).** Metrics are exported (see [Observability](#observability)); traces are not. Beyond metrics, observability is structured JSON logs (with `run_id`, `task_id`, `attempt_no`, `worker_id`), the trajectory, and the run, attempt, evaluation and `workers` rows.
+- **Metrics are scraped and traces are an opt-in export** (see [Observability](#observability)); beyond them, observability is structured JSON logs (with `run_id`, `task_id`, `attempt_no`, `worker_id`), the trajectory, and the run, attempt, evaluation and `workers` rows.
 - **Agent runs:**
   - Budgets are checked between model calls (the worst-case overshoot is one call).
   - Model calls are non-streaming.

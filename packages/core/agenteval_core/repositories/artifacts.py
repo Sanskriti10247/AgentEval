@@ -38,6 +38,7 @@ from agenteval_core.artifacts import ArtifactStore, StoredArtifact
 from agenteval_core.evaluation.taxonomy import ArtifactKind
 from agenteval_core.logging import get_logger
 from agenteval_core.models.base import new_id
+from agenteval_core.observability import tracing
 
 log = get_logger(__name__)
 
@@ -82,6 +83,34 @@ class ArtifactRepository:
         deadline_s: float,
         kind: ArtifactKind = ArtifactKind.WORKSPACE,
         clock: Callable[[], float] = time.monotonic,
+    ) -> SaveResult:
+        with tracing.span("artifact.save", attempt_id=attempt_id, size_bytes=len(data)) as sp:
+            result = await self._save(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                epoch=epoch,
+                data=data,
+                metadata=metadata,
+                insert_timeout_s=insert_timeout_s,
+                deadline_s=deadline_s,
+                kind=kind,
+                clock=clock,
+            )
+            sp.set(result=result.value)
+            return result
+
+    async def _save(
+        self,
+        *,
+        run_id: uuid.UUID,
+        attempt_id: uuid.UUID,
+        epoch: int,
+        data: bytes,
+        metadata: dict[str, Any],
+        insert_timeout_s: float,
+        deadline_s: float,
+        kind: ArtifactKind,
+        clock: Callable[[], float],
     ) -> SaveResult:
         started = time.monotonic()
         try:

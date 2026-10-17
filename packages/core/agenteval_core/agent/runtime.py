@@ -32,12 +32,13 @@ from typing import Any, TypeVar
 from agenteval_core.agent.context import AgentContext
 from agenteval_core.agent.events import EventSink, EventType, SinkFailed, TrajectoryEventData
 from agenteval_core.agent.limits import BudgetTracker, Limit
-from agenteval_core.agent.pricing import ModelPrice, cost_usd
+from agenteval_core.agent.pricing import PRICES, ModelPrice, cost_usd
 from agenteval_core.agent.prompts import RUNTIME_VERSION, TRUNCATED_TOOL_INPUT, TRUNCATION_NUDGE
 from agenteval_core.agent.result import AgentResult
 from agenteval_core.agent.retry import GiveUp, Retry, RetryPolicy, next_model_retry
 from agenteval_core.logging import get_logger
 from agenteval_core.observability import metrics as prom
+from agenteval_core.observability import tracing
 from agenteval_core.providers.base import (
     ModelError,
     ModelErrorKind,
@@ -67,6 +68,9 @@ T = TypeVar("T")
 TOOL_DEADLINE_GRACE_S = 15.0
 # How long to wait for an aborted tool call to unwind after killing the sandbox.
 ABORT_WAIT_S = 10.0
+
+# (provider, model) pairs a run can reach; anything else is not span content.
+_PRICED = frozenset(PRICES)
 
 _LIMIT_OUTCOME = {
     Limit.MAX_STEPS: Outcome.MAX_STEPS,
@@ -181,36 +185,39 @@ class AgentRuntime:
                 raise _Stop(_LIMIT_OUTCOME[limit], limit.value)
 
             self._step += 1
-            turn = await self._call_model(ctx, budget)
-            cost = cost_usd(self._price, turn.usage)
-            budget.record_call(turn.usage, cost)
-            self._emit_model_call(turn, cost)
-            prom.model_call(
-                self._provider,
-                self._model,
-                latency_s=turn.latency_ms / 1000,
-                tokens_in=turn.usage.total_input_tokens,
-                tokens_out=turn.usage.output_tokens,
-                cost_usd=float(cost),
-            )
-            await self._flush()  # before tools run: a hang still shows what was requested
-
-            if turn.stop is StopReason.REFUSAL:
-                raise _Stop(Outcome.MODEL_REFUSAL, f"refusal: {turn.stop_detail or 'unspecified'}")
-            if turn.stop is StopReason.OTHER:
-                raise _Stop(
-                    Outcome.MODEL_ERROR,
-                    f"unexpected stop reason: {turn.stop_detail}",
-                    failure_reason=FailureReason.MODEL_PROTOCOL,
+            with tracing.span("agent.step", step=self._step, benign=(_Stop,)):
+                turn = await self._call_model(ctx, budget)
+                cost = cost_usd(self._price, turn.usage)
+                budget.record_call(turn.usage, cost)
+                self._emit_model_call(turn, cost)
+                prom.model_call(
+                    self._provider,
+                    self._model,
+                    latency_s=turn.latency_ms / 1000,
+                    tokens_in=turn.usage.total_input_tokens,
+                    tokens_out=turn.usage.output_tokens,
+                    cost_usd=float(cost),
                 )
-            if turn.tool_calls:
-                results = await self._run_tools(ctx, turn)
-                self._session.add_tool_results(results)
-                continue
-            if turn.stop is StopReason.MAX_TOKENS:
-                self._session.add_user_text(TRUNCATION_NUDGE)
-                continue
-            return turn.text
+                await self._flush()  # before tools run: a hang still shows what was requested
+
+                if turn.stop is StopReason.REFUSAL:
+                    raise _Stop(
+                        Outcome.MODEL_REFUSAL, f"refusal: {turn.stop_detail or 'unspecified'}"
+                    )
+                if turn.stop is StopReason.OTHER:
+                    raise _Stop(
+                        Outcome.MODEL_ERROR,
+                        f"unexpected stop reason: {turn.stop_detail}",
+                        failure_reason=FailureReason.MODEL_PROTOCOL,
+                    )
+                if turn.tool_calls:
+                    results = await self._run_tools(ctx, turn)
+                    self._session.add_tool_results(results)
+                    continue
+                if turn.stop is StopReason.MAX_TOKENS:
+                    self._session.add_user_text(TRUNCATION_NUDGE)
+                    continue
+                return turn.text
 
     # -- model calls -------------------------------------------------------------------
 
@@ -223,11 +230,30 @@ class AgentRuntime:
             deadline_bound = timeout_s >= time_left
             max_tokens = budget.max_tokens_for_next_call()
             try:
-                return await self._race(
-                    ctx,
-                    self._session.next(max_tokens=max_tokens, timeout_s=timeout_s),
-                    timeout_s=time_left,
-                )
+                with tracing.span(
+                    "model.call",
+                    provider=self._provider if (self._provider, self._model) in _PRICED else None,
+                    model=self._model if (self._provider, self._model) in _PRICED else None,
+                    retry_no=retries,
+                    benign=(_Stop,),
+                ) as sp:
+                    try:
+                        turn = await self._race(
+                            ctx,
+                            self._session.next(max_tokens=max_tokens, timeout_s=timeout_s),
+                            timeout_s=time_left,
+                        )
+                    except ModelError as err:
+                        sp.set(error_kind=err.kind)
+                        raise
+                    sp.set(
+                        stop_reason=turn.stop,
+                        tokens_in=turn.usage.total_input_tokens,
+                        tokens_out=turn.usage.output_tokens,
+                        cost_usd=float(cost_usd(self._price, turn.usage)),
+                        duration_ms=turn.latency_ms,
+                    )
+                    return turn
             except ModelError as err:
                 if err.kind is ModelErrorKind.TIMEOUT and deadline_bound:
                     # The call was only cut short because the attempt's time ran out.
@@ -251,10 +277,20 @@ class AgentRuntime:
     async def _run_tools(self, ctx: AgentContext, turn: ModelTurn) -> list[ToolResultMsg]:
         results: list[ToolResultMsg] = []
         for call in turn.tool_calls:
-            if turn.stop is StopReason.MAX_TOKENS:
-                inv = _not_run(call, ToolStatus.INVALID_INPUT, TRUNCATED_TOOL_INPUT)
-            else:
-                inv = await self._invoke(ctx, call)
+            # Only a registered name is ever an attribute value: the model picks
+            # tool names, and a made-up one must not become span content.
+            tool = call.name if call.name in self._known_tools else "unknown"
+            with tracing.span("tool.call", tool=tool, benign=(_Stop,)) as sp:
+                if turn.stop is StopReason.MAX_TOKENS:
+                    inv = _not_run(call, ToolStatus.INVALID_INPUT, TRUNCATED_TOOL_INPUT)
+                else:
+                    inv = await self._invoke(ctx, call)
+                sp.set(
+                    tool_status=inv.status,
+                    exit_code=inv.exit_code,
+                    duration_ms=inv.duration_ms,
+                    output_bytes=len(inv.stored_content.encode()),
+                )
             self._emit_tool_call(inv)
             results.append(ToolResultMsg(call.id, inv.model_content, inv.is_error))
         await self._flush()

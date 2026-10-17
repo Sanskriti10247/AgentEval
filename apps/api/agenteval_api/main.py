@@ -21,6 +21,7 @@ from agenteval_api.routes import (
 from agenteval_core.config import Settings, get_settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.logging import configure_logging, get_logger
+from agenteval_core.observability.tracing import configure_tracing
 from agenteval_core.queue.streams import RunQueue
 
 log = get_logger(__name__)
@@ -32,6 +33,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         configure_logging(settings.log_level, settings.log_json)
+        tracing = configure_tracing("agenteval-api")
         app.state.settings = settings
         app.state.engine = create_engine(settings.database_url)
         app.state.sessionmaker = create_sessionmaker(app.state.engine)
@@ -48,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await app.state.redis.aclose()
             await app.state.engine.dispose()
+            tracing.shutdown()
 
     app = FastAPI(title="AgentEval API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(MetricsMiddleware)

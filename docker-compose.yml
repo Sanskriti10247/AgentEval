@@ -129,6 +129,21 @@ services:
       - api
       - worker
 
+  # Opt-in tracing backend (ADR-010 B): all-in-one Jaeger with in-memory storage (traces are
+  # gone on restart). It receives OTLP/HTTP on 4318 inside the compose network only; the UI is
+  # bound to localhost. The api and worker send nothing unless the override file is applied:
+  #   docker compose -f docker-compose.yml -f docker-compose.observability.yml \
+  #     --profile observability up -d     (or: make observability-up)
+  jaeger:
+    profiles: ["observability"]
+    image: jaegertracing/all-in-one:1.76.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${AGENTEVAL_JAEGER_HOST_PORT:-16686}:16686"
+    expose:
+      - "4318"
+
 volumes:
   pgdata:
   redisdata:
