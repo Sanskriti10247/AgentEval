@@ -157,6 +157,10 @@ class AttemptEvaluation(UUIDPk, CreatedAt, Base):
         CheckConstraint(
             "error_reason IS NULL OR status IN ('ERROR','PENDING')", name="reason_states"
         ),
+        # Step 7 (migration 0008): a grading lease exists exactly while RUNNING, and an
+        # ERROR row always says why (a PENDING row may carry the last attempt's reason, G13).
+        CheckConstraint("(status = 'RUNNING') = (lease_expires_at IS NOT NULL)", name="lease"),
+        CheckConstraint("status <> 'ERROR' OR error_reason IS NOT NULL", name="error_reason"),
         Index(
             "ix_attempt_evaluations_lease",
             "lease_expires_at",

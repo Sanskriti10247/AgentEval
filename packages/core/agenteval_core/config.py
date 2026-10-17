@@ -19,6 +19,8 @@ class Settings(BaseSettings):
 
     # Queue
     dispatch_stream: str = "runs.dispatch"
+    # Step 7: evaluation ids travel on their own stream (same consumer group name).
+    evaluation_stream: str = "evaluations.dispatch"
     consumer_group: str = "workers"
 
     # Sandbox
@@ -51,6 +53,13 @@ class Settings(BaseSettings):
     redispatch_after_s: float = 60.0
     orphan_sweep_interval_s: float = 300.0
     stream_maxlen: int = 100_000
+
+    # Evaluation reliability (Step 7; F9). The grading budget an ad hoc run's
+    # evaluation row is pinned with at creation (a batch run uses its batch's
+    # eval_max_attempts instead); a FINISHED attempt still without an evaluation
+    # row after a1_grace_s is recovered by the reconciler (A1).
+    eval_max_attempts: int = Field(default=3, ge=1, le=10)
+    a1_grace_s: float = Field(default=60.0, gt=0)
 
     # Artifacts (Step 6; ADR-008 A and E). Snapshot bytes live as files under
     # artifact_dir (a named volume shared by the workers); Postgres keeps the row.

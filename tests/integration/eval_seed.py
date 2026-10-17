@@ -319,6 +319,8 @@ async def seed(client: httpx.AsyncClient, sm: SM) -> Seeded:
             "failure_category": "evaluation_error",
             "failure_tags": [],
             "error_message": f"boom {MARKER}",
+            "error_reason": "check_error",  # ck_attempt_evaluations_error_reason (0008)
+            "error_kind": "non_retryable",
             "duration_ms": 9,
             "finished_at": NOW,
         },
@@ -346,7 +348,7 @@ async def seed(client: httpx.AsyncClient, sm: SM) -> Seeded:
         outcome=ok,
         status="COMPLETED",
         duration_ms=700,
-        evaluation={"status": "RUNNING"},
+        evaluation={"status": "RUNNING", "lease_expires_at": NOW},  # ck_..._lease (0008)
     )
     # C3 stays QUEUED.
     return Seeded(ds, version, ev_id, tasks, runs)

@@ -27,15 +27,17 @@ from datetime import timedelta
 from sqlalchemy import func, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agenteval_core.evaluation.taxonomy import EvaluationStatus, FailureCategory
 from agenteval_core.logging import get_logger
-from agenteval_core.models import Run, RunAttempt
+from agenteval_core.models import AttemptEvaluation, Run, RunAttempt
 from agenteval_core.reliability.backoff import backoff_delay
 from agenteval_core.reliability.policy import (
     RECONCILER_LOCK_NS,
     after_claim_expired,
+    after_evaluation_error,
     after_running_expired,
 )
-from agenteval_core.reliability.taxonomy import FailureReason, is_retryable
+from agenteval_core.reliability.taxonomy import EvaluationErrorReason, FailureReason, is_retryable
 from agenteval_core.reliability.transitions import RunState
 from agenteval_core.states import AttemptStatus, Outcome
 
@@ -48,10 +50,16 @@ IDLE_IN_TRANSACTION_TIMEOUT = "5s"
 SWEEP_KEY_CHUNK = 1000
 
 # pg_try_advisory_xact_lock(RECONCILER_LOCK_NS, step). Step 1 has two scans, each
-# its own transaction and its own lock. The numbers 2 and 6 are reserved for
-# evaluation recovery and evaluation dispatch (Step 7); 5 is the artifact sweeper.
+# its own transaction and its own lock; so does step 2 (evaluations), whose A1
+# scan (finished attempts that never got an evaluation row) is its own key 21:
+# that scan only reads, and the rows it finds are recorded by the worker's own
+# `record()` after the lock is gone (ON CONFLICT DO NOTHING makes two
+# reconcilers recording the same attempt harmless). 5 is the artifact sweeper.
 STEP_CLAIMED = 11  # 1a
 STEP_RUNNING = 12  # 1b
+STEP_EVAL_RECOVERY = 2  # expired RUNNING evaluations (E9a / E9b)
+STEP_EVAL_A1 = 21  # FINISHED attempts without an evaluation row (A1 recovery)
+STEP_EVAL_DISPATCH = 6  # due PENDING evaluations that were never (or long ago) published
 STEP_RETRIES_DUE = 3
 STEP_REDISPATCH = 4
 STEP_ARTIFACTS = 5
@@ -80,6 +88,15 @@ class RunningRecovery:
     """Step 1b. After commit: kill the containers of `attempt_ids`."""
 
     recovered: list[RecoveredRun] = field(default_factory=list)
+    attempt_ids: list[uuid.UUID] = field(default_factory=list)
+
+
+@dataclass
+class EvaluationRecovery:
+    """Step 2. After commit: kill the containers of `attempt_ids`. The PENDING
+    rows (E9a) are published by the dispatch step once their backoff elapses."""
+
+    recovered: list[RecoveredRun] = field(default_factory=list)  # run_id holds the evaluation id
     attempt_ids: list[uuid.UUID] = field(default_factory=list)
 
 
@@ -260,6 +277,135 @@ class RecoveryRepository:
                 scan="running",
             )
         return result
+
+    # -- 2: RUNNING evaluations whose grading lease expired (E9a / E9b) ----------------------
+
+    async def recover_expired_evaluations(self, limit: int = BATCH_SIZE) -> EvaluationRecovery:
+        """`SELECT ... FOR UPDATE SKIP LOCKED` over the expired RUNNING rows
+        (never waits: a row its grader is finishing right now is left for the next
+        tick). `policy.after_evaluation_error(LEASE_EXPIRED, by_reconciler=True)`
+        decides: E9a back to PENDING with a backoff, or E9b ERROR `retries_exhausted`.
+        Both bump `lease_epoch` and clear the lease, which fences the old grader:
+        its finish and its score insert match nothing. The ERROR keeps the
+        reason `lease_expired` and `worker_id` (G13); the original trajectory and
+        snapshot are untouched."""
+        rows = (
+            await self._s.execute(
+                text(
+                    "SELECT id, attempt_id, lease_epoch, eval_attempts, max_eval_attempts"
+                    " FROM attempt_evaluations"
+                    " WHERE status = 'RUNNING' AND lease_expires_at < now()"
+                    " ORDER BY lease_expires_at LIMIT :n FOR UPDATE SKIP LOCKED"
+                ),
+                {"n": limit},
+            )
+        ).all()
+        result = EvaluationRecovery()
+        reason = EvaluationErrorReason.LEASE_EXPIRED
+        for row in rows:
+            decision = after_evaluation_error(
+                reason,
+                eval_attempts=row.eval_attempts,
+                max_eval_attempts=row.max_eval_attempts,
+                by_reconciler=True,
+            )
+            values: dict[str, object] = {
+                "status": decision.status.value,
+                "lease_epoch": AttemptEvaluation.lease_epoch + 1,
+                "lease_expires_at": None,
+                "error_reason": reason.value,
+            }
+            if decision.status == EvaluationStatus.PENDING:  # E9a
+                delay_s = backoff_delay(row.eval_attempts)
+                values["next_attempt_at"] = func.now() + timedelta(seconds=delay_s)
+            else:  # E9b
+                assert decision.error_kind is not None
+                values.update(
+                    error_kind=decision.error_kind.value,
+                    failure_category=FailureCategory.EVALUATION_ERROR.value,
+                    failure_tags=[],
+                    error_message=(
+                        f"grading attempt {row.eval_attempts} lost its lease"
+                        " and no grading attempt is left"
+                    ),
+                    finished_at=func.now(),
+                )
+            applied = await self._s.execute(
+                update(AttemptEvaluation)
+                .where(
+                    AttemptEvaluation.id == row.id,
+                    AttemptEvaluation.status == EvaluationStatus.RUNNING.value,
+                    AttemptEvaluation.lease_epoch == row.lease_epoch,
+                )
+                .values(**values)
+                .returning(AttemptEvaluation.id)
+                .execution_options(synchronize_session=False)
+            )
+            if applied.scalar_one_or_none() is None:
+                continue  # cannot happen while we hold the row lock; never half-apply
+            result.recovered.append(RecoveredRun(row.id, decision.code))
+            result.attempt_ids.append(row.attempt_id)
+            log.info(
+                "evaluation_recovered",
+                evaluation_id=str(row.id),
+                attempt_id=str(row.attempt_id),
+                transition=decision.code,
+            )
+        return result
+
+    # -- 2 (A1): FINISHED agent attempts whose evaluation row was never written --------------
+
+    async def attempts_missing_evaluation(
+        self, older_than_s: float, limit: int = BATCH_SIZE
+    ) -> list[uuid.UUID]:
+        """A1 recovery. The worker that finished the attempt died (or its tx A
+        failed) between the finish commit and the evaluation insert. The grace
+        period keeps this from racing the fast path, which records within
+        milliseconds of the finish; and even if they race, the unique
+        attempt_id plus ON CONFLICT DO NOTHING leave exactly one row. Read-only:
+        the caller records after commit."""
+        rows = (
+            await self._s.execute(
+                text(
+                    "SELECT a.id FROM run_attempts a"
+                    " JOIN runs r ON r.id = a.run_id JOIN tasks t ON t.id = r.task_id"
+                    " WHERE a.status = 'FINISHED' AND t.task_type = 'agent'"
+                    "   AND a.finished_at < now() - make_interval(secs => :age)"
+                    "   AND NOT EXISTS (SELECT 1 FROM attempt_evaluations e"
+                    "                   WHERE e.attempt_id = a.id)"
+                    " ORDER BY a.finished_at LIMIT :n"
+                ),
+                {"age": older_than_s, "n": limit},
+            )
+        ).all()
+        return [row.id for row in rows]
+
+    # -- 6: PENDING evaluations that are due and were not (recently) published ---------------
+
+    async def evaluation_dispatch_candidates(
+        self, older_than_s: float, limit: int = REDISPATCH_BATCH_SIZE
+    ) -> list[uuid.UUID]:
+        """Due PENDING rows (`next_attempt_at` NULL or reached) that are either
+        lost in transit - `COALESCE(dispatched_at, created_at)` older than the
+        threshold, so a brand-new row the fast path is grading inline is left
+        alone - or a retry/recovery whose backoff elapsed since it was last
+        published (`dispatched_at` NULL or older than `next_attempt_at`). Read-only:
+        the caller publishes after commit and then stamps `dispatched_at`."""
+        rows = (
+            await self._s.execute(
+                text(
+                    "SELECT id FROM attempt_evaluations WHERE status = 'PENDING'"
+                    " AND (next_attempt_at IS NULL OR next_attempt_at <= now())"
+                    " AND (COALESCE(dispatched_at, created_at)"
+                    "        < now() - make_interval(secs => :age)"
+                    "      OR (next_attempt_at IS NOT NULL"
+                    "          AND (dispatched_at IS NULL OR dispatched_at < next_attempt_at)))"
+                    " ORDER BY COALESCE(next_attempt_at, created_at) LIMIT :n"
+                ),
+                {"age": older_than_s, "n": limit},
+            )
+        ).all()
+        return [row.id for row in rows]
 
     # -- 5: the artifact sweeper's read of what is referenced (ADR-008) -----------------------
 

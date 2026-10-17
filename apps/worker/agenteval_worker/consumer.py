@@ -1,12 +1,22 @@
 """Consume loop: read one message only when a concurrency slot is free, so a
-worker never holds messages it can't start yet."""
+worker never holds messages it can't start yet.
+
+Step 7: a worker consumes two streams, runs and evaluations, with ONE loop and
+ONE semaphore. A single blocking XREADGROUP names both streams, so a message on
+either wakes the loop at once (two loops sharing the semaphore would each park a
+slot inside its own blocking read, delaying the other stream by up to block_ms
+when concurrency is 1) and the concurrency limit covers runs and gradings
+alike. The price: Redis applies COUNT per stream, so one read can return a
+message from each stream; the extra one waits for its own slot (a bounded
+over-read of one, which stays pending - and is reclaimed - if shutdown comes
+first)."""
 
 import asyncio
 
 from redis.exceptions import RedisError
 
 from agenteval_core.logging import get_logger
-from agenteval_core.queue.streams import DispatchMessage, RunQueue
+from agenteval_core.queue.streams import DispatchMessage, RunQueue, read_any
 from agenteval_worker.executor import Executor
 
 log = get_logger(__name__)
@@ -22,8 +32,11 @@ class Consumer:
         block_ms: int,
         drain_timeout_s: float,
         cancel_grace_s: float = 20.0,
+        evaluation_queue: RunQueue | None = None,
     ) -> None:
         self._queue = queue
+        self._evaluation_queue = evaluation_queue
+        self._queues = [queue] if evaluation_queue is None else [queue, evaluation_queue]
         self._executor = executor
         self._sem = asyncio.Semaphore(concurrency)
         self._block_ms = block_ms
@@ -32,14 +45,15 @@ class Consumer:
         self._inflight: set[asyncio.Task[None]] = set()
 
     async def run(self, stop: asyncio.Event) -> None:
-        await self._queue.ensure_group()
+        for queue in self._queues:
+            await queue.ensure_group()
         consumer = self._executor.worker_id
         backoff = 0.5
         while not stop.is_set():
             if not await self._acquire_slot(stop):
                 break
             try:
-                messages = await self._queue.read(consumer, count=1, block_ms=self._block_ms)
+                messages = await self._read(consumer)
                 backoff = 0.5
             except RedisError as exc:
                 self._sem.release()
@@ -50,10 +64,24 @@ class Consumer:
             if not messages:
                 self._sem.release()
                 continue
-            task = asyncio.create_task(self._handle(messages[0]))
-            self._inflight.add(task)
-            task.add_done_callback(self._inflight.discard)
+            self._spawn(*messages[0])
+            for extra in messages[1:]:
+                # Already read, so it needs a slot of its own before it starts.
+                if not await self._acquire_slot(stop):
+                    break  # shutdown: left pending, reclaimed and redispatched later
+                self._spawn(*extra)
         await self._drain()
+
+    async def _read(self, consumer: str) -> list[tuple[RunQueue, DispatchMessage]]:
+        if self._evaluation_queue is None:  # runs only: a plain read of the one stream
+            got = await self._queue.read(consumer, count=1, block_ms=self._block_ms)
+            return [(self._queue, m) for m in got]
+        return await read_any(self._queues, consumer, count=1, block_ms=self._block_ms)
+
+    def _spawn(self, queue: RunQueue, msg: DispatchMessage) -> None:
+        task = asyncio.create_task(self._handle(queue, msg))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
 
     async def _acquire_slot(self, stop: asyncio.Event) -> bool:
         """Wait for a free concurrency slot, unless stop is set first.
@@ -76,9 +104,12 @@ class Consumer:
             return False
         return True
 
-    async def _handle(self, msg: DispatchMessage) -> None:
+    async def _handle(self, queue: RunQueue, msg: DispatchMessage) -> None:
         try:
-            await self._executor.handle(msg)
+            if queue is self._evaluation_queue:
+                await self._executor.handle_evaluation(msg)
+            else:
+                await self._executor.handle(msg)
         except Exception:
             # Leave the message unacked; Phase 5 recovery picks it up.
             log.exception("handle_failed", message_id=msg.message_id)

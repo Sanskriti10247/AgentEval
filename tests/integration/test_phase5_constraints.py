@@ -206,13 +206,30 @@ EVAL_REJECTED = [
     ),
     (
         "ck_attempt_evaluations_reason_states",
-        "UPDATE attempt_evaluations SET status = 'RUNNING', error_reason = 'sandbox_failed' "
-        "WHERE id = :v",
+        "UPDATE attempt_evaluations SET status = 'RUNNING', error_reason = 'sandbox_failed', "
+        "lease_expires_at = now() WHERE id = :v",
+    ),
+    (  # Step 7 (0008): RUNNING without a lease ...
+        "ck_attempt_evaluations_lease",
+        "UPDATE attempt_evaluations SET status = 'RUNNING' WHERE id = :v",
+    ),
+    (  # ... and a lease on a row that is not RUNNING
+        "ck_attempt_evaluations_lease",
+        "UPDATE attempt_evaluations SET lease_expires_at = now() WHERE id = :v",
+    ),
+    (  # an ERROR row always says why
+        "ck_attempt_evaluations_error_reason",
+        "UPDATE attempt_evaluations SET status = 'ERROR', failure_category = 'evaluation_error', "
+        "error_message = 'x', finished_at = now() WHERE id = :v",
     ),
 ]
 
 
-@pytest.mark.parametrize(("constraint", "sql"), EVAL_REJECTED, ids=[c for c, _ in EVAL_REJECTED])
+@pytest.mark.parametrize(
+    ("constraint", "sql"),
+    EVAL_REJECTED,
+    ids=[f"{c}-{i}" for i, (c, _) in enumerate(EVAL_REJECTED)],
+)
 async def test_evaluation_checks_reject(engine: AsyncEngine, constraint: str, sql: str) -> None:
     _, attempt_id = await running_run(engine)
     async with engine.begin() as conn:

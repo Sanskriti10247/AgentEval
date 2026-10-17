@@ -1,11 +1,13 @@
 """Redis Streams dispatch.
 
-Messages carry only a run_id. Redis is a delivery mechanism, never the source
-of truth: the worker's conditional claim in Postgres decides who runs a job,
-so a duplicate or stale message is harmless.
+Messages carry only an id: a run_id on the runs stream, an evaluation_id on
+the evaluations stream (Step 7). Redis is a delivery mechanism, never the
+source of truth: the worker's conditional claim in Postgres decides who runs a
+job, so a duplicate or stale message is harmless.
 """
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -25,23 +27,35 @@ def redis_for_blocking_reads(url: str, block_ms: int) -> Redis:
     return Redis.from_url(url, socket_timeout=block_ms / 1000 + BLOCKING_READ_HEADROOM_S)
 
 
+RUN_FIELD = "run_id"
+EVALUATION_FIELD = "evaluation_id"
+
+
 @dataclass(frozen=True)
 class DispatchMessage:
     message_id: str
-    run_id: uuid.UUID | None  # None if the payload was malformed
+    # Exactly the id the message's stream carries (`field`); both None if the
+    # payload was malformed. A runs-stream message sets run_id, an
+    # evaluations-stream message sets evaluation_id.
+    run_id: uuid.UUID | None = None
+    evaluation_id: uuid.UUID | None = None
 
 
 def _text(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
 
 
-def _parse_entry(msg_id: Any, fields: dict[Any, Any] | None) -> DispatchMessage:
-    raw = (fields or {}).get(b"run_id", (fields or {}).get("run_id"))
+def _parse_entry(
+    msg_id: Any, fields: dict[Any, Any] | None, field: str = RUN_FIELD
+) -> DispatchMessage:
+    raw = (fields or {}).get(field.encode(), (fields or {}).get(field))
     try:
-        run_id = uuid.UUID(_text(raw))
+        item_id: uuid.UUID | None = uuid.UUID(_text(raw))
     except (ValueError, AttributeError):
-        run_id = None
-    return DispatchMessage(_text(msg_id), run_id)
+        item_id = None
+    if field == EVALUATION_FIELD:
+        return DispatchMessage(_text(msg_id), evaluation_id=item_id)
+    return DispatchMessage(_text(msg_id), run_id=item_id)
 
 
 @dataclass(frozen=True)
@@ -64,11 +78,19 @@ class ConsumerInfo:
 
 class RunQueue:
     def __init__(
-        self, redis: Redis, stream: str, group: str, *, maxlen: int | None = 100_000
+        self,
+        redis: Redis,
+        stream: str,
+        group: str,
+        *,
+        maxlen: int | None = 100_000,
+        field: str = RUN_FIELD,
     ) -> None:
         self._r = redis
         self.stream = stream
         self.group = group
+        # The message's one field: "run_id" (runs stream) or "evaluation_id".
+        self.field = field
         # Approximate trim on every XADD (reconciler step 7); None disables it.
         self.maxlen = maxlen
 
@@ -80,15 +102,15 @@ class RunQueue:
             if "BUSYGROUP" not in str(exc):
                 raise
 
-    async def publish(self, run_id: uuid.UUID) -> str:
+    async def publish(self, item_id: uuid.UUID) -> str:
         # MAXLEN ~ N: the stream never grows without bound, and the trim is cheap
         # because Redis only drops whole macro nodes. Trimmed entries are always
         # safe to lose: Postgres is the truth and redispatch republishes.
         if self.maxlen is None:
-            msg_id = await self._r.xadd(self.stream, {"run_id": str(run_id)})
+            msg_id = await self._r.xadd(self.stream, {self.field: str(item_id)})
         else:
             msg_id = await self._r.xadd(
-                self.stream, {"run_id": str(run_id)}, maxlen=self.maxlen, approximate=True
+                self.stream, {self.field: str(item_id)}, maxlen=self.maxlen, approximate=True
             )
         return _text(msg_id)
 
@@ -106,7 +128,7 @@ class RunQueue:
         messages: list[DispatchMessage] = []
         for _stream, entries in resp or []:
             for msg_id, fields in entries:
-                messages.append(_parse_entry(msg_id, fields))
+                messages.append(_parse_entry(msg_id, fields, self.field))
         return messages
 
     async def autoclaim(
@@ -125,7 +147,7 @@ class RunQueue:
             ),
         )
         cursor = _text(resp[0])
-        messages = [_parse_entry(mid, fields) for mid, fields in resp[1] or []]
+        messages = [_parse_entry(mid, fields, self.field) for mid, fields in resp[1] or []]
         deleted = [_text(d) for d in (resp[2] if len(resp) > 2 else None) or []]
         return AutoclaimResult(cursor, messages, deleted)
 
@@ -148,3 +170,30 @@ class RunQueue:
 
     async def ack(self, message_id: str) -> None:
         await self._r.xack(self.stream, self.group, message_id)
+
+
+async def read_any(
+    queues: Sequence[RunQueue], consumer: str, *, count: int = 1, block_ms: int = 5000
+) -> list[tuple[RunQueue, DispatchMessage]]:
+    """One XREADGROUP over several streams of the same consumer group (Step 7:
+    the worker reads the runs and the evaluations stream in a single blocking
+    call, so one concurrency slot and one loop serve both). Redis applies COUNT
+    per stream, so more than `count` messages can come back in total; the
+    caller must be ready for that. Each message is paired with the queue it came
+    from, which is what its ack goes to."""
+    by_stream = {q.stream: q for q in queues}
+    if len({q.group for q in queues}) != 1:
+        raise ValueError("every queue read together must use the same consumer group")
+    first = queues[0]
+    resp = cast(
+        list[tuple[Any, list[tuple[Any, dict[Any, Any]]]]] | None,
+        await first._r.xreadgroup(
+            first.group, consumer, {q.stream: ">" for q in queues}, count=count, block=block_ms
+        ),
+    )
+    out: list[tuple[RunQueue, DispatchMessage]] = []
+    for stream, entries in resp or []:
+        queue = by_stream[_text(stream)]
+        for msg_id, fields in entries:
+            out.append((queue, _parse_entry(msg_id, fields, queue.field)))
+    return out
