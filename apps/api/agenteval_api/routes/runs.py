@@ -38,6 +38,26 @@ async def get_run(run_id: uuid.UUID, runs: RunServiceDep) -> RunRead:
     return RunRead.model_validate(await runs.get(run_id))
 
 
+@router.post(
+    "/{run_id}/cancel",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=RunRead,
+    responses={
+        200: {"description": "Already cancelled or already flagged: nothing changed"},
+        409: {"description": "The run already COMPLETED or FAILED; nothing was written"},
+    },
+)
+async def cancel_run(run_id: uuid.UUID, runs: RunServiceDep, response: Response) -> RunRead:
+    """Request cancellation. A QUEUED or RETRYING run is CANCELLED at once
+    (202); a CLAIMED or RUNNING one is flagged and its worker stops it
+    (202, the run is still CLAIMED/RUNNING with `cancel_requested_at` set).
+    Repeats return 200; a finished run returns 409."""
+    result = await runs.cancel(run_id)
+    if not result.accepted:
+        response.status_code = status.HTTP_200_OK
+    return RunRead.model_validate(result.run)
+
+
 @router.get("/{run_id}/attempts", response_model=list[RunAttemptRead])
 async def list_attempts(run_id: uuid.UUID, runs: RunServiceDep) -> list[RunAttemptRead]:
     return [RunAttemptRead.model_validate(a) for a in await runs.list_attempts(run_id)]

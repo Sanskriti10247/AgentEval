@@ -272,6 +272,7 @@ The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style 
 | GET | `/api/v1/tasks/{id}` | |
 | POST | `/api/v1/runs` | body `{task_id, agent_version_id?}`, optional `Idempotency-Key` header |
 | GET | `/api/v1/runs/{id}` | |
+| POST | `/api/v1/runs/{id}/cancel` | 202 accepted (queued/retrying: cancelled now; claimed/running: flagged, the worker stops it) / 200 repeat / 409 already finished / 404 |
 | GET | `/api/v1/runs/{id}/attempts` | exit code and output (command tasks); steps, tokens, cost and final answer (agent tasks) |
 | GET | `/api/v1/runs/{id}/attempts/{n}/events` | the trajectory, paged by `after_seq` (default -1) and `limit` (1–1000, default 100); `next_after_seq` is null on the last page |
 | GET | `/api/v1/runs/{id}/attempts/{n}/evaluation` | the attempt's **public** evaluation; 404 if none is recorded |
@@ -280,6 +281,7 @@ The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style 
 | POST | `/api/v1/datasets/{id}/freeze` | DRAFT → FROZEN (idempotent); 409 if it has no tasks |
 | POST | `/api/v1/evaluations` | a benchmark evaluation: agent version × frozen dataset × repetitions; optional `Idempotency-Key`; 202 new / 200 replay / 409 / 503 |
 | GET | `/api/v1/evaluations/{id}` | the batch, scoring config and hash, derived progress |
+| POST | `/api/v1/evaluations/{id}/cancel` | cancel the batch and its unfinished runs; finished runs and scores are untouched; 202 / 200 repeat / 404 |
 | GET | `/api/v1/evaluations/{id}/results` | public per-run results, keyset-paged |
 | GET | `/api/v1/evaluations/{id}/summary` | success rate + CI, failure categories, score means, latency, cost, per task |
 | GET | `/api/v1/evaluations/compare?ids=a,b` | 2–5 batches on the same dataset and scoring config (else 422) |

@@ -61,6 +61,24 @@ async def get_evaluation(
     return await evaluations.get(evaluation_id)
 
 
+@router.post(
+    "/{evaluation_id}/cancel",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=EvaluationRead,
+    responses={200: {"description": "Already cancelled: nothing changed"}},
+)
+async def cancel_evaluation(
+    evaluation_id: uuid.UUID, evaluations: EvaluationServiceDep, response: Response
+) -> EvaluationRead:
+    """Cancel the batch and every run of it that has not finished. Finished
+    runs, their evaluations and scores are untouched. 202 when this call
+    changed something, 200 for a repeat."""
+    result = await evaluations.cancel(evaluation_id)
+    if not result.accepted:
+        response.status_code = status.HTTP_200_OK
+    return result.evaluation
+
+
 @router.get("/{evaluation_id}/results", response_model=ResultPage)
 async def list_results(
     evaluation_id: uuid.UUID,

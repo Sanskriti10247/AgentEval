@@ -40,8 +40,8 @@ RESPONSE_MODELS: dict[str, list[str]] = {
         "task_ids", "version",
     ],
     "EvaluationRead": [
-        "agent_version_id", "created_at", "dataset_id", "id", "name", "progress",
-        "repetitions", "scoring_config", "scoring_config_hash",
+        "agent_version_id", "cancel_requested_at", "created_at", "dataset_id", "id", "name",
+        "progress", "repetitions", "scoring_config", "scoring_config_hash",
     ],
     "Latency": ["p50", "p95"],
     "MeanScore": ["efficiency", "overall", "reliability", "task_success", "test_score"],
@@ -69,7 +69,8 @@ RESPONSE_MODELS: dict[str, list[str]] = {
         "steps", "tokens_in", "tokens_out", "worker_id",
     ],
     "RunRead": [
-        "agent_version_id", "attempt_count", "claimed_at", "created_at", "error_message",
+        "agent_version_id", "attempt_count", "cancel_reason", "cancel_requested_at", "claimed_at",
+        "created_at", "error_message",
         "evaluation_id", "finished_at", "id", "idempotency_key", "outcome", "repetition",
         "started_at", "status", "task_id", "worker_id",
     ],
@@ -198,6 +199,12 @@ async def test_no_route_returns_hidden_evaluation_data(
          f"/api/v1/evaluations/{ev}/results", {"params": {"limit": 500}}),
         ("GET", "/api/v1/evaluations/{evaluation_id}/summary",
          f"/api/v1/evaluations/{ev}/summary", {}),
+        # Cancels last: they change run states the GETs above read (C3 is still QUEUED, B2 is
+        # COMPLETED -> 409).
+        ("POST", "/api/v1/runs/{run_id}/cancel", f"/api/v1/runs/{s.runs['C3']}/cancel", {}),
+        ("POST", "/api/v1/runs/{run_id}/cancel", f"/api/v1/runs/{b2}/cancel", {}),
+        ("POST", "/api/v1/evaluations/{evaluation_id}/cancel",
+         f"/api/v1/evaluations/{ev}/cancel", {}),
     ]  # fmt: skip
 
     statuses = {}

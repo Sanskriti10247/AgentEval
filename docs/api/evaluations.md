@@ -88,6 +88,10 @@ The batch, plus **derived** progress (never stored):
 - **`scoring_config` and its hash are exposed** as benchmark policy (R3).
 - **`complete`** means every run is terminal and none awaits evaluation. A crash between an attempt's commit and its evaluation record keeps `complete` false (a recovery gap, Phase 5).
 
+### `POST /evaluations/{id}/cancel`
+
+Cancels the batch: sets `cancel_requested_at` on it, then cancels each run that has not finished (reason `batch`) in chunks of 100. Runs that already finished keep their attempts, evaluations and scores. **202** with the batch when this call changed something; **200** for a repeat (a repeat also finishes any runs a crashed call left); **404** unknown. Runs that are CLAIMED or RUNNING are only flagged, so the batch becomes `complete` once their workers stop them (see the run endpoint). CANCELLED counts as terminal for `complete`; `runs_by_status` keeps its Phase 4 keys until Step 9, so cancelled runs show in `runs_total` only.
+
 ### `GET /evaluations/{id}/results?after=&limit=`
 
 One row per run, ordered by (task, repetition). It's keyset-paged: `limit` 1–500 (default 100), and `next_after` is an opaque cursor, null on the last page. A malformed cursor is **422**.
@@ -150,8 +154,23 @@ A task with nothing graded has a null rate and a null delta.
 | Endpoint | Additions |
 |---|---|
 | `GET /runs/{id}` | `evaluation_id`, `repetition` (null for ad-hoc runs) |
+| `GET /runs/{id}` | also `cancel_requested_at` and `cancel_reason` (`user` or `batch`), null until a cancel is requested |
+| `POST /runs/{id}/cancel` | see below |
 | `GET /runs/{id}/attempts` | `sandbox_image_id`: the image ID the agent's sandbox actually ran (agent attempts) |
 | `GET /runs/{id}/attempts/{n}/evaluation` | the attempt's `PublicEvaluation` + `{attempt_no, created_at, finished_at}`, scored under the run's batch config (or scoring v1 for ad-hoc runs). **404** when no evaluation is recorded (command tasks, not yet evaluated, or the run failed before an attempt) |
+
+`GET /evaluations/{id}` also returns `cancel_requested_at`.
+
+### `POST /runs/{id}/cancel`
+
+| Status | When |
+|---|---|
+| **202** | accepted. A QUEUED or RETRYING run is CANCELLED at once; a CLAIMED or RUNNING run is only flagged (it stays CLAIMED/RUNNING with `cancel_requested_at` set) and its worker stops it |
+| **200** | a repeat: the run is already CANCELLED or already flagged. Nothing is written |
+| **409** | the run already COMPLETED or FAILED; the result stands and nothing is written. Cancel and completion race deterministically: whichever commits first wins |
+| **404** | unknown run |
+
+A flagged run ends CANCELLED with its attempt CANCELLED (`cancelled_by_user`), no artifact and no evaluation. The worker learns of the flag on its next lease heartbeat (10 s by default), so the stop latency is at most one heartbeat plus the runtime's next check (an agent run stops between steps; a command task's container is killed). If the worker is gone, the reconciler cancels the run when its lease expires. The endpoint only writes `runs`, so it never waits for artifact work.
 
 Ad-hoc agent runs (`POST /runs`) of a task that has a spec are evaluated the same way, without belonging to a batch.
 
