@@ -18,6 +18,7 @@ Steps (the numbering follows PROGRESS.md section 17):
   3      retries whose backoff elapsed              (R12)
   4      redispatch lost QUEUED runs; reclaim idle pending stream entries
   7      mark silent workers lost; delete dead consumers
+  5      sweep orphaned artifact files (its own timer; ADR-008)
   8      sweep orphaned containers
 """
 
@@ -29,9 +30,11 @@ from collections.abc import Callable, Sequence
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agenteval_core.artifacts import ArtifactStore
 from agenteval_core.logging import get_logger
 from agenteval_core.queue.streams import RunQueue
 from agenteval_core.repositories.recovery import (
+    STEP_ARTIFACTS,
     STEP_CLAIMED,
     STEP_REDISPATCH,
     STEP_RETRIES_DUE,
@@ -65,6 +68,9 @@ class Reconciler:
         kill_attempt: Callable[[str], int],
         sweep_orphans: Callable[[], int],
         clock: Callable[[], float] = time.monotonic,
+        artifact_store: ArtifactStore | None = None,
+        artifact_sweep_grace_s: float = 120.0,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
@@ -78,6 +84,10 @@ class Reconciler:
         self._clock = clock
         # main() sweeps once at startup, so the first scheduled sweep is one interval away.
         self._last_sweep = clock()
+        self._last_artifact_sweep = clock()
+        self._artifacts = artifact_store
+        self._artifact_grace_s = artifact_sweep_grace_s
+        self._wall_clock = wall_clock  # file mtimes are wall-clock seconds
         self.consumer = f"{worker_id}{RECONCILER_CONSUMER_SUFFIX}"
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -99,6 +109,7 @@ class Reconciler:
             ("reclaim_pending", self.step_reclaim_pending),
             ("workers", self.step_workers),
             ("orphan_sweep", self.step_orphan_sweep),
+            ("artifact_sweep", self.step_artifact_sweep),
         ):
             try:
                 await step()
@@ -226,6 +237,51 @@ class Reconciler:
         removed = await asyncio.to_thread(self._sweep)
         if removed:
             log.info("orphans_swept", removed=removed)
+        return removed
+
+    # -- step 5 -----------------------------------------------------------------------------
+
+    async def step_artifact_sweep(self, *, force: bool = False) -> int | None:
+        """ADR-008 E: delete artifact files no row references. Runs at most once
+        per `orphan_sweep_interval_s` (its own timer); returns the files
+        removed, or None when not due, no store is configured, or another
+        reconciler holds the step.
+
+        Order matters: list the volume FIRST, then read which of the old files
+        are referenced, and only after that commit delete. A file is a
+        candidate only if its mtime is older than the grace period, which
+        exceeds the writers' deadline plus statement timeout, so a save that
+        is still about to insert its row never loses its file. A referenced
+        file is never deleted, however old; `.tmp` files are never referenced.
+        """
+        if self._artifacts is None:
+            return None
+        now = self._clock()
+        if not force and now - self._last_artifact_sweep < self._sweep_interval_s:
+            return None
+        self._last_artifact_sweep = now
+        listed = await self._artifacts.list_files()
+        cutoff = self._wall_clock() - self._artifact_grace_s
+        candidates = [key for key, mtime in listed if mtime < cutoff]
+        if not candidates:
+            return 0
+        async with self._sm() as s, s.begin():
+            repo = RecoveryRepository(s)
+            if not await repo.begin_step(STEP_ARTIFACTS):
+                return None
+            referenced = await repo.referenced_storage_keys(candidates)
+        removed = 0
+        for key in candidates:
+            if key in referenced:
+                continue
+            try:
+                await self._artifacts.delete(key)
+            except Exception:
+                log.exception("artifact_sweep_delete_failed", key=key)
+                continue
+            removed += 1
+        if removed:
+            log.info("artifacts_swept", removed=removed)
         return removed
 
     # -- helpers ----------------------------------------------------------------------------

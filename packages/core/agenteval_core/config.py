@@ -52,6 +52,30 @@ class Settings(BaseSettings):
     orphan_sweep_interval_s: float = 300.0
     stream_maxlen: int = 100_000
 
+    # Artifacts (Step 6; ADR-008 A and E). Snapshot bytes live as files under
+    # artifact_dir (a named volume shared by the workers); Postgres keeps the row.
+    # insert_timeout bounds the metadata statement, save_deadline the gap from the
+    # file's rename to that statement, and the sweeper deletes an unreferenced file
+    # only once it is older than sweep_grace (validate_artifact_timing()).
+    artifact_dir: str = "/var/lib/agenteval/artifacts"
+    artifact_insert_timeout_s: float = 10.0
+    artifact_save_deadline_s: float = 15.0
+    artifact_sweep_grace_s: float = 120.0
+
+    def validate_artifact_timing(self) -> None:
+        """Startup check (ADR-008 E): the sweeper's grace must exceed the
+        writer's deadline plus the statement timeout, or it could delete a file
+        whose row is still about to be inserted."""
+        for name in ("insert_timeout_s", "save_deadline_s", "sweep_grace_s"):
+            if getattr(self, f"artifact_{name}") <= 0:
+                raise ValueError(f"artifact_{name} must be positive")
+        floor = self.artifact_save_deadline_s + self.artifact_insert_timeout_s
+        if self.artifact_sweep_grace_s <= floor:
+            raise ValueError(
+                f"artifact_sweep_grace_s ({self.artifact_sweep_grace_s:g}) must exceed "
+                f"artifact_save_deadline_s + artifact_insert_timeout_s ({floor:g})"
+            )
+
     def lease_timing(self) -> LeaseTiming:
         return LeaseTiming(
             ttl_s=self.lease_ttl_s,

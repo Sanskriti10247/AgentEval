@@ -8,6 +8,7 @@ trajectory_events - the attempt outcome is authoritative and independent.
 """
 
 import asyncio
+import sys
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -18,6 +19,7 @@ import structlog
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agenteval_core.artifacts import LocalArtifactStore
 from agenteval_core.evaluation.classify import Verdict
 from agenteval_core.evaluation.public import public_view
 from agenteval_core.evaluation.results import CheckResult
@@ -46,7 +48,7 @@ from agenteval_core.queue.streams import RunQueue
 from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.repositories.runs import RunRepository
 from agenteval_worker.agent_runner import AgentRunner
-from agenteval_worker.evaluation_runner import EvaluationRunner, WorkspaceCapture
+from agenteval_worker.evaluation_runner import EvaluationRunner
 from agenteval_worker.executor import Executor
 from agenteval_worker.sandbox import evaluation as eval_sandbox
 from agenteval_worker.sandbox.docker_sandbox import DockerSandbox
@@ -177,9 +179,9 @@ class Invariant:
         self.before: dict[str, Any] | None = None
         real = runner.evaluate
 
-        async def evaluate(task: Task, attempt: RunAttempt, ws: WorkspaceCapture | None) -> Any:
+        async def evaluate(task: Task, attempt: RunAttempt) -> Any:
             self.before = await durable_state(sm, attempt.run_id)
-            return await real(task, attempt, ws)
+            return await real(task, attempt)
 
         runner.evaluate = evaluate  # type: ignore[method-assign]
 
@@ -208,6 +210,7 @@ async def durable_state(sm: SM, run_id: uuid.UUID) -> dict[str, Any]:
 def build(
     sm: SM,
     queue: RunQueue,
+    store: LocalArtifactStore,
     *,
     provider: FakeProvider | None = None,
     agent_kw: dict[str, Any] | None = None,
@@ -221,9 +224,13 @@ def build(
         retry_policy=FAST_RETRY,
         **(agent_kw or {}),
     )
-    runner = EvaluationRunner(sessionmaker=sm, docker_client=client, **(eval_kw or {}))
+    runner = EvaluationRunner(
+        sessionmaker=sm, docker_client=client, artifact_store=store, **(eval_kw or {})
+    )
     invariant = Invariant(sm, runner)
-    ex = Executor(sm, queue, DockerSandbox(client).run, "w-eval", agent_runner, runner)
+    ex = Executor(
+        sm, queue, DockerSandbox(client).run, "w-eval", agent_runner, runner, artifact_store=store
+    )
     return ex, invariant
 
 
@@ -261,10 +268,10 @@ async def assert_untouched(sm: SM, run_id: uuid.UUID, inv: Invariant) -> None:
 
 
 async def test_fixed_bug_is_graded_passed_scored_and_cleaned_up(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     run, attempt, ev, [score], artifact = await results(sessionmaker, run_id)
@@ -280,15 +287,22 @@ async def test_fixed_bug_is_graded_passed_scored_and_cleaned_up(
     # 1 - mean(steps 4/10, cost $0.0008/$1.00) = 0.7996 (FakeProvider's nominal price)
     assert score.scoring_config_hash == DEFAULT_SCORING_CONFIG.config_hash()
     assert score.overall == Decimal("0.97996")
-    assert artifact is not None and artifact.sha256 == sha256_hex(artifact.content)
+    # Step 6: the snapshot is a file on the artifact volume, saved before finish.
+    assert artifact is not None and artifact.content is None and artifact.storage_key is not None
+    assert attempt.workspace_capture == "stored"
+    data = await artifact_store.read(artifact.storage_key, artifact.size_bytes, artifact.sha256)
+    assert artifact.sha256 == sha256_hex(data)
+    assert artifact.artifact_metadata == {"normalized_paths": []}
     assert attempt.sandbox_image_id is not None and attempt.sandbox_image_id.startswith("sha256:")
     assert leftover_containers(run_id) == []
     await assert_untouched(sessionmaker, run_id, inv)
 
 
-async def test_unfixed_bug_is_a_candidate_failure(sessionmaker: SM, queue: RunQueue) -> None:
+async def test_unfixed_bug_is_a_candidate_failure(
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
+) -> None:
     run_id = await make_run(sessionmaker, queue, GIVE_UP)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     run, _, ev, [score], _ = await results(sessionmaker, run_id)
@@ -301,7 +315,7 @@ async def test_unfixed_bug_is_a_candidate_failure(sessionmaker: SM, queue: RunQu
 
 
 async def test_rewriting_a_protected_test_is_tampering_with_score_zero(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     cheat = [
         turn(
@@ -313,7 +327,7 @@ async def test_rewriting_a_protected_test_is_tampering_with_score_zero(
         turn("Done."),
     ]
     run_id = await make_run(sessionmaker, queue, cheat)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     _, _, ev, [score], _ = await results(sessionmaker, run_id)
@@ -328,11 +342,11 @@ async def test_rewriting_a_protected_test_is_tampering_with_score_zero(
 
 
 async def test_a_limit_outcome_is_graded_with_its_limit_category(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     looping = [turn(tool_calls=[call("list_dir")]) for _ in range(5)]
     run_id = await make_run(sessionmaker, queue, looping, limits={"max_steps": 2})
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     run, _, ev, scores, artifact = await results(sessionmaker, run_id)
@@ -348,10 +362,10 @@ async def test_a_limit_outcome_is_graded_with_its_limit_category(
 
 
 async def test_platform_failure_is_skipped_without_a_snapshot(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG, image="agenteval-missing:none")
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     run, _, ev, scores, artifact = await results(sessionmaker, run_id)
@@ -367,10 +381,10 @@ async def test_platform_failure_is_skipped_without_a_snapshot(
 
 
 async def test_task_without_a_spec_is_skipped_without_a_snapshot(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG, evaluation=None)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     _, _, ev, scores, artifact = await results(sessionmaker, run_id)
@@ -381,7 +395,10 @@ async def test_task_without_a_spec_is_skipped_without_a_snapshot(
 
 
 async def test_final_answer_only_spec_opens_no_container(
-    sessionmaker: SM, queue: RunQueue, monkeypatch: pytest.MonkeyPatch
+    sessionmaker: SM,
+    queue: RunQueue,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_store: LocalArtifactStore,
 ) -> None:
     """A6: graded from the attempt row alone; no snapshot, no container."""
 
@@ -392,7 +409,7 @@ async def test_final_answer_only_spec_opens_no_container(
     spec = {"checks": [{"kind": "final_answer", "name": "a", "match": "contains",
                         "expected": "sign"}]}  # fmt: skip
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG, evaluation=spec)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     _, _, ev, [_], artifact = await results(sessionmaker, run_id)
@@ -406,14 +423,17 @@ async def test_final_answer_only_spec_opens_no_container(
 
 
 async def test_evaluation_container_failure_is_an_evaluator_error(
-    sessionmaker: SM, queue: RunQueue, monkeypatch: pytest.MonkeyPatch
+    sessionmaker: SM,
+    queue: RunQueue,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_store: LocalArtifactStore,
 ) -> None:
     def broken(*a: Any, **kw: Any) -> Any:
         raise SandboxError("docker error: boom", reason=FailureReason.SANDBOX_CREATE_FAILED)
 
     monkeypatch.setattr(eval_sandbox.EvaluationSession, "open", broken)
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     run, _, ev, scores, artifact = await results(sessionmaker, run_id)
@@ -427,32 +447,34 @@ async def test_evaluation_container_failure_is_an_evaluator_error(
 
 
 async def test_snapshot_over_the_cap_is_an_evaluator_error(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     """A2: a capture failure leaves the attempt COMPLETED; never the agent's fault."""
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG)
-    ex, inv = build(sessionmaker, queue, agent_kw={"snapshot_max_bytes": 16})
+    ex, inv = build(sessionmaker, queue, artifact_store, agent_kw={"snapshot_max_bytes": 16})
     await handle_next(ex, queue)
 
-    run, _, ev, scores, artifact = await results(sessionmaker, run_id)
+    run, attempt, ev, scores, artifact = await results(sessionmaker, run_id)
     assert (run.status, run.outcome) == ("COMPLETED", "AGENT_FINISHED")
     assert ev is not None
     assert (ev.status, ev.failure_category) == ("ERROR", "evaluation_error")
     assert ev.error_message is not None and "too_large" in ev.error_message
+    assert ev.error_reason == "capture_too_large"
+    assert attempt.workspace_capture == "too_large"
     assert scores == [] and artifact is None
     assert leftover_containers(run_id) == []
     await assert_untouched(sessionmaker, run_id, inv)
 
 
 async def test_evaluation_past_its_budget_is_an_evaluator_error_and_cleaned_up(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     spec = {"checks": [{"kind": "io", "name": "slow", "argv": ["python", "-c",
                         "import time; time.sleep(60)"], "expected_stdout": "", "timeout_s": 10}],
             "timeout_s": 10}  # fmt: skip
     run_id = await make_run(sessionmaker, queue, GIVE_UP, evaluation=spec)
     # No setup grace: the overall budget (10s) runs out before the check's own 10s.
-    ex, inv = build(sessionmaker, queue, eval_kw={"setup_grace_s": 0})
+    ex, inv = build(sessionmaker, queue, artifact_store, eval_kw={"setup_grace_s": 0})
     await handle_next(ex, queue)
 
     _, _, ev, scores, _ = await results(sessionmaker, run_id)
@@ -468,19 +490,22 @@ async def test_evaluation_past_its_budget_is_an_evaluator_error_and_cleaned_up(
 
 
 async def test_duplicate_and_concurrent_evaluations_grade_once(
-    sessionmaker: SM, queue: RunQueue, monkeypatch: pytest.MonkeyPatch
+    sessionmaker: SM,
+    queue: RunQueue,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_store: LocalArtifactStore,
 ) -> None:
-    captured: list[tuple[Task, RunAttempt, WorkspaceCapture | None]] = []
+    captured: list[tuple[Task, RunAttempt]] = []
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     real = inv.runner
 
-    async def record(task: Task, attempt: RunAttempt, ws: WorkspaceCapture | None) -> None:
-        captured.append((task, attempt, ws))
+    async def record(task: Task, attempt: RunAttempt) -> None:
+        captured.append((task, attempt))
 
     ex._evaluation_runner = type("Rec", (), {"evaluate": staticmethod(record)})()  # type: ignore[assignment]
     await handle_next(ex, queue)
-    [(task, attempt, ws)] = captured
+    [(task, attempt)] = captured
 
     opened = 0
     real_open = eval_sandbox.EvaluationSession.open.__func__  # type: ignore[attr-defined]
@@ -491,8 +516,8 @@ async def test_duplicate_and_concurrent_evaluations_grade_once(
         return real_open(cls, *a, **kw)
 
     monkeypatch.setattr(eval_sandbox.EvaluationSession, "open", classmethod(counting_open))
-    ids = await asyncio.gather(*(real.evaluate(task, attempt, ws) for _ in range(3)))
-    again = await real.evaluate(task, attempt, ws)
+    ids = await asyncio.gather(*(real.evaluate(task, attempt) for _ in range(3)))
+    again = await real.evaluate(task, attempt)
 
     assert sum(i is not None for i in ids) == 1 and again is None
     assert opened == 1
@@ -501,19 +526,30 @@ async def test_duplicate_and_concurrent_evaluations_grade_once(
     assert leftover_containers(run_id) == []
 
 
-async def test_a_fenced_attempt_is_never_evaluated(sessionmaker: SM, queue: RunQueue) -> None:
+async def test_a_fenced_attempt_is_never_evaluated(
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
+) -> None:
     slow = [turn(tool_calls=[call("list_dir")]), turn("never recorded", delay_s=1.0)]
     run_id = await make_run(sessionmaker, queue, slow)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     task = asyncio.create_task(handle_next(ex, queue))
     async with asyncio.timeout(20):
         while not (await durable_state(sessionmaker, run_id))["events"]:  # noqa: ASYNC110
             await asyncio.sleep(0.05)
-    async with sessionmaker() as s:  # ownership moves: finish_attempt will be fenced
+    async with sessionmaker() as s:  # ownership moves: the save and finish_attempt are fenced
+        # Step 6: the save fences on the ATTEMPT row's epoch (ADR-008 B, invariant
+        # I1: a RUNNING attempt and its run share an epoch), so the attempt's epoch
+        # moves with the run's, as recovery would leave them. Moving only the run's
+        # was an impossible state the old bytea flow never touched before finish.
         await s.execute(
             update(Run)
             .where(Run.id == run_id)
             .values(worker_id="w-other", lease_epoch=Run.lease_epoch + 1)
+        )
+        await s.execute(
+            update(RunAttempt)
+            .where(RunAttempt.run_id == run_id)
+            .values(lease_epoch=RunAttempt.lease_epoch + 1)
         )
         await s.commit()
     await asyncio.wait_for(task, 30)
@@ -521,11 +557,13 @@ async def test_a_fenced_attempt_is_never_evaluated(sessionmaker: SM, queue: RunQ
     run, _, ev, _, artifact = await results(sessionmaker, run_id)
     assert run.status == "RUNNING"
     assert ev is None and artifact is None and inv.before is None
+    # The save was fenced too (epoch moved): its file was removed, not orphaned.
+    assert await artifact_store.list_files() == []
     assert leftover_containers(run_id) == []
 
 
 async def test_a_batch_run_is_scored_with_the_batch_config(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     only_success = ScoringConfig(
         weights=ScoringWeights(
@@ -534,7 +572,7 @@ async def test_a_batch_run_is_scored_with_the_batch_config(
         )
     )  # fmt: skip
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG, scoring_config=only_success)
-    ex, _ = build(sessionmaker, queue)
+    ex, _ = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     _, _, ev, [score], _ = await results(sessionmaker, run_id)
@@ -548,7 +586,11 @@ async def test_a_batch_run_is_scored_with_the_batch_config(
 
 @pytest.mark.parametrize(("script", "passed"), [(FIX_THE_BUG, True), (GIVE_UP, False)])
 async def test_io_and_command_checks_through_the_runner(
-    sessionmaker: SM, queue: RunQueue, script: list[dict[str, Any]], passed: bool
+    sessionmaker: SM,
+    queue: RunQueue,
+    script: list[dict[str, Any]],
+    passed: bool,
+    artifact_store: LocalArtifactStore,
 ) -> None:
     """C4: io output is compared on the host; C6: command checks only with
     trusted_environment. Both run as Step 3 ExecPlans in the eval container."""
@@ -562,7 +604,7 @@ async def test_io_and_command_checks_through_the_runner(
         ],
     }  # fmt: skip
     run_id = await make_run(sessionmaker, queue, script, evaluation=spec)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     _, _, ev, _, _ = await results(sessionmaker, run_id)
@@ -574,7 +616,7 @@ async def test_io_and_command_checks_through_the_runner(
 
 
 async def test_planted_sitecustomize_cannot_pass_the_hidden_tests(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
 ) -> None:
     """C2: the hardened invocation ignores agent-planted startup hooks."""
     plant = [
@@ -583,7 +625,7 @@ async def test_planted_sitecustomize_cannot_pass_the_hidden_tests(
         turn("Done."),
     ]  # fmt: skip
     run_id = await make_run(sessionmaker, queue, plant)
-    ex, _ = build(sessionmaker, queue)
+    ex, _ = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     _, _, ev, _, _ = await results(sessionmaker, run_id)
@@ -592,14 +634,25 @@ async def test_planted_sitecustomize_cannot_pass_the_hidden_tests(
 
 
 async def test_hidden_content_never_reaches_storage_logs_model_or_public_view(
-    sessionmaker: SM, queue: RunQueue
+    sessionmaker: SM,
+    queue: RunQueue,
+    artifact_store: LocalArtifactStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """D11. The failing hidden tests' traceback quotes the hidden file (and
     the marker); none of it may be stored, logged, shown to the model or
     projected outward."""
+    # structlog caches a module logger under the config in force at its first use,
+    # and every API lifespan re-configures with a new processor list that
+    # capture_logs can't reach through an older cache. Whether an earlier test
+    # already used a module's logger therefore depended on test-file ordering;
+    # fresh, uncached loggers make this test independent of it.
+    for name, module in list(sys.modules.items()):
+        if name.startswith(("agenteval_core", "agenteval_worker")) and hasattr(module, "log"):
+            monkeypatch.setattr(module, "log", structlog.get_logger(name))
     provider = RecordingFake()
     run_id = await make_run(sessionmaker, queue, FIX_THE_BUG[:1] + GIVE_UP)
-    ex, inv = build(sessionmaker, queue, provider=provider)
+    ex, inv = build(sessionmaker, queue, artifact_store, provider=provider)
     with structlog.testing.capture_logs() as logs:
         await handle_next(ex, queue)
 
@@ -626,7 +679,9 @@ async def test_hidden_content_never_reaches_storage_logs_model_or_public_view(
     assert provider.sessions and run.status == "COMPLETED" and attempt.final_answer
 
 
-async def test_command_tasks_are_never_evaluated(sessionmaker: SM, queue: RunQueue) -> None:
+async def test_command_tasks_are_never_evaluated(
+    sessionmaker: SM, queue: RunQueue, artifact_store: LocalArtifactStore
+) -> None:
     async with sessionmaker() as s:
         task = Task(
             name="cmd", task_type="command", image=SANDBOX_IMAGE, command=["python", "-c", "1"],
@@ -639,10 +694,11 @@ async def test_command_tasks_are_never_evaluated(sessionmaker: SM, queue: RunQue
         await s.commit()
         run_id = run.id
     await queue.publish(run_id)
-    ex, inv = build(sessionmaker, queue)
+    ex, inv = build(sessionmaker, queue, artifact_store)
     await handle_next(ex, queue)
 
     run_row, attempt, ev, _, artifact = await results(sessionmaker, run_id)
     assert (run_row.status, run_row.outcome) == ("COMPLETED", "SUCCESS")
     assert attempt.sandbox_image_id is None  # S1 unchanged
+    assert attempt.workspace_capture is None  # ck_run_attempts_capture: agent tasks only
     assert ev is None and artifact is None and inv.before is None

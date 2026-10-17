@@ -25,6 +25,7 @@ from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
 
 from agenteval_api.main import create_app
+from agenteval_core.artifacts import LocalArtifactStore
 from agenteval_core.config import Settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.queue.streams import RunQueue
@@ -93,6 +94,12 @@ async def clean_state(engine: AsyncEngine, settings: Settings) -> AsyncIterator[
     await r.flushall()
     await r.aclose()
     yield
+
+
+@pytest.fixture
+def artifact_store(tmp_path: Path) -> LocalArtifactStore:
+    """A fresh artifact volume per test (ADR-008): a directory under pytest's tmp_path."""
+    return LocalArtifactStore(tmp_path / "artifacts")
 
 
 @pytest.fixture

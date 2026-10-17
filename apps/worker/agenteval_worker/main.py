@@ -10,10 +10,12 @@ import os
 import secrets
 import signal
 import socket
+from pathlib import Path
 
 import docker
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from agenteval_core.artifacts import LocalArtifactStore
 from agenteval_core.config import get_settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.logging import configure_logging, get_logger
@@ -30,7 +32,7 @@ from agenteval_worker.sandbox.docker_sandbox import DockerSandbox
 
 log = get_logger(__name__)
 
-WORKER_VERSION = "phase5-step5"
+WORKER_VERSION = "phase5-step6"
 REGISTRY_HEARTBEAT_S = 10.0
 
 
@@ -42,6 +44,9 @@ async def main() -> None:
     # Startup refuses an invalid timing combination (F7): a heartbeat too
     # close to the ttl, a margin too small for the reconciler tick, etc.
     timing = settings.lease_timing().validate()
+    # ADR-008 E: the sweeper's grace must outlast a save's deadline + timeout.
+    settings.validate_artifact_timing()
+    artifact_store = LocalArtifactStore(Path(settings.artifact_dir))
 
     engine = create_engine(settings.database_url)
     redis = redis_for_blocking_reads(settings.redis_url, settings.worker_block_ms)
@@ -69,6 +74,7 @@ async def main() -> None:
     evaluation_runner = EvaluationRunner(
         sessionmaker=sessionmaker,
         docker_client=docker_client,
+        artifact_store=artifact_store,
         max_output_bytes=settings.max_output_bytes,
         workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
         pids_limit=settings.pids_limit,
@@ -98,6 +104,9 @@ async def main() -> None:
         lease_ttl_s=timing.ttl_s,
         lease_margin_s=timing.margin_s,
         kill_by_attempt_label=sandbox.kill_attempt,
+        artifact_store=artifact_store,
+        artifact_insert_timeout_s=settings.artifact_insert_timeout_s,
+        artifact_save_deadline_s=settings.artifact_save_deadline_s,
     )
     consumer = Consumer(
         queue,
@@ -118,6 +127,8 @@ async def main() -> None:
         orphan_sweep_interval_s=settings.orphan_sweep_interval_s,
         kill_attempt=sandbox.kill_attempt,
         sweep_orphans=sandbox.sweep_orphans,
+        artifact_store=artifact_store,
+        artifact_sweep_grace_s=settings.artifact_sweep_grace_s,
     )
 
     stop = asyncio.Event()

@@ -20,6 +20,7 @@ never done here: external side effects happen strictly after the commit.
 """
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -44,14 +45,16 @@ BATCH_SIZE = 50
 REDISPATCH_BATCH_SIZE = 200
 STATEMENT_TIMEOUT = "10s"
 IDLE_IN_TRANSACTION_TIMEOUT = "5s"
+SWEEP_KEY_CHUNK = 1000
 
 # pg_try_advisory_xact_lock(RECONCILER_LOCK_NS, step). Step 1 has two scans, each
-# its own transaction and its own lock. The numbers 2, 5 and 6 are reserved for
-# evaluation recovery, the artifact sweeper and evaluation dispatch (Steps 6-7).
+# its own transaction and its own lock. The numbers 2 and 6 are reserved for
+# evaluation recovery and evaluation dispatch (Step 7); 5 is the artifact sweeper.
 STEP_CLAIMED = 11  # 1a
 STEP_RUNNING = 12  # 1b
 STEP_RETRIES_DUE = 3
 STEP_REDISPATCH = 4
+STEP_ARTIFACTS = 5
 STEP_WORKERS = 7
 
 
@@ -257,6 +260,23 @@ class RecoveryRepository:
                 scan="running",
             )
         return result
+
+    # -- 5: the artifact sweeper's read of what is referenced (ADR-008) -----------------------
+
+    async def referenced_storage_keys(self, keys: Sequence[str]) -> set[str]:
+        """Which of `keys` some artifact row points to. The sweeper lists the
+        volume FIRST and asks afterwards, so a file whose row is about to be
+        inserted is never judged unreferenced because the read came too early
+        (and the grace period covers a row inserted after it)."""
+        referenced: set[str] = set()
+        for i in range(0, len(keys), SWEEP_KEY_CHUNK):
+            chunk = list(keys[i : i + SWEEP_KEY_CHUNK])
+            rows = await self._s.execute(
+                text("SELECT storage_key FROM attempt_artifacts WHERE storage_key = ANY(:keys)"),
+                {"keys": chunk},
+            )
+            referenced.update(row[0] for row in rows)
+        return referenced
 
     # -- 3: RETRYING runs whose backoff elapsed (R12) -----------------------------------------
 

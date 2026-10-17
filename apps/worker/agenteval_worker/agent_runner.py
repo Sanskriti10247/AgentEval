@@ -6,6 +6,9 @@
     run the AgentRuntime with a Postgres TrajectoryWriter
     Phase 4: if the attempt COMPLETED and its evaluation spec needs the
         workspace, reap and export /workspace (C1) before closing
+    Step 6 (O3d): the runner only exports. The executor saves the snapshot
+        (T-artifact) while the attempt is still RUNNING and passes the resulting
+        `workspace_capture` to T-finish; see `AgentAttemptResult`.
     always close the sandbox
 
 The deadline is fixed when the runner starts, so sandbox setup counts
@@ -38,12 +41,12 @@ from agenteval_core.evaluation.taxonomy import MAX_SNAPSHOT_BYTES
 from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, RunAttempt, Task
 from agenteval_core.providers.base import ModelProvider
-from agenteval_core.reliability.taxonomy import FailureReason
+from agenteval_core.reliability.taxonomy import FailureReason, WorkspaceCapture
 from agenteval_core.states import COMPLETED_OUTCOMES, FAILED_OUTCOMES, Outcome
 from agenteval_core.tools.base import ToolContext
 from agenteval_core.tools.registry import ToolSet
-from agenteval_worker.evaluation_runner import WorkspaceCapture, needs_workspace, parse_spec
-from agenteval_worker.sandbox.evaluation import WorkspaceSnapshot, export_workspace
+from agenteval_worker.evaluation_runner import needs_workspace, parse_spec
+from agenteval_worker.sandbox.evaluation import SnapshotError, WorkspaceSnapshot, export_workspace
 from agenteval_worker.sandbox.session import ContainerSpec, SandboxError, SandboxSession
 from agenteval_worker.sandbox.workspace import DockerWorkspace
 from agenteval_worker.trajectory import TrajectoryWriter
@@ -77,9 +80,14 @@ class AgentAttemptResult:
     sandbox_image_id: str | None = None
     # Set exactly for a failed outcome; never inferred from error_message.
     failure_reason: FailureReason | None = None
-    # Not a finish_attempt field: handed to the EvaluationRunner after the
-    # attempt is durable (the executor excludes it when persisting).
-    workspace: WorkspaceCapture | None = field(default=None, repr=False, compare=False)
+    # O3d: what became of the workspace snapshot - set only for a completed
+    # outcome of an agent task (ck_run_attempts_capture), a finish_attempt field.
+    # While `snapshot` is set this stays None: the executor saves the snapshot
+    # and fills in stored / persist_failed.
+    workspace_capture: WorkspaceCapture | None = None
+    # Not a finish_attempt field: the exported bytes, waiting to be saved by the
+    # executor (which clears it, and excludes it when persisting).
+    snapshot: WorkspaceSnapshot | None = field(default=None, repr=False, compare=False)
 
 
 class _SetupError(Exception):
@@ -184,8 +192,12 @@ class AgentRunner:
                 retry_policy=self._retry,
             )
             result = _from_agent_result(await runtime.run(ctx), image_id)
-            if result.outcome in COMPLETED_OUTCOMES and self._wants_workspace(task):
-                result = replace(result, workspace=await self._capture(session))
+            if result.outcome in COMPLETED_OUTCOMES:
+                if not self._wants_workspace(task):
+                    result = replace(result, workspace_capture=WorkspaceCapture.NOT_NEEDED)
+                else:
+                    capture, snapshot = await self._capture(session)
+                    result = replace(result, workspace_capture=capture, snapshot=snapshot)
             return result
         except SinkFailed as exc:
             log.error("trajectory_unrecordable", error=str(exc))
@@ -219,15 +231,20 @@ class AgentRunner:
             return False
         return spec is not None and needs_workspace(spec)
 
-    async def _capture(self, session: SandboxSession) -> WorkspaceCapture:
-        """C1: a complete snapshot, or the reason there isn't one (A2: an
-        evaluator failure, never the agent's). Never changes the outcome."""
+    async def _capture(
+        self, session: SandboxSession
+    ) -> tuple[WorkspaceCapture | None, WorkspaceSnapshot | None]:
+        """C1: a complete snapshot (capture None: still to be saved), or the
+        reason there isn't one (A2: an evaluator failure, never the agent's):
+        the SnapshotError's too_large / incomplete / invalid, or incomplete for
+        any other export failure. Never changes the outcome."""
         try:
             snapshot = await asyncio.to_thread(self._export, session)
         except (SandboxError, docker.errors.DockerException) as exc:
             log.warning("workspace_export_failed", error_type=type(exc).__name__)
-            return WorkspaceCapture(error=str(exc))
-        return WorkspaceCapture(snapshot=snapshot)
+            kind = exc.reason if isinstance(exc, SnapshotError) else "incomplete"
+            return WorkspaceCapture(kind), None
+        return None, snapshot
 
     def _export(self, session: SandboxSession) -> WorkspaceSnapshot:
         session.reap()  # nothing the agent started may still be writing
