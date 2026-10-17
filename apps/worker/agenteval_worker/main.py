@@ -62,6 +62,7 @@ async def main() -> None:
         max_output_bytes=settings.max_output_bytes,
         workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
         pids_limit=settings.pids_limit,
+        image_allowlist=settings.image_allowlist,
     )
     swept = await asyncio.to_thread(sandbox.sweep_orphans)
     queue = RunQueue(
@@ -84,6 +85,7 @@ async def main() -> None:
         max_output_bytes=settings.max_output_bytes,
         workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
         pids_limit=settings.pids_limit,
+        image_allowlist=settings.image_allowlist,
     )
     async with sessionmaker() as s:
         await WorkerRepository(s).register(
@@ -110,6 +112,7 @@ async def main() -> None:
         lease_manager=lease_manager,
         lease_ttl_s=timing.ttl_s,
         kill_by_attempt_label=sandbox.kill_attempt,
+        image_allowlist=settings.image_allowlist,
     )
 
     executor = Executor(

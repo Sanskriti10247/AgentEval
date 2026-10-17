@@ -19,6 +19,7 @@ See README "Security model".
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import docker
@@ -85,8 +86,10 @@ class DockerSandbox:
         max_output_bytes: int = 64 * 1024,
         workspace_tmpfs_mb: int = 64,
         pids_limit: int = 128,
+        image_allowlist: Iterable[str] | None = None,
     ) -> None:
         self._client = client
+        self._allowlist = None if image_allowlist is None else frozenset(image_allowlist)
         self._max_output = max_output_bytes
         self._workspace_mb = workspace_tmpfs_mb
         self._pids_limit = pids_limit
@@ -105,6 +108,7 @@ class DockerSandbox:
                     memory_mb=spec.memory_mb,
                     cpu_limit=spec.cpu_limit,
                     labels=spec.labels,
+                    image_allowlist=self._allowlist,
                 ),
                 max_output_bytes=self._max_output,
                 workspace_tmpfs_mb=self._workspace_mb,

@@ -49,6 +49,7 @@ from agenteval_worker.sandbox.session import (
     SandboxError,
     SandboxSession,
     build_tar,
+    check_image_allowed,
     container_kwargs,
 )
 
@@ -254,6 +255,7 @@ class EvaluationSession(SandboxSession):
         validate_snapshot(snapshot.data, max_unpacked_bytes=workspace_tmpfs_mb * 1024 * 1024)
         for path in eval_files:
             validate_relative_path(path)
+        check_image_allowed(spec)
         kwargs = evaluation_container_kwargs(
             spec,
             workspace_tmpfs_mb=workspace_tmpfs_mb,

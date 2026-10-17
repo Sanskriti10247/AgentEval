@@ -90,6 +90,20 @@ class ContainerSpec:
     memory_mb: int
     cpu_limit: float
     labels: dict[str, str] = field(default_factory=dict)
+    # Defence in depth (security review F-W1): the API checks a task's image against the
+    # allowlist at creation, but the worker is the component that holds the Docker socket, so
+    # it checks again before creating a container. None = no check (unit tests).
+    image_allowlist: frozenset[str] | None = None
+
+
+def check_image_allowed(spec: ContainerSpec) -> None:
+    """Refuse an image that is not on the worker's allowlist. Not retryable: the same image
+    will be refused again (SANDBOX_IMAGE_NOT_FOUND is a non-retryable reason)."""
+    if spec.image_allowlist is not None and spec.image not in spec.image_allowlist:
+        raise SandboxError(
+            f"image {spec.image!r} is not on the worker's allowlist",
+            reason=FailureReason.SANDBOX_IMAGE_NOT_FOUND,
+        )
 
 
 @dataclass(frozen=True)
@@ -230,6 +244,7 @@ class SandboxSession:
     ) -> SandboxSession:
         """Create (not start) the container. containers.create never pulls, so
         a missing image raises docker.errors.ImageNotFound."""
+        check_image_allowed(spec)
         container = client.containers.create(
             spec.image,
             **container_kwargs(spec, workspace_tmpfs_mb=workspace_tmpfs_mb, pids_limit=pids_limit),

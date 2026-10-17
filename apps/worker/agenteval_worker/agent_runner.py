@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
@@ -116,7 +116,9 @@ class AgentRunner:
         pids_limit: int = 128,
         retry_policy: RetryPolicy | None = None,
         snapshot_max_bytes: int = MAX_SNAPSHOT_BYTES,
+        image_allowlist: Iterable[str] | None = None,
     ) -> None:
+        self._allowlist = None if image_allowlist is None else frozenset(image_allowlist)
         self._sm = sessionmaker
         self._docker = docker_client
         self._providers = dict(providers)
@@ -149,6 +151,7 @@ class AgentRunner:
                         "agenteval.run_id": str(attempt.run_id),
                         "agenteval.attempt_id": str(attempt.id),
                     },
+                    image_allowlist=self._allowlist,
                 ),
                 dict(task.files),
                 max_output_bytes=self._max_output,

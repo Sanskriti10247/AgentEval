@@ -13,8 +13,10 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 
 from agenteval_core.evaluation.spec import EvaluationSpec
+from agenteval_core.logging import get_logger
 from agenteval_core.services.errors import (
     Conflict,
     DispatchUnavailable,
@@ -28,6 +30,8 @@ from agenteval_core.services.errors import (
     NotFound,
     ServiceError,
 )
+
+log = get_logger(__name__)
 
 _STATUS: dict[type[ServiceError], tuple[int, str]] = {
     NotFound: (404, "Not Found"),
@@ -48,6 +52,16 @@ def _status_for(exc: ServiceError) -> tuple[int, str]:
         if cls in _STATUS:
             return _STATUS[cls]
     return 500, "Internal Server Error"
+
+
+def _sqlstate(exc: DBAPIError) -> str:
+    """The SQLSTATE of the driver error: asyncpg's exception carries it, SQLAlchemy's wrapper
+    may hold it on the original or its cause."""
+    for err in (exc.orig, getattr(exc.orig, "__cause__", None)):
+        code = getattr(err, "sqlstate", None) or getattr(err, "pgcode", None)
+        if isinstance(code, str):
+            return code
+    return ""
 
 
 def problem(status: int, title: str, detail: str) -> JSONResponse:
@@ -86,6 +100,19 @@ def install_error_handlers(app: FastAPI) -> None:
         if isinstance(exc, DispatchUnavailable):
             resp.headers["Retry-After"] = "1"
         return resp
+
+    @app.exception_handler(DBAPIError)
+    async def _database_error(request: Request, exc: DBAPIError) -> JSONResponse:
+        # SQLSTATE class 22 (data exception: a NUL character in text or jsonb, a value out of
+        # range, ...) means Postgres refused a value the schemas did not catch: the caller's
+        # fault, so 422 with fixed text and nothing from the driver message (it can quote the
+        # submitted value). Every other database error is a server fault and stays a 500.
+        if _sqlstate(exc).startswith("22"):
+            log.warning("unstorable_value", error_type=type(exc.orig).__name__)
+            return problem(
+                422, "Unprocessable Content", "The request contains a value that cannot be stored"
+            )
+        raise exc
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

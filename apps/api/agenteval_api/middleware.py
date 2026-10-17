@@ -22,6 +22,7 @@ continues here. `/metrics`, `/health` and `/ready` are not traced (probes and
 scrapes would drown the real requests).
 """
 
+import json
 import re
 import time
 
@@ -108,3 +109,75 @@ def _header(scope: Scope, name: str) -> str | None:
         if key == wanted:
             return str(value.decode("latin-1"))
     return None
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+class BodyLimitMiddleware:
+    """Refuse a request body over `max_bytes` with 413 BEFORE it is parsed (security review
+    F-A1). Without it uvicorn hands the whole body to the JSON parser, so one large POST
+    costs memory proportional to its size; the per-field limits (task files, specs) only run
+    after parsing. A declared `Content-Length` over the limit is refused without reading
+    anything; a chunked or lying body is cut off as soon as the count passes the limit."""
+
+    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+        self.app = app
+        self._max = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = _header(scope, "content-length")
+        if declared is not None and declared.isdigit() and int(declared) > self._max:
+            await self._refuse(send)
+            return
+
+        seen = 0
+        started = False
+
+        async def counting_receive() -> Message:
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > self._max:
+                    raise _BodyTooLarge
+            return message
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except _BodyTooLarge:
+            if started:  # the response is already on the wire; all that is left is to stop
+                raise
+            await self._refuse(send)
+
+    async def _refuse(self, send: Send) -> None:
+        body = json.dumps(
+            {
+                "type": "about:blank",
+                "title": "Payload Too Large",
+                "status": 413,
+                "detail": f"Request body exceeds {self._max} bytes",
+            }
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/problem+json"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"connection", b"close"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
