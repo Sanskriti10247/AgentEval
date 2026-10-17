@@ -11,6 +11,7 @@ from agenteval_core.repositories.agents import AgentVersionRepository
 from agenteval_core.repositories.runs import RunRepository
 from agenteval_core.repositories.tasks import TaskRepository
 from agenteval_core.repositories.trajectory import TrajectoryRepository
+from agenteval_core.services.dispatch import stamp_dispatched
 from agenteval_core.services.errors import (
     DispatchUnavailable,
     IdempotencyConflict,
@@ -80,6 +81,7 @@ class RunService:
             except RedisError as exc:
                 log.error("dispatch_failed", run_id=str(run.id), error=str(exc))
                 raise DispatchUnavailable(run.id) from exc
+            await stamp_dispatched(self._s, [run.id])
             log.info("run_dispatched", run_id=str(run.id), task_id=str(task_id), replay=not created)
         return SubmitResult(run=run, created=created)
 

@@ -12,6 +12,7 @@ Repositories flush but never commit; services/executors own transactions.
 
 import json
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -136,6 +137,22 @@ class RunRepository:
         )
         result = await self._s.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def mark_dispatched(self, run_ids: Sequence[uuid.UUID]) -> int:
+        """Stamp `dispatched_at = now()` on runs just published (guarded by
+        QUEUED: a run a worker already claimed needs no redispatch stamp). The
+        reconciler's redispatch (step 4) treats a QUEUED run whose stamp is NULL
+        or older than `redispatch_after_s` as lost in transit. Returns the
+        number of rows stamped."""
+        if not run_ids:
+            return 0
+        result = await self._s.execute(
+            update(Run)
+            .where(Run.id.in_(list(run_ids)), Run.status == RunStatus.QUEUED)
+            .values(dispatched_at=func.now())
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def list_attempts(self, run_id: uuid.UUID) -> list[RunAttempt]:
         result = await self._s.execute(
