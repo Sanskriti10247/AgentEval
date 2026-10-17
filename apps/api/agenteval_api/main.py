@@ -7,11 +7,13 @@ from redis.asyncio import Redis
 
 from agenteval_api.errors import install_error_handlers
 from agenteval_api.middleware import MetricsMiddleware
+from agenteval_api.ratelimit import RateLimiter
 from agenteval_api.routes import (
     agents,
     datasets,
     evaluations,
     health,
+    keys,
     metrics,
     runs,
     stats,
@@ -44,7 +46,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.consumer_group,
             maxlen=settings.stream_maxlen,
         )
-        log.info("api_started")
+        app.state.ratelimiter = RateLimiter(app.state.redis)
+        if not settings.auth_enabled:
+            log.warning("auth_disabled", note="every caller is anonymous with all scopes")
+        log.info("api_started", auth_enabled=settings.auth_enabled)
         try:
             yield
         finally:
@@ -55,13 +60,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="AgentEval API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(MetricsMiddleware)
     install_error_handlers(app)
-    # The dashboard's origin(s) only; no credentials (there is no auth yet), and
-    # just the methods and headers the API uses.
+    # The dashboard's origin(s) only; no cookies (the key travels in the Authorization
+    # header, ADR-012 D), and just the methods and headers the API uses. The rate-limit
+    # headers are exposed so the dashboard can read Retry-After on a 429.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "Idempotency-Key"],
+        allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+        expose_headers=[
+            "Retry-After",
+            "X-RateLimit-Limit",
+            "X-RateLimit-Remaining",
+            "X-RateLimit-Reset",
+        ],
         allow_credentials=False,
         max_age=600,
     )
@@ -75,6 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(evaluations.router)
     v1.include_router(workers.router)
     v1.include_router(stats.router)
+    v1.include_router(keys.router)
     app.include_router(v1)
     return app
 

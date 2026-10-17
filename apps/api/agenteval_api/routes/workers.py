@@ -2,13 +2,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
+from agenteval_api.auth import READ
 from agenteval_api.deps import ReadServiceDep
 from agenteval_core.schemas.read import WorkerPage
 
 router = APIRouter(prefix="/workers", tags=["workers"])
 
 
-@router.get("", response_model=WorkerPage)
+@router.get("", response_model=WorkerPage, dependencies=[READ])
 async def list_workers(
     read: ReadServiceDep,
     after: Annotated[str | None, Query(max_length=150)] = None,

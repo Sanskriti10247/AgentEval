@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     # Browser origins the API answers CORS for (the dashboard). JSON list.
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
+    # Authentication and rate limiting (ADR-012 A-C). Auth is ON unless explicitly
+    # disabled (local experiments only). A rate budget is requests per minute per API
+    # key (per client IP when auth is off); 0 disables that budget.
+    auth_enabled: bool = True
+    rate_limit_read_per_min: int = Field(default=600, ge=0)
+    rate_limit_write_per_min: int = Field(default=120, ge=0)
+
     # Sandbox
     image_allowlist: list[str] = Field(default_factory=lambda: ["agenteval-sandbox:py312"])
     max_output_bytes: int = 64 * 1024

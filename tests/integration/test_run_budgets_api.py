@@ -15,7 +15,7 @@ from agenteval_api.main import create_app
 from agenteval_core.artifacts import LocalArtifactStore
 from agenteval_core.config import Settings
 from agenteval_core.queue.streams import RunQueue
-from tests.integration.conftest import create_task
+from tests.integration.conftest import bearer, create_task
 from tests.integration.eval_seed import SM, agent_version, frozen_dataset
 from tests.integration.test_agent_executor import handle_next
 from tests.integration.test_evaluation_runner import build
@@ -51,11 +51,13 @@ async def test_an_explicit_budget_is_pinned_on_the_run(
     assert (await run_row(engine, uuid.UUID(resp.json()["id"]))).max_attempts == budget
 
 
-async def test_the_default_follows_the_setting(settings: Settings) -> None:
+async def test_the_default_follows_the_setting(settings: Settings, api_key: str) -> None:
     app = create_app(settings.model_copy(update={"run_max_attempts": 6}))
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", headers=bearer(api_key)
+        ) as c:
             resp = await submit(c, await create_task(c))
             assert resp.json()["max_attempts"] == 6
             assert (await submit(c, await create_task(c), max_attempts=2)).json()[

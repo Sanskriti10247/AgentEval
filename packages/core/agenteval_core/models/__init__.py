@@ -1,4 +1,5 @@
 from agenteval_core.models.agent import Agent, AgentVersion
+from agenteval_core.models.api_key import ApiKey
 from agenteval_core.models.base import Base
 from agenteval_core.models.dataset import Dataset
 from agenteval_core.models.evaluation import (
@@ -13,6 +14,7 @@ from agenteval_core.models.trajectory import TrajectoryEvent
 from agenteval_core.models.worker import Worker
 
 __all__ = [
+    "ApiKey",
     "Agent",
     "AgentVersion",
     "AttemptArtifact",

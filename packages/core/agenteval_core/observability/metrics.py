@@ -67,6 +67,8 @@ ARTIFACT_RESULTS = frozenset({"stored", "fenced", "failed"})
 INFLIGHT_KINDS = frozenset({"run", "evaluation"})
 SCRAPE_SOURCES = frozenset({"postgres", "redis"})
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+AUTH_FAILURE_REASONS = frozenset({"missing", "invalid", "revoked", "expired", "forbidden"})
+RATE_LIMIT_KINDS = frozenset({"read", "write"})
 RECONCILER_STEPS = frozenset(
     {
         "recover_claimed",
@@ -116,6 +118,24 @@ HTTP_DURATION = Histogram(
     "HTTP request latency by method and route template.",
     ["method", "route"],
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+)
+
+# -- API: authentication and rate limiting (ADR-012 A, B, C) -------------------------------
+
+AUTH_FAILURES = Counter(
+    "agenteval_auth_failures_total",
+    "API requests refused by authentication (401: missing, invalid, revoked, expired) or "
+    "authorization (403: forbidden).",
+    ["reason"],
+)
+RATE_LIMITED = Counter(
+    "agenteval_rate_limited_total",
+    "API requests refused with 429, by budget (read or write).",
+    ["kind"],
+)
+RATE_LIMIT_ERRORS = Counter(
+    "agenteval_rate_limit_errors_total",
+    "Rate-limit checks that could not reach Redis; the request was allowed (fail open).",
 )
 
 # -- API: scrape-time gauges (refreshed by observability.scrape on every scrape) ------------
@@ -266,6 +286,21 @@ def http_request(method: str, route: str, status: int, seconds: float) -> None:
     method = _closed(method.upper(), HTTP_METHODS)
     HTTP_REQUESTS.labels(method, route, str(status)).inc()
     HTTP_DURATION.labels(method, route).observe(seconds)
+
+
+@_safe
+def auth_failure(reason: str) -> None:
+    AUTH_FAILURES.labels(_closed(reason, AUTH_FAILURE_REASONS)).inc()
+
+
+@_safe
+def rate_limited(kind: str) -> None:
+    RATE_LIMITED.labels(_closed(kind, RATE_LIMIT_KINDS)).inc()
+
+
+@_safe
+def rate_limit_error() -> None:
+    RATE_LIMIT_ERRORS.inc()
 
 
 @_safe

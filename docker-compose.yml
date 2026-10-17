@@ -50,7 +50,13 @@ services:
       context: .
       dockerfile: infrastructure/docker/api.Dockerfile
     cpu_shares: 4096
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # ADR-012: authentication is ON by default; the budgets are requests per minute per API
+      # key (0 disables a budget). `make bench` recreates the api with both at 0.
+      AGENTEVAL_AUTH_ENABLED: ${AGENTEVAL_AUTH_ENABLED:-true}
+      AGENTEVAL_RATE_LIMIT_READ_PER_MIN: ${AGENTEVAL_RATE_LIMIT_READ_PER_MIN:-600}
+      AGENTEVAL_RATE_LIMIT_WRITE_PER_MIN: ${AGENTEVAL_RATE_LIMIT_WRITE_PER_MIN:-120}
     command: ["uvicorn", "agenteval_api.main:app", "--host", "0.0.0.0", "--port", "8000",
               "--reload", "--reload-dir", "/app/packages/core", "--reload-dir", "/app/apps/api"]
     ports:
@@ -97,7 +103,8 @@ services:
       redis: { condition: service_healthy }
 
   # Dashboard (ADR-010 D). The browser calls the API directly, so NEXT_PUBLIC_API_URL is the
-  # host-side API address, baked in at build time. No auth yet (Phase 8): bound to localhost.
+  # host-side API address, baked in at build time. The user enters an API key in the browser
+  # (ADR-012 D); bound to localhost.
   web:
     # Opt-in (`make web-up`), so `make up` and the e2e runs never pay for a Node build.
     profiles: ["web"]

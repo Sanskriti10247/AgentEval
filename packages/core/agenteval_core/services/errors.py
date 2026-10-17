@@ -49,3 +49,7 @@ class AlreadyFinished(Conflict):
 class InvalidEvaluation(ServiceError):
     """An evaluation spec, batch or comparison request is invalid. Messages
     are fixed text: never spec content (D11)."""
+
+
+class InvalidApiKeyRequest(ServiceError):
+    """A key-creation request is invalid (name, scopes or expiry)."""

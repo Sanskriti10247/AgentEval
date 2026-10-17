@@ -17,7 +17,7 @@ A platform for running, observing, evaluating and benchmarking AI agents inside 
 >
 > - **Phase 6 (in progress):** Prometheus metrics are built (below); tracing, the dashboard read API and the web UI are not.
 > - **Phase 7:** performance and throughput benchmarks of the platform itself (distinct from Phase 4's benchmark evaluations, which measure agents). No performance numbers are claimed anywhere in this repository yet.
-> - **Phase 8:** authentication, rate limiting, the web UI.
+> - **Phase 8:** API-key authentication, scopes, rate limiting and the dashboard's key handling are built ([ADR-012](docs/decisions/ADR-012-production-polish.md), [docs/api/auth.md](docs/api/auth.md)); CI/CD, the production deployment and the security review are not.
 > - **Deferred:** rescoring through the API, and LLM-as-judge.
 
 ## Architecture
@@ -163,7 +163,7 @@ curl -s localhost:8000/metrics | head                      # the API, directly
 ```
 
 - **API:** `GET /metrics`. HTTP requests and latency are labelled by route *template* (`/api/v1/runs/{run_id}`, never the raw path; unmatched paths share one `unmatched` label). `/metrics` is not counted in its own numbers. The system-state gauges are read from Postgres and Redis **on every scrape**; if one source is down, `agenteval_scrape_errors_total{source}` is incremented, that source's gauges disappear, and the scrape still returns 200.
-- **Worker:** each worker serves its own endpoint on `AGENTEVAL_WORKER_METRICS_PORT` (default 9464, `0` disables it) from a thread. In compose the port is exposed to the compose network only (Prometheus), never published to the host. The Prometheus UI is bound to `127.0.0.1`. There is no authentication yet (Phase 8).
+- **Worker:** each worker serves its own endpoint on `AGENTEVAL_WORKER_METRICS_PORT` (default 9464, `0` disables it) from a thread. In compose the port is exposed to the compose network only (Prometheus), never published to the host. The Prometheus UI is bound to `127.0.0.1`. `/metrics` and the worker endpoints are unauthenticated by design (internal network only).
 - **Labels are closed sets** (status, outcome, failure reason and category, transition code, tool name, provider and model, stream), never ids; a tool name the model invented is `unknown`, an unpriced model is `other`.
 
 | Family | Type | Labels |
@@ -174,6 +174,8 @@ curl -s localhost:8000/metrics | head                      # the API, directly
 | `agenteval_workers_live` | gauge | workers not stopped and heartbeating within 3 lease TTLs |
 | `agenteval_stream_length`, `agenteval_stream_pending` | gauge | `stream` |
 | `agenteval_scrape_errors_total` | counter | `source`: `postgres`, `redis` |
+| `agenteval_auth_failures_total` | counter | `reason`: `missing`, `invalid`, `revoked`, `expired` (401), `forbidden` (403) |
+| `agenteval_rate_limited_total`, `agenteval_rate_limit_errors_total` | counter | `kind` (`read`, `write`) for 429s; none for Redis failures (the request was allowed, fail open) |
 | `agenteval_runs_finished_total` | counter | `status` (terminal), `outcome` (`none` when cancelled) |
 | `agenteval_run_transitions_total` | counter | `code` (ADR-009: R1, R3, R7, R8 ...), `actor` (`worker`, `reconciler`). Retries are R8 and R9; recoveries are the reconciler's R4a, R4b, R5, R9, R10, R11, R12 |
 | `agenteval_attempt_failures_total` | counter | `failure_reason`, `category` |
@@ -221,7 +223,7 @@ make observability-up     # Prometheus + Jaeger; api and worker export traces to
 make observability-down   # removes both, recreates api and worker without export
 ```
 
-`make observability-up` applies `docker-compose.observability.yml` (which only sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` on `api` and `worker`) on top of the base file and starts the `observability` profile. An override file, rather than a variable defaulting to empty in the base file, keeps the default stack free of any `OTEL_*` setting: it exports nothing by construction, and `make up` and `make e2e` never depend on a collector. Jaeger keeps traces in memory (gone on restart); its OTLP port is internal to the compose network and the UI is bound to `127.0.0.1`. There is no authentication yet (Phase 8).
+`make observability-up` applies `docker-compose.observability.yml` (which only sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` on `api` and `worker`) on top of the base file and starts the `observability` profile. An override file, rather than a variable defaulting to empty in the base file, keeps the default stack free of any `OTEL_*` setting: it exports nothing by construction, and `make up` and `make e2e` never depend on a collector. Jaeger keeps traces in memory (gone on restart); its OTLP port is internal to the compose network and the UI is bound to `127.0.0.1` and unauthenticated.
 
 A run submitted through the API is one trace, across the Redis hop (a W3C `traceparent` travels as a field of the stream message):
 
@@ -253,10 +255,14 @@ cp .env.example .env     # optional; defaults work
 make sync                # uv sync --all-packages (Python 3.12 is pinned; uv fetches it)
 make up                  # builds the sandbox image, starts postgres, redis, api, worker
 make migrate             # alembic upgrade head (inside the api container)
+# Authentication is ON: create a key once (it is shown once; only its hash is stored)
+docker compose exec api python -m agenteval_api.keys create --name me --scopes read,write,admin
+export AGENTEVAL_API_KEY=ae_...        # paste the key it printed
 make e2e                 # full-stack tests over real HTTP (command tasks, agent tasks, Phase 4 benchmark scenarios)
 make logs / make down
 ```
 
+- **Every `/api/v1` call needs the key** (`Authorization: Bearer <key>`, shown in the curl examples below as `-H "$AUTH"`), except `/health`, `/ready` and `/metrics`. `make e2e` and `make bench-smoke` use `AGENTEVAL_E2E_API_KEY` / `AGENTEVAL_BENCH_API_KEY` if set and otherwise create a short-lived key themselves with the command above. `AGENTEVAL_AUTH_ENABLED=false` switches checks off for local experiments (see [docs/api/auth.md](docs/api/auth.md)).
 - Host ports default to **55432** (Postgres), **56379** (Redis) and **8000** (API). Postgres and Redis avoid the standard ports so they don't clash with local instances; all three can be changed in `.env`.
 - The API reloads on code changes, and so does the worker, via `watchfiles` (in-flight runs drain first).
 - Scale out with `docker compose up -d --scale worker=3`.
@@ -264,7 +270,8 @@ make logs / make down
 ### Try it: a command task
 
 ```bash
-curl -s -X POST localhost:8000/api/v1/tasks -H 'content-type: application/json' -d '{
+AUTH="Authorization: Bearer $AGENTEVAL_API_KEY"
+curl -s -H "$AUTH" -X POST localhost:8000/api/v1/tasks -H 'content-type: application/json' -d '{
   "name": "hello", "image": "agenteval-sandbox:py312",
   "command": ["python", "main.py"],
   "files": {"main.py": "print(\"hi\")\nraise SystemExit(3)"},
@@ -272,22 +279,23 @@ curl -s -X POST localhost:8000/api/v1/tasks -H 'content-type: application/json' 
 }'
 # -> {"id": "<task_id>", ...}
 
-curl -s -X POST localhost:8000/api/v1/runs -H 'content-type: application/json' \
+curl -s -H "$AUTH" -X POST localhost:8000/api/v1/runs -H 'content-type: application/json' \
      -H 'Idempotency-Key: demo-1' -d '{"task_id": "<task_id>"}'
 # -> 202 {"id": "<run_id>", "status": "QUEUED", ...}
 
-curl -s localhost:8000/api/v1/runs/<run_id>            # status COMPLETED, outcome NON_ZERO_EXIT
-curl -s localhost:8000/api/v1/runs/<run_id>/attempts   # exit_code 3, stdout "hi\n"
+curl -s -H "$AUTH" localhost:8000/api/v1/runs/<run_id>            # status COMPLETED, outcome NON_ZERO_EXIT
+curl -s -H "$AUTH" localhost:8000/api/v1/runs/<run_id>/attempts   # exit_code 3, stdout "hi\n"
 ```
 
 ### Try it: an agent task (scripted fake model; offline, free)
 
 ```bash
+AUTH="Authorization: Bearer $AGENTEVAL_API_KEY"
 API=localhost:8000/api/v1
-curl -s -X POST $API/agents -H 'content-type: application/json' -d '{"name": "fixer"}'
+curl -s -H "$AUTH" -X POST $API/agents -H 'content-type: application/json' -d '{"name": "fixer"}'
 # -> {"id": "<agent_id>", ...}
 
-curl -s -X POST $API/agents/<agent_id>/versions -H 'content-type: application/json' -d '{
+curl -s -H "$AUTH" -X POST $API/agents/<agent_id>/versions -H 'content-type: application/json' -d '{
   "model_provider": "fake", "model": "fake-model",
   "system_prompt": "You fix bugs.",
   "tools": ["read_file", "write_file", "run_tests"],
@@ -302,7 +310,7 @@ curl -s -X POST $API/agents/<agent_id>/versions -H 'content-type: application/js
 }'
 # -> 201 {"id": "<version_id>", "version": 1, "config_hash": "...", ...}
 
-curl -s -X POST $API/tasks -H 'content-type: application/json' -d '{
+curl -s -H "$AUTH" -X POST $API/tasks -H 'content-type: application/json' -d '{
   "name": "fix-add", "task_type": "agent", "image": "agenteval-sandbox:py312",
   "instructions": "The tests fail. Fix calc.py so they pass.",
   "test_command": ["python", "-m", "unittest", "-q"],
@@ -310,12 +318,12 @@ curl -s -X POST $API/tasks -H 'content-type: application/json' -d '{
             "test_calc.py": "import unittest\nfrom calc import add\nclass T(unittest.TestCase):\n    def test(self):\n        self.assertEqual(add(2, 3), 5)\n"},
   "timeout_s": 120
 }'
-curl -s -X POST $API/runs -H 'content-type: application/json' \
+curl -s -H "$AUTH" -X POST $API/runs -H 'content-type: application/json' \
      -d '{"task_id": "<task_id>", "agent_version_id": "<version_id>"}'
 
-curl -s $API/runs/<run_id>                        # COMPLETED / AGENT_FINISHED
-curl -s $API/runs/<run_id>/attempts               # steps 4, tokens_in 400, tokens_out 80, cost_usd "0.000800"
-curl -s "$API/runs/<run_id>/attempts/1/events?limit=100"   # the trajectory, in seq order
+curl -s -H "$AUTH" $API/runs/<run_id>                        # COMPLETED / AGENT_FINISHED
+curl -s -H "$AUTH" $API/runs/<run_id>/attempts               # steps 4, tokens_in 400, tokens_out 80, cost_usd "0.000800"
+curl -s -H "$AUTH" "$API/runs/<run_id>/attempts/1/events?limit=100"   # the trajectory, in seq order
 ```
 
 ### Try it: a benchmark evaluation (scripted fake model; offline, free; needs `jq`)
@@ -323,8 +331,9 @@ curl -s "$API/runs/<run_id>/attempts/1/events?limit=100"   # the trajectory, in 
 Two agents are evaluated on a two-task frozen dataset, then compared. Rerunning needs a new dataset `version`, because `(name, version)` is unique.
 
 ```bash
+AUTH="Authorization: Bearer $AGENTEVAL_API_KEY"
 API=localhost:8000/api/v1
-post() { curl -sf -X POST "$API$1" -H 'content-type: application/json' "${@:2}"; }
+post() { curl -sf -X POST "$API$1" -H "$AUTH" -H 'content-type: application/json' "${@:2}"; }
 
 # Two scripted agents (the fake provider: deterministic, offline, free).
 version() {  # $1 agent name, $2 tools, $3 script
@@ -363,13 +372,13 @@ evaluate() {  # $1 version, $2 repetitions
 }
 E1=$(evaluate "$FIXER" 2); E2=$(evaluate "$QUITTER" 1)
 for E in $E1 $E2; do
-  until curl -sf "$API/evaluations/$E" | jq -e .progress.complete >/dev/null; do sleep 1; done
+  until curl -sf -H "$AUTH" "$API/evaluations/$E" | jq -e .progress.complete >/dev/null; do sleep 1; done
 done
 
-curl -sf "$API/evaluations/$E1/summary" | jq '{graded, passed, success_rate, ci95, failure_categories, mean_score}'
-curl -sf "$API/evaluations/$E2/summary" | jq '{graded, passed, success_rate, failure_categories}'
-curl -sf "$API/evaluations/$E1/results?limit=1" | jq '.results[0].evaluation'
-curl -sf "$API/evaluations/compare?ids=$E1,$E2" | jq '[.per_task[] | {task_id, delta_vs_first}]'
+curl -sf -H "$AUTH" "$API/evaluations/$E1/summary" | jq '{graded, passed, success_rate, ci95, failure_categories, mean_score}'
+curl -sf -H "$AUTH" "$API/evaluations/$E2/summary" | jq '{graded, passed, success_rate, failure_categories}'
+curl -sf -H "$AUTH" "$API/evaluations/$E1/results?limit=1" | jq '.results[0].evaluation'
+curl -sf -H "$AUTH" "$API/evaluations/compare?ids=$E1,$E2" | jq '[.per_task[] | {task_id, delta_vs_first}]'
 ```
 
 What it prints (real output, trimmed):
@@ -380,7 +389,7 @@ What it prints (real output, trimmed):
 
 ## Dashboard
 
-A Next.js dashboard (`apps/web`) reads the public REST API: KPIs and charts, agents and their versions, tasks, evaluations (detail and A vs B vs C comparison), runs (with the dead-letter view, trajectory, cancel and replay) and workers. It holds no secrets and has no database access.
+A Next.js dashboard (`apps/web`) reads the public REST API: KPIs and charts, agents and their versions, tasks, evaluations (detail and A vs B vs C comparison), runs (with the dead-letter view, trajectory, cancel and replay) and workers. It has no database access. It asks for an API key on first use (below).
 
 ```bash
 make up && make migrate     # the API on http://localhost:8000
@@ -389,15 +398,17 @@ make web                    # or: a dev server with hot reload on :3000 (npm ci 
 make web-check              # typecheck, lint, tests and production build
 ```
 
-The dashboard service is opt-in (profile `web`), so `make up` and the e2e runs never pay for a Node build. With compose it is served on `127.0.0.1:${AGENTEVAL_WEB_HOST_PORT:-3000}`. The browser calls the API directly, so `NEXT_PUBLIC_API_URL` (build arg `AGENTEVAL_WEB_API_URL`, default `http://localhost:8000`) is baked into the bundle at build time, and the API's CORS list (`AGENTEVAL_CORS_ORIGINS`) must contain the dashboard's origin. There is **no authentication yet** (Phase 8): keep both ports bound to localhost. Details: [apps/web/README.md](apps/web/README.md).
+The dashboard service is opt-in (profile `web`), so `make up` and the e2e runs never pay for a Node build. With compose it is served on `127.0.0.1:${AGENTEVAL_WEB_HOST_PORT:-3000}`. The browser calls the API directly, so `NEXT_PUBLIC_API_URL` (build arg `AGENTEVAL_WEB_API_URL`, default `http://localhost:8000`) is baked into the bundle at build time, and the API's CORS list (`AGENTEVAL_CORS_ORIGINS`) must contain the dashboard's origin. **API key (ADR-012 D).** On first use the dashboard shows an "API key" screen. The key is kept in the tab's `sessionStorage` (gone when the tab closes), sent only as `Authorization: Bearer`, and forgotten by **Sign out** in the sidebar. A 401 (invalid, revoked or expired key) returns you to the key screen with a message; a 403 on cancel or replay says the key lacks the `write` scope (a `read` key can browse). Create a key with `docker compose exec api python -m agenteval_api.keys create --name dashboard --scopes read,write`. If the API runs with `AGENTEVAL_AUTH_ENABLED=false` enter any value. Keep both ports bound to localhost unless you put a TLS proxy in front. Details: [apps/web/README.md](apps/web/README.md).
 
 ## API
 
-The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style `application/problem+json`.
+The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style `application/problem+json`. **Every `/api/v1` route needs an API key** with the route's scope: `read` for `GET`, `write` for creating, cancelling, replaying and freezing, `admin` for `/keys`. Missing, invalid, revoked or expired keys get 401 (`WWW-Authenticate: Bearer`), a key without the scope gets 403, and a key over its per-minute budget gets 429 with `Retry-After` and `X-RateLimit-*`. See [docs/api/auth.md](docs/api/auth.md).
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/health`, `/ready` | liveness; readiness checks Postgres and Redis (503 if either is down) |
+| GET | `/health`, `/ready` | open (no key). Liveness; readiness checks Postgres and Redis (503 if either is down). `/metrics` is open too |
+| POST, GET | `/api/v1/keys` | `admin`. Create a key (201; the full `key` is returned once) / list keys (never secrets) |
+| DELETE | `/api/v1/keys/{prefix}` | `admin`. Revoke; 204, idempotent; 404 unknown |
 | POST | `/api/v1/agents` | 201; 409 if the name is taken |
 | GET | `/api/v1/agents` | newest first, keyset-paged (`after`, `limit` 1–200); each agent has its `latest_version` (number, provider, model, tools); `{agents, next_after}` |
 | GET | `/api/v1/agents/{id}` | |
@@ -429,7 +440,7 @@ The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style 
 | GET | `/api/v1/workers` | live workers first, keyset-paged; each has an `alive` flag (not stopped, heartbeat within 3 × lease TTL); `{workers, next_after}` |
 | GET | `/api/v1/stats/overview` | `window_h` 1–720 (default 24): evaluation and run counts, success rate, run latency p50/p95, cost and tokens, active workers, queue depth |
 
-The dashboard endpoints (the lists and `/stats/overview`) are defined in [docs/api/read.md](docs/api/read.md). CORS allows only the origins in `AGENTEVAL_CORS_ORIGINS` (default `http://localhost:3000`), for `GET` and `POST`.
+The dashboard endpoints (the lists and `/stats/overview`) are defined in [docs/api/read.md](docs/api/read.md). CORS allows only the origins in `AGENTEVAL_CORS_ORIGINS` (default `http://localhost:3000`), for `GET` and `POST`, with the `Authorization`, `Content-Type` and `Idempotency-Key` request headers (no cookies).
 
 The full reference for the Phase 4 endpoints is [docs/api/evaluations.md](docs/api/evaluations.md). `POST /tasks` also accepts `dataset_id`, `difficulty` and a **write-only** `evaluation` spec: responses only say `has_evaluation`. `RunRead` gains `evaluation_id` and `repetition`, and attempts gain `sandbox_image_id`.
 
@@ -502,7 +513,8 @@ ANTHROPIC_API_KEY=sk-ant-...                # passed to the worker container onl
 
 ```text
 packages/core/agenteval_core/
-  config, db, states (state machine), hashing, logging (with secret redaction)
+  config, db, states (state machine), hashing, auth (API-key format and hashing),
+  logging (with secret redaction)
   models/, schemas/, repositories/, services/, queue/
   reliability/  state machines, failure taxonomy, retry policy and backoff, lease timing,
                 lease keeper process
@@ -515,16 +527,17 @@ packages/core/agenteval_core/
 packages/core/migrations/       Alembic: 0001 (tasks, runs, attempts), 0002 (agent runtime),
                                 0003 (datasets, evaluations, artifacts, attempt evaluations, scores),
                                 0004-0009 (reliability: leases, failure reasons, budgets, worker stop
-                                reasons, evaluation leases, replays)
-apps/api/agenteval_api/         FastAPI app, deps, error mapping (sanitised 422s), routes/
+                                reasons, evaluation leases, replays), 0010 (api_keys)
+apps/api/agenteval_api/         FastAPI app, deps, auth (scope guard), ratelimit, keys (operator CLI), error mapping
+                                (sanitised 422s), routes/
 apps/worker/agenteval_worker/   main (signals, drain), consumer, executor, agent_runner,
                                 evaluation_runner, reconciler, lease_manager, trajectory writer,
                                 sandbox/ (session, evaluation, workspace), providers/
 infrastructure/docker/          api, worker and sandbox Dockerfiles
 tests/integration/              testcontainers Postgres 16 + Redis 7 (real migrations)
 tests/e2e/                      against the running compose stack (incl. Phase 4 scenarios)
-docs/architecture/, docs/api/   evaluation architecture and API reference
-docs/decisions/                 ADR-001 … ADR-009
+docs/architecture/, docs/api/   evaluation architecture and API reference (incl. auth.md)
+docs/decisions/                 ADR-001 … ADR-012
 docker-compose.yml              the dev stack (CPU weights, artifact volume)
 docker-compose.e2e.yml          short lease timings, applied by `make e2e`
 ```
@@ -570,7 +583,16 @@ The standard suite uses only the fake provider and makes no real model calls. It
 - **API tests:** `/metrics` exposition, route-template labels, `unmatched`, the endpoint excluded from its own numbers, and a 200 with both sources down.
 - **Integration tests** (real Postgres, Redis and Docker): the scrape-time gauges against seeded rows and streams, a broken Redis or Postgres counted without failing the scrape, and the executor, reconciler and evaluation runner moving the run, model, tool and evaluation metrics.
 
+**Phase 8 tests (authentication, scopes, rate limits):**
+
+- **Unit tests:** key format and parsing, constant-time digest comparison, scope parsing, and log redaction of `ae_...` keys, bearer text and `Authorization` headers.
+- **Integration tests** (real Postgres and Redis): the key lifecycle (create returns the plaintext once, only a digest is stored, revoke, expiry, `last_used_at` written at most once a minute), the CLI, migration `0010` (constraints, a downgrade that refuses while keys exist), a 401/403 matrix over **every** `/api/v1` route found in the app, a sweep that fails when a route has no scope dependency (or the OpenAPI schema lacks its security requirement), the key endpoints, authentication disabled, and the rate limiter (429 and headers, separate read and write budgets, per-key counters, window reset, atomicity under concurrency, Redis down allows the request and counts it).
+- **Fixtures:** the integration `client` sends a fresh admin key; the e2e helpers and `benchmarks/run.py` use `AGENTEVAL_E2E_API_KEY` / `AGENTEVAL_BENCH_API_KEY`, or create a short-lived key through the CLI in the `api` container.
+- **E2E:** `tests/e2e/test_auth_e2e.py` shows the running stack refuses keyless requests, a `read` key cannot write, and revocation takes effect at once.
+- **Dashboard:** key storage, the bearer header, 401 returning to the key screen, Sign out, and the 403 message on cancel and replay.
+
 **E2E configuration:**
+- **API key.** The suite sends `AGENTEVAL_E2E_API_KEY` if set; otherwise it creates one per session with `docker compose exec -T api python -m agenteval_api.keys create` (admin scopes, expires in a day), so `make e2e` stays self-contained.
 - **Short lease timings.** `make e2e` runs `docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --no-deps --wait worker` first, so the worker uses a 15 s lease, 2 s heartbeat and 1 s reconcile tick (`docker-compose.e2e.yml`, values that pass startup validation). The crash scenarios then recover in seconds, and the older scenarios behave the same. Those timings are only for this suite: run `make up` (or `docker compose up -d worker`) afterwards to go back to the 30 s defaults. The crash scenarios call `docker compose kill -s SIGKILL worker` and `docker compose up -d worker` with both files, so the timings survive the restart.
 - **Redis.** The duplicate-dispatch scenario also needs Redis, read from `AGENTEVAL_E2E_REDIS_URL` (default `redis://127.0.0.1:56379/0`).
 - The E2E suite reads `AGENTEVAL_E2E_URL` (default `http://localhost:8000`).
@@ -597,7 +619,7 @@ This is a **research and portfolio sandbox, not a hardened multi-tenant security
 - **Agent tools** add a per-call timeout, the post-call reaper, argv-only execution and an allowlist for `shell`.
   - **The allowlist and path checks are policy, not the isolation boundary.** The container is the boundary: an agent allowed `sh` can do anything the container permits.
 - **Prompt injection through task files and tool output is expected.** Its reach is limited to the version's tools inside the container, and a runaway agent is stopped by its step, token, cost and time limits.
-- **Model credentials** live only in the worker's environment. They are never passed into sandbox containers, never in prompts, and the API image doesn't install the SDK. Structured logs redact `sk-ant-…` values and credential-named fields (`api_key`, `authorization`, `x-api-key`, …).
+- **Model credentials** live only in the worker's environment. They are never passed into sandbox containers, never in prompts, and the API image doesn't install the SDK. Structured logs redact `sk-ant-…` values, `ae_…` API keys, `Bearer …` text and credential-named fields (`api_key`, `authorization`, `x-api-key`, …).
 - **Image allowlist:** tasks may only use images listed in `AGENTEVAL_IMAGE_ALLOWLIST`. The worker never pulls images.
 - **The worker mounts `/var/run/docker.sock`, which is host-root equivalent.**
   - The worker is therefore a trusted component and runs as root in its container.
@@ -607,7 +629,9 @@ This is a **research and portfolio sandbox, not a hardened multi-tenant security
   - **Residual risk:** candidate code runs inside the test process, so it can read `/eval` while it's being graded, and could cheat in-process (C7). `io` checks are the robust choice when integrity matters most.
 - **Evaluation secrecy** (ADR-007): hidden files, check names, expected values and evaluator configuration never appear in API responses or model-visible data. Specs are write-only, every response goes through one public projection, and 422s are sanitised.
   - Evaluation log events carry only ids, statuses and categories. The one exception is an *unexpected* evaluator exception, which is logged with its traceback (operator-only).
-- **No authentication or rate limiting yet (Phase 8).** Compose binds every port to `127.0.0.1` only.
+- **Authentication and authorization (ADR-012 A, B).** Every `/api/v1` request needs an API key (`ae_<prefix>_<secret>`, 256 bits of randomness; only its SHA-256 is stored, compared in constant time). Keys have `read`, `write` and `admin` scopes, can expire and can be revoked; a test fails if any route lacks a scope. The first key is minted by an operator CLI inside the API container (no anonymous endpoint). `/health`, `/ready` and `/metrics` are open: `/metrics` is meant for the internal network only. The platform is single-tenant (scopes, not per-object ownership).
+- **Rate limiting (ADR-012 C).** A per-key, per-minute budget for reads (600) and writes (120) in Redis, 429 with `Retry-After`. It **fails open** if Redis is down (logged and counted), because Redis is never the authority.
+- **Limits of this model.** Keys are bearer credentials: anyone holding one has its scopes, so use TLS (the dashboard and API are plain HTTP on localhost by default) and keep keys out of code. There is no per-user audit beyond the key name, no key rotation automation, and the dashboard keeps its key in `sessionStorage`, which any script running on the dashboard's origin can read. `AGENTEVAL_AUTH_ENABLED=false` removes all of this and is for local experiments only. Compose still binds every port to `127.0.0.1`.
 
 ## Known limitations (by design; fixed in the phase noted)
 
@@ -617,7 +641,7 @@ This is a **research and portfolio sandbox, not a hardened multi-tenant security
   - **Recovery needs a live worker,** because the reconciler runs inside the workers. Recovery takes about one lease TTL (30 s by default); a cancel of a running run takes up to one heartbeat (10 s) plus the runtime's next check.
   - **Failure handling is tested, not load-tested.** Behaviour under sustained load, many workers and throughput are Phase 7 and nothing about them is claimed.
   - **A batch created without `Idempotency-Key`** whose dispatch fails isn't re-dispatched by the client, but the reconciler republishes its `QUEUED` runs.
-- **No authentication or rate limiting (Phase 8).** Compose binds every port to `127.0.0.1`. No web UI yet (Phase 8).
+- **Authentication is API keys only (Phase 8).** No users, no OAuth, no per-object ownership, no TLS termination in the stack (the production reverse proxy is a later Phase 8 step).
 - **Metrics are scraped and traces are an opt-in export** (see [Observability](#observability)); beyond them, observability is structured JSON logs (with `run_id`, `task_id`, `attempt_no`, `worker_id`), the trajectory, and the run, attempt, evaluation and `workers` rows.
 - **Agent runs:**
   - Budgets are checked between model calls (the worst-case overshoot is one call).

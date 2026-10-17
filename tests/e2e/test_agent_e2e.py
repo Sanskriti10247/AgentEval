@@ -14,6 +14,8 @@ from typing import Any
 import httpx
 import pytest
 
+from tests.e2e.bench import api_headers
+
 pytestmark = pytest.mark.e2e
 
 BASE_URL = os.environ.get("AGENTEVAL_E2E_URL", "http://localhost:8000")
@@ -47,6 +49,7 @@ def http() -> httpx.Client:
         except httpx.ConnectError:
             pytest.skip(f"API not reachable at {BASE_URL}; run `make up && make migrate`")
         assert ready.status_code == 200, ready.text
+        c.headers.update(api_headers())
         yield c
 
 

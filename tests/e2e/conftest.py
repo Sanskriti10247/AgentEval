@@ -21,6 +21,7 @@ from tests.e2e.bench import (
     Batch,
     ReadOnlyDB,
     all_results,
+    api_headers,
     create_agent,
     create_dataset,
     start_evaluation,
@@ -36,6 +37,7 @@ def stack() -> Iterator[httpx.Client]:
         except httpx.ConnectError:
             pytest.skip(f"API not reachable at {BASE_URL}; run `make up && make migrate`")
         assert ready.status_code == 200, ready.text
+        c.headers.update(api_headers())
         yield c
 
 

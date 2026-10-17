@@ -67,7 +67,8 @@ web-check:  ## Dashboard gates: typecheck, lint, test, build
 bench-smoke:  ## Quick benchmark sanity run: 5 noop runs, 1 worker (wipes the stack's data; make up && make migrate first)
 	AGENTEVAL_BENCH_ALLOW_RESET=1 uv run python -m benchmarks.run --workload noop-command --runs 5 --workers 1 --concurrency 2 --repeat 1 --label smoke --out-dir benchmarks/results/smoke
 
-bench:  ## Full ADR-011 matrix (hours; WIPES the stack's data and rescales the worker service), then render the report
+bench:  ## Full ADR-011 matrix (hours; WIPES the stack's data, rescales the worker service, recreates the api without rate limits), then render the report
+	AGENTEVAL_RATE_LIMIT_READ_PER_MIN=0 AGENTEVAL_RATE_LIMIT_WRITE_PER_MIN=0 $(COMPOSE) up -d --no-deps --wait api
 	AGENTEVAL_BENCH_ALLOW_RESET=1 uv run python -m benchmarks.matrix
 	uv run python -m benchmarks.report
 

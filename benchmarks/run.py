@@ -32,6 +32,7 @@ import asyncpg
 import httpx
 
 from benchmarks import metrics, reset
+from benchmarks.apikey import auth_headers
 from benchmarks.sampler import Sampler, compose_project, host_mem_available_mib
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -241,6 +242,12 @@ async def submit_all(
 
     t0 = time.perf_counter()
     await asyncio.gather(*(one() for _ in range(runs)))
+    if "http_429" in failures:
+        raise RuntimeError(
+            "the API rate-limited the benchmark (429); a benchmark submits far more than the "
+            "default write budget. Run the API with AGENTEVAL_RATE_LIMIT_WRITE_PER_MIN=0 "
+            "(`make bench` does this for you), then rerun."
+        )
     return {
         "submit_s": time.perf_counter() - t0,
         "submitted": len(latencies),
@@ -301,6 +308,7 @@ async def run_scenario(scn: Scenario, repeat: int, repeats: int) -> Path:
     }
     async with httpx.AsyncClient(
         base_url=scn.base_url, timeout=60,
+        headers=await asyncio.to_thread(auth_headers, "AGENTEVAL_BENCH_API_KEY", "bench"),
         limits=httpx.Limits(max_connections=SUBMIT_PARALLELISM * 2),
     ) as client:  # fmt: skip
         ready = await client.get("/ready")

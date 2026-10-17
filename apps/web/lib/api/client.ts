@@ -1,3 +1,4 @@
+import { getApiKey, rejectApiKey } from "../auth";
 import type {
   AgentPage,
   AgentRead,
@@ -87,12 +88,14 @@ interface RequestOptions {
 
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const url = buildUrl(path, opts.params);
+  const apiKey = getApiKey();
   let response: Response;
   try {
     response = await fetch(url, {
       method: opts.method ?? "GET",
       headers: {
         Accept: "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
@@ -112,8 +115,20 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
     }
   }
   if (!response.ok) {
-    const { message, title, detail } = describeProblem(body, response.status);
-    throw new ApiError(message, response.status, title, detail);
+    const problem = describeProblem(body, response.status);
+    let { message } = problem;
+    if (response.status === 401) {
+      // Invalid, revoked or expired (or none was sent): the gate asks for a key again.
+      if (apiKey) rejectApiKey();
+      message = "The API rejected the API key (it may be invalid, revoked or expired).";
+    } else if (response.status === 403) {
+      // The server's detail names the missing scope: "This API key lacks the write scope".
+      message = problem.detail ?? "This API key lacks the scope this action needs.";
+    } else if (response.status === 429) {
+      const wait = response.headers.get("Retry-After");
+      message = `${message}${wait ? ` Retry in ${wait} s.` : ""}`;
+    }
+    throw new ApiError(message, response.status, problem.title, problem.detail);
   }
   return body as T;
 }

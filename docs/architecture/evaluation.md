@@ -199,7 +199,7 @@ Deterministic FakeProvider agents (`fixer` with 2 repetitions, `quitter`, `cheat
 | Rescoring through the API (D8) | **deferred (R1)** |
 | Re-running checks from stored snapshots | deferred (needs a new job type) |
 | Attempt retries, leases and heartbeats, recovery of stuck PENDING/RUNNING evaluations and of the A1 crash gap, cancellation API, dead-letter handling | **done in Phase 5** ([ADR-009](../decisions/ADR-009-reliability-and-recovery.md)) |
-| Authentication, authorization, rate limiting | **Phase 8** |
+| Authentication, authorization, rate limiting | Phase 8 (built: API keys, scopes, per-key limits; see [auth.md](../api/auth.md)) |
 | LLM-as-judge | **deferred (D5)** |
 | Metrics, tracing, dashboards | Phase 6 |
 | Performance and throughput benchmarks | Phase 7 |
