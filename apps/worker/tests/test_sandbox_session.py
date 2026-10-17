@@ -223,7 +223,15 @@ def test_backstop_kills_the_container_if_timeout_never_fires(
     with pytest.raises(SandboxError, match="backstop"):
         session.exec_tool(["sleep", "100"], timeout_s=0.5)
     assert time.monotonic() - t0 < 5
-    session.container.reload()
+    # `docker kill` only delivers the signal: the exec stream can close (and the
+    # backstop return) a few ms before the daemon flips the container's state
+    # from "running". The claim is that the container does stop, so wait for that.
+    deadline = time.monotonic() + 10
+    while True:
+        session.container.reload()
+        if session.container.status != "running" or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
     assert session.container.status != "running"
 
 

@@ -1,5 +1,11 @@
 # Local development stack. Sandbox containers are NOT compose services: the
 # worker creates them on demand as siblings through the mounted Docker socket.
+#
+# CPU weights (ADR-008 deployment note): on a shared host, postgres, the API and
+# the worker (which hosts the lease keeper and the reconciler) must not be starved
+# by sandbox containers, or heartbeats and cancellations stall. They get 4x the
+# Docker default weight of 1024 (`cpu_shares`); sandbox containers keep the
+# default. Weights only matter under contention: they reserve nothing when idle.
 x-app-env: &app-env
   AGENTEVAL_DATABASE_URL: postgresql+asyncpg://agenteval:agenteval@postgres:5432/agenteval
   AGENTEVAL_REDIS_URL: redis://redis:6379/0
@@ -11,6 +17,7 @@ x-app-env: &app-env
 services:
   postgres:
     image: postgres:16
+    cpu_shares: 4096
     environment:
       POSTGRES_USER: agenteval
       POSTGRES_PASSWORD: agenteval
@@ -42,6 +49,7 @@ services:
     build:
       context: .
       dockerfile: infrastructure/docker/api.Dockerfile
+    cpu_shares: 4096
     environment: *app-env
     command: ["uvicorn", "agenteval_api.main:app", "--host", "0.0.0.0", "--port", "8000",
               "--reload", "--reload-dir", "/app/packages/core", "--reload-dir", "/app/apps/api"]
@@ -58,6 +66,7 @@ services:
     build:
       context: .
       dockerfile: infrastructure/docker/worker.Dockerfile
+    cpu_shares: 4096
     environment:
       <<: *app-env
       AGENTEVAL_WORKER_CONCURRENCY: ${AGENTEVAL_WORKER_CONCURRENCY:-2}

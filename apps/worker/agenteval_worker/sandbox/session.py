@@ -54,6 +54,8 @@ FILE_COPY_TIMEOUT_S = 30
 TOOL_KILL_AFTER_S = 1
 TOOL_BACKSTOP_MARGIN_S = 8
 REAP_TIMEOUT_S = 10
+# How long to wait for Docker to record OOMKilled after an exec exited 137.
+OOM_SETTLE_S = 3.0
 # Environment for tool execs only (S1 execs are unchanged). No bytecode cache:
 # CPython validates .pyc files by source size + mtime in whole seconds, so an
 # agent's same-size edit within the same second as a previous import would run
@@ -304,9 +306,22 @@ class SandboxSession:
         self.container.reload()
         return self.container.attrs.get("Image")
 
-    def oom_killed(self) -> bool:
-        self.container.reload()
-        return bool(self.container.attrs.get("State", {}).get("OOMKilled", False))
+    def oom_killed(self, *, settle_s: float = 0.0) -> bool:
+        """Docker's OOMKilled flag for the container.
+
+        The daemon sets it when it processes the kernel's OOM event, which can
+        land a few ms after the killed exec's stream has closed. A caller that
+        already has evidence of a SIGKILL (exit 137) passes settle_s to wait up
+        to that long for the flag instead of reading a stale False.
+        """
+        deadline = time.monotonic() + settle_s
+        while True:
+            self.container.reload()
+            if self.container.attrs.get("State", {}).get("OOMKilled", False):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
 
     # -- files -------------------------------------------------------------------
 

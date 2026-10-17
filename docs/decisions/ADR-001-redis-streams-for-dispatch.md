@@ -27,6 +27,6 @@ Use one Redis stream, `runs.dispatch`, with one consumer group, `workers`.
 | Postgres `FOR UPDATE SKIP LOCKED` | Genuinely simpler (one system, no dual write). **This is the documented fallback** if Redis stops paying its way |
 
 ## Consequences
-- **Two systems means a dual write.** The API commits the run to Postgres first and then `XADD`s. If the `XADD` fails, the API returns 503 and the run stays `QUEUED`. A client retry with the same `Idempotency-Key` re-dispatches it. Phase 5 adds a reconciler so recovery no longer depends on the client.
+- **Two systems means a dual write.** The API commits the run to Postgres first and then `XADD`s. If the `XADD` fails, the API returns 503 and the run stays `QUEUED`. A client retry with the same `Idempotency-Key` re-dispatches it. Phase 5 added a reconciler (redispatch of lost `QUEUED` runs and reclaim of pending entries), so recovery no longer depends on the client; see [ADR-009](ADR-009-reliability-and-recovery.md).
 - **Duplicate messages are expected and harmless.** The claim is a conditional `UPDATE ... WHERE status='QUEUED'` (ADR-002).
 - **Note on redis-py ≥ 8:** its default `socket_timeout` is 5 s. A blocking read must use a longer socket timeout (`redis_for_blocking_reads`), or it fails after 5 s.

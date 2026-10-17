@@ -161,7 +161,7 @@ The trajectory stores operational data only: model usage, visible text, tool inp
 - **Budgets are checked between model calls,** so the worst case is overshooting by one call, whose output is bounded by `max_tokens`.
 - **Calls are non-streaming.** Very large `max_tokens_per_call` values may approach HTTP timeouts. Streaming is future work.
 - **Prices are list-price estimates:** no batch or volume discounts, no `inference_geo` multiplier, 5-minute cache writes only.
-- **A worker crash mid-run still leaves the run RUNNING** until Phase 5 adds leases. The trajectory written up to that point is kept.
+- **A worker crash mid-run left the run RUNNING** in Phase 3. The trajectory written up to that point is kept. *Update (Phase 5): leases and the reconciler recover it as a new attempt; see [ADR-009](ADR-009-reliability-and-recovery.md).*
 
 ## Deviations from the approved design (found while implementing)
 

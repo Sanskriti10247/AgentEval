@@ -198,4 +198,8 @@ class ModelProvider(Protocol):
         tools: list[ToolSpec],
         task_prompt: str,
         settings: dict[str, Any],
-    ) -> ModelSession: ...
+        attempt_no: int = 1,
+    ) -> ModelSession:
+        """attempt_no is the run attempt (1-based). Real providers ignore it;
+        the scripted fake uses it to fail only some attempts."""
+        ...

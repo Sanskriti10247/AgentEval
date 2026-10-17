@@ -167,6 +167,7 @@ class AgentRunner:
                 tools=setup.toolset.specs(),
                 task_prompt=task.instructions,
                 settings=dict(version.model_settings),
+                attempt_no=attempt.attempt_no,
             )
             ctx = AgentContext(
                 run_id=attempt.run_id,

@@ -29,6 +29,7 @@ from agenteval_core.states import Outcome
 from agenteval_worker.sandbox.session import (
     DEADLINE_LABEL,
     MANAGED_LABEL,
+    OOM_SETTLE_S,
     BoundedBuffer,
     ContainerSpec,
     SandboxError,
@@ -113,7 +114,9 @@ class DockerSandbox:
             if spec.files:
                 session.write_files(spec.files)
             result = session.exec_until_deadline(spec.command, spec.timeout_s)
-            oom_killed = session.oom_killed()
+            oom_killed = session.oom_killed(
+                settle_s=OOM_SETTLE_S if result.exit_code == 137 else 0.0
+            )
 
             if result.timed_out:
                 outcome = Outcome.TIMEOUT

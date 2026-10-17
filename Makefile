@@ -1,6 +1,8 @@
 .PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt
 
 COMPOSE := docker compose
+# The e2e suite runs the worker with short lease timings (docker-compose.e2e.yml).
+COMPOSE_E2E := docker compose -f docker-compose.yml -f docker-compose.e2e.yml
 
 help:  ## Show targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  %-14s %s\n", $$1, $$2}'
@@ -32,7 +34,9 @@ test: sandbox-image  ## Unit + integration + sandbox tests (needs Docker)
 test-unit:  ## Tests that need no Docker at all
 	uv run pytest packages/core/tests apps/worker/tests/test_bounded_buffer.py
 
-e2e:  ## Full-stack test against the running compose stack (make up && make migrate first)
+e2e:  ## Full-stack tests against the compose stack (make up && make migrate first); recreates the worker with short lease timings
+	$(COMPOSE_E2E) up -d --no-deps --wait worker
+	@sleep 6
 	uv run pytest tests/e2e -m e2e -v
 
 lint:  ## Ruff lint + format check + mypy

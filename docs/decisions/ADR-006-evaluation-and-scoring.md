@@ -135,8 +135,8 @@ Components are each in [0, 1] and stored separately:
 
 - **A run shows COMPLETED a few seconds before its evaluation exists.** Batch progress is derived, never stored.
 - **One extra container per graded attempt,** never alive at the same time as the agent's container, so peak resource use doesn't change.
-- **Crash gap (A1):** if a worker dies between the `finish_attempt` commit and tx A, the attempt has no evaluation row and its in-memory snapshot is lost. If it dies after tx A or tx B, the row stays PENDING or RUNNING. Both cases can be found by query; **nothing recovers them yet (Phase 5).** Such a batch never reports `complete`.
-- **Shutdown during evaluation** marks it ERROR ("interrupted: worker_shutdown") on a best-effort basis. There's no cooperative cancellation.
+- **Crash gap (A1):** if a worker dies between the `finish_attempt` commit and tx A, the attempt has no evaluation row and its in-memory snapshot is lost. If it dies after tx A or tx B, the row stays PENDING or RUNNING. Both cases can be found by query; **nothing recovered them in Phase 4.** Such a batch never reported `complete`. *Update (Phase 5): the reconciler now records the missing evaluation (A1 recovery) and recovers an expired `RUNNING` evaluation (E9a/E9b); see [ADR-009](ADR-009-reliability-and-recovery.md).*
+- **Shutdown during evaluation** marked it ERROR ("interrupted: worker_shutdown") on a best-effort basis. There's no cooperative cancellation. *Update (Phase 5): shutdown now releases the row for another grading attempt (E8a), or ERROR `retries_exhausted` when the budget is spent (E8b).*
 - **Evaluation containers use the task's image *tag*.** The agent's resolved image ID is recorded (A5), but nothing verifies that grading ran on the same image.
 - **A `python_tests` check fails closed** if the task's image lacks pytest. The cause is the environment, but it's recorded as `tests_failed`.
 - **`normalized_paths` is persisted only in the evaluation's `integrity`,** not with the artifact.
@@ -145,7 +145,7 @@ Components are each in [0, 1] and stored separately:
 
 - rescoring through the API (D8, R1)
 - re-running checks from stored snapshots
-- attempt retries, leases and heartbeats, recovery of stuck evaluations, cancellation and dead-letter handling (Phase 5)
+- ~~attempt retries, leases and heartbeats, recovery of stuck evaluations, cancellation and dead-letter handling~~ (done in Phase 5, ADR-009)
 - authentication, authorization and rate limiting (Phase 8)
 - LLM-as-judge (D5)
 - metrics and tracing (Phase 6)
