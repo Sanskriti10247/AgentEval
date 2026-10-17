@@ -70,6 +70,13 @@ class EvaluationRead(_Read):
     progress: Progress
 
 
+class EvaluationPage(_Read):
+    """GET /evaluations: newest first; each batch carries its progress summary."""
+
+    evaluations: list[EvaluationRead]
+    next_after: str | None
+
+
 class ResultRow(_Read):
     run_id: uuid.UUID
     task_id: uuid.UUID

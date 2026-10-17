@@ -6,10 +6,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Header, Query, Response, status
 
-from agenteval_api.deps import EvaluationServiceDep
+from agenteval_api.deps import EvaluationServiceDep, ReadServiceDep
 from agenteval_core.schemas.evaluation import (
     Compare,
     EvaluationCreate,
+    EvaluationPage,
     EvaluationRead,
     ResultPage,
     Summary,
@@ -38,6 +39,21 @@ async def create_evaluation(
     if not result.created:
         response.status_code = status.HTTP_200_OK
     return result.evaluation
+
+
+@router.get("", response_model=EvaluationPage)
+async def list_evaluations(
+    read: ReadServiceDep,
+    agent_version_id: Annotated[uuid.UUID | None, Query()] = None,
+    dataset_id: Annotated[uuid.UUID | None, Query()] = None,
+    after: Annotated[str | None, Query(max_length=100)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> EvaluationPage:
+    """Batches newest first, keyset-paged, each with the same `progress` summary
+    as GET /evaluations/{id}."""
+    return await read.evaluations(
+        agent_version_id=agent_version_id, dataset_id=dataset_id, after=after, limit=limit
+    )
 
 
 # Declared before /{evaluation_id} so "compare" isn't parsed as an id.

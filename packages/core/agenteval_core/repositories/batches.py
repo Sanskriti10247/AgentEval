@@ -329,3 +329,49 @@ class BatchRepository:
             {str(s): int(n) for s, n in evals.all()},
             int(awaiting.scalar_one()),
         )
+
+    async def progress_counts_many(
+        self, evaluation_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[dict[str, int], dict[str, int], int]]:
+        """progress_counts() for several batches in three grouped queries (the
+        list endpoint: no per-batch round trips). Same definitions."""
+        runs_by: dict[uuid.UUID, dict[str, int]] = {i: {} for i in evaluation_ids}
+        evals_by: dict[uuid.UUID, dict[str, int]] = {i: {} for i in evaluation_ids}
+        if not evaluation_ids:
+            return {}
+        latest = and_(RunAttempt.run_id == Run.id, RunAttempt.attempt_no == Run.attempt_count)
+        finished = Run.status.in_([RunStatus.COMPLETED, RunStatus.FAILED])
+        runs = await self._s.execute(
+            select(Run.evaluation_id, Run.status, func.count())
+            .where(Run.evaluation_id.in_(evaluation_ids))
+            .group_by(Run.evaluation_id, Run.status)
+        )
+        evals = await self._s.execute(
+            select(Run.evaluation_id, AttemptEvaluation.status, func.count())
+            .select_from(Run)
+            .join(RunAttempt, latest)
+            .join(AttemptEvaluation, AttemptEvaluation.attempt_id == RunAttempt.id)
+            .where(Run.evaluation_id.in_(evaluation_ids), finished)
+            .group_by(Run.evaluation_id, AttemptEvaluation.status)
+        )
+        awaiting = await self._s.execute(
+            select(Run.evaluation_id, func.count())
+            .select_from(Run)
+            .join(RunAttempt, latest)
+            .outerjoin(AttemptEvaluation, AttemptEvaluation.attempt_id == RunAttempt.id)
+            .where(
+                Run.evaluation_id.in_(evaluation_ids),
+                finished,
+                (AttemptEvaluation.id.is_(None))
+                | AttemptEvaluation.status.in_(["PENDING", "RUNNING"]),
+            )
+            .group_by(Run.evaluation_id)
+        )
+        for eid, status, n in runs.all():
+            assert eid is not None
+            runs_by[eid][str(status)] = int(n)
+        for eid, status, n in evals.all():
+            assert eid is not None
+            evals_by[eid][str(status)] = int(n)
+        waiting = {eid: int(n) for eid, n in awaiting.all()}
+        return {i: (runs_by[i], evals_by[i], waiting.get(i, 0)) for i in evaluation_ids}

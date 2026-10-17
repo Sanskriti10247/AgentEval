@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     evaluation_stream: str = "evaluations.dispatch"
     consumer_group: str = "workers"
 
+    # Browser origins the API answers CORS for (the dashboard). JSON list.
+    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+
     # Sandbox
     image_allowlist: list[str] = Field(default_factory=lambda: ["agenteval-sandbox:py312"])
     max_output_bytes: int = 64 * 1024
