@@ -57,6 +57,8 @@ class EvaluationRead(_Read):
     scoring_config: ScoringConfig
     scoring_config_hash: str
     created_at: datetime
+    # Set once a user cancelled the batch (F15); the batch's runs follow.
+    cancel_requested_at: datetime | None = None
     progress: Progress
 
 

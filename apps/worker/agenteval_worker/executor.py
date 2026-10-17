@@ -76,12 +76,15 @@ class _LeaseSlot:
     in `handle`'s call stack) need: the shared cancel token, and the attempt
     id once it exists (there is none yet while the run is still CLAIMED)."""
 
-    __slots__ = ("token", "attempt_id", "released")
+    __slots__ = ("token", "attempt_id", "released", "kill_on_cancel")
 
     def __init__(self, token: CancelToken) -> None:
         self.token = token
         self.released = False
         self.attempt_id: uuid.UUID | None = None
+        # A command task has no cancel token to poll, so a cancel request must
+        # kill its container (Step 8). Set once the attempt exists.
+        self.kill_on_cancel = False
 
 
 class Executor:
@@ -123,6 +126,8 @@ class Executor:
         self._artifact_save_deadline_s = artifact_save_deadline_s
         # In-flight agent runs, so shutdown can cancel them cooperatively.
         self._active: dict[uuid.UUID, CancelToken] = {}
+        # Fire-and-forget container kills, held so the loop doesn't drop them.
+        self._kills: set[asyncio.Task[int]] = set()
 
     def cancel_all(self, reason: str) -> int:
         """Cancel every in-flight agent run. Returns how many were cancelled."""
@@ -154,7 +159,7 @@ class Executor:
                     run.lease_epoch,
                     t_sent,
                     on_lease_lost=lambda: self._on_lease_lost(slot),
-                    on_cancel_requested=slot.token.cancel,
+                    on_cancel_requested=lambda reason: self._on_cancel_requested(slot, reason),
                     on_renewed=slot.token.set_deadline,
                 )
             try:
@@ -163,6 +168,7 @@ class Executor:
                     return
                 task, attempt, version = started
                 slot.attempt_id = attempt.id
+                slot.kill_on_cancel = task.task_type != "agent"
                 with structlog.contextvars.bound_contextvars(
                     task_id=str(task.id),
                     attempt_no=attempt.attempt_no,
@@ -225,6 +231,29 @@ class Executor:
             slot.released = True
             self._lease_manager.release("run", str(run.id), run.lease_epoch)
 
+    def _on_cancel_requested(self, slot: _LeaseSlot, reason: str) -> None:
+        """A keeper beat reported a cancel request for this run (F5). Called
+        from the lease manager's loop on every beat while the flag is set.
+        Cancels the shared token (an agent task stops cooperatively at its next
+        check). A command task can't be asked, so its container is killed by
+        attempt label: the sandbox returns and T-finish takes restart_cancel ->
+        p5_cancel (A4, R11), discarding the output. Repeating on each beat
+        covers a request that lands before the container exists. Latency:
+        up to one heartbeat interval plus the runtime's next check."""
+        if slot.released:
+            return
+        slot.token.cancel(reason)
+        if slot.kill_on_cancel and slot.attempt_id is not None:
+            self._kill_container(slot.attempt_id)
+            log.info("cancel_kill_requested", attempt_id=str(slot.attempt_id), reason=reason)
+
+    def _kill_container(self, attempt_id: uuid.UUID) -> None:
+        if self._kill_by_attempt_label is None:
+            return
+        task = asyncio.create_task(asyncio.to_thread(self._kill_by_attempt_label, str(attempt_id)))
+        self._kills.add(task)
+        task.add_done_callback(self._kills.discard)
+
     def _on_lease_lost(self, slot: _LeaseSlot) -> None:
         """Called from the lease manager's own asyncio tasks, not from
         `handle`'s call stack. Cancels the shared token (which, for an agent
@@ -235,10 +264,8 @@ class Executor:
         if slot.released:
             return  # a beat that raced the release: the attempt is already finished
         slot.token.cancel("lease_lost")
-        if slot.attempt_id is not None and self._kill_by_attempt_label is not None:
-            asyncio.create_task(
-                asyncio.to_thread(self._kill_by_attempt_label, str(slot.attempt_id))
-            )
+        if slot.attempt_id is not None:
+            self._kill_container(slot.attempt_id)
 
     async def _claim(self, msg: DispatchMessage) -> tuple[Run, float] | None:
         assert msg.run_id is not None

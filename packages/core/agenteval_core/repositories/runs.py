@@ -18,7 +18,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import func, insert, select, text, update
+from sqlalchemy import case, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,7 +31,12 @@ from agenteval_core.reliability.policy import (
     after_completed_attempt,
     after_failed_attempt,
 )
-from agenteval_core.reliability.taxonomy import FailureReason, WorkspaceCapture, is_retryable
+from agenteval_core.reliability.taxonomy import (
+    CancelReason,
+    FailureReason,
+    WorkspaceCapture,
+    is_retryable,
+)
 from agenteval_core.reliability.transitions import RunState
 from agenteval_core.states import (
     COMPLETED_OUTCOMES,
@@ -72,6 +77,50 @@ _FINISH_SQL = text(
 _CANCEL_SQL = text(
     "SELECT result, storage_keys FROM p5_cancel(:run, :attempt_id, :epoch, CAST(:attempt AS jsonb))"
 )
+
+
+# The longest a cancel statement waits for a row lock. The cancel API only ever
+# touches `runs` (never the attempt row or artifact work, ADR-008), so any
+# holder is a short transaction; this is the ceiling, not the expected wait.
+CANCEL_LOCK_TIMEOUT = text("SET LOCAL lock_timeout = '20s'")
+
+# The states a cancel request can still act on (R2, R13 cancel directly; R3/R5
+# and R11 are the owner's or the reconciler's for CLAIMED/RUNNING).
+CANCELLABLE_STATUSES = (
+    RunStatus.QUEUED,
+    RunStatus.RETRYING,
+    RunStatus.CLAIMED,
+    RunStatus.RUNNING,
+)
+_CANCEL_DIRECTLY = (RunStatus.QUEUED, RunStatus.RETRYING)
+
+
+class CancelDisposition(StrEnum):
+    """What a cancel request did, decided by the state that actually won."""
+
+    CANCELLED = "cancelled"  # QUEUED/RETRYING went straight to CANCELLED (R2, R13)
+    FLAGGED = "flagged"  # CLAIMED/RUNNING got the flag; the owner or reconciler finishes it
+    ALREADY = "already"  # CANCELLED or already flagged: idempotent repeat, nothing written
+    FINISHED = "finished"  # COMPLETED/FAILED: the terminal commit won (G7), nothing written
+    NOT_FOUND = "not_found"
+
+
+def cancel_values(reason: CancelReason) -> dict[str, Any]:
+    """The single guarded UPDATE behind every cancel request (run or batch).
+
+    One statement, so the decision is atomic with the guard: QUEUED/RETRYING
+    become CANCELLED with finished_at and no next_attempt_at (ck_runs_retrying,
+    ck_runs_cancelled_has_request), CLAIMED/RUNNING only get the flag
+    (ck_runs_cancel_states). Callers add the WHERE (status in CANCELLABLE and
+    cancel_requested_at IS NULL)."""
+    direct = Run.status.in_([s.value for s in _CANCEL_DIRECTLY])
+    return {
+        "status": case((direct, RunStatus.CANCELLED.value), else_=Run.status),
+        "finished_at": case((direct, func.now()), else_=Run.finished_at),
+        "next_attempt_at": None,
+        "cancel_requested_at": func.now(),
+        "cancel_reason": reason.value,
+    }
 
 
 class FinishOutcome(StrEnum):
@@ -141,6 +190,56 @@ class RunRepository:
         )
         result = await self._s.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def request_cancel(
+        self, run_id: uuid.UUID, reason: CancelReason = CancelReason.USER
+    ) -> CancelDisposition:
+        """Cancel API, one run (F5, F15, G7). R2/R13: QUEUED/RETRYING ->
+        CANCELLED directly; CLAIMED/RUNNING: the flag only (the owner sees it
+        at R3 -> R5, on a keeper beat, or at T-finish -> restart_cancel; the
+        reconciler applies R5/R11 if the lease expires). Touches only `runs`.
+
+        The guard is in SQL, so a race with a finish resolves to exactly one
+        winner: a finish that committed first leaves 0 rows here and we answer
+        by the state that won (FINISHED -> 409, nothing written); a cancel that
+        committed first makes the owner's p5_finish see the flag (G7)."""
+        check_transition(RunStatus.QUEUED, RunStatus.CANCELLED)  # R2
+        check_transition(RunStatus.RETRYING, RunStatus.CANCELLED)  # R13
+        await self._s.execute(CANCEL_LOCK_TIMEOUT)
+        # A status that bounces between our UPDATE and the re-read (RETRYING ->
+        # QUEUED by the reconciler, say) is simply tried again; 5 rounds is far
+        # more than any real interleaving needs.
+        for _ in range(5):
+            status = (
+                await self._s.execute(
+                    update(Run)
+                    .where(
+                        Run.id == run_id,
+                        Run.status.in_([s.value for s in CANCELLABLE_STATUSES]),
+                        Run.cancel_requested_at.is_(None),
+                    )
+                    .values(**cancel_values(reason))
+                    .returning(Run.status)
+                    .execution_options(synchronize_session=False)
+                )
+            ).scalar_one_or_none()
+            if status is not None:
+                if status == RunStatus.CANCELLED:
+                    return CancelDisposition.CANCELLED
+                return CancelDisposition.FLAGGED
+            # 0 rows: re-read and answer by the state that actually won.
+            row = (
+                await self._s.execute(
+                    select(Run.status, Run.cancel_requested_at).where(Run.id == run_id)
+                )
+            ).one_or_none()
+            if row is None:
+                return CancelDisposition.NOT_FOUND
+            if row.status == RunStatus.CANCELLED or row.cancel_requested_at is not None:
+                return CancelDisposition.ALREADY
+            if row.status in (RunStatus.COMPLETED, RunStatus.FAILED):
+                return CancelDisposition.FINISHED
+        raise RuntimeError(f"run {run_id} kept changing state under a cancel request")
 
     async def mark_dispatched(self, run_ids: Sequence[uuid.UUID]) -> int:
         """Stamp `dispatched_at = now()` on runs just published (guarded by

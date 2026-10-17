@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
+from agenteval_core.reliability.taxonomy import CancelReason
 from agenteval_core.states import AttemptStatus, Outcome, RunStatus
 
 
@@ -33,6 +34,9 @@ class RunRead(BaseModel):
     claimed_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
+    # Cancellation (F5, F15): set once a cancel was requested; reason is 'user' or 'batch'.
+    cancel_requested_at: datetime | None
+    cancel_reason: CancelReason | None
 
 
 class RunAttemptRead(BaseModel):

@@ -71,7 +71,8 @@ from agenteval_core.states import Outcome, RunStatus
 
 log = get_logger(__name__)
 
-TERMINAL = frozenset({RunStatus.COMPLETED, RunStatus.FAILED})
+# CANCELLED counts as terminal for `complete` (Step 8): a cancelled batch completes.
+TERMINAL = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED})
 _UNFINISHED_EVAL = frozenset({EvaluationStatus.PENDING, EvaluationStatus.RUNNING})
 # RunStatus gained RETRYING and CANCELLED in Step 3 (reliability.transitions),
 # but the Progress.runs_by_status key set is a Phase 4 API contract: it must
@@ -85,6 +86,17 @@ _PHASE4_RUN_STATUSES = (
     RunStatus.COMPLETED,
     RunStatus.FAILED,
 )
+
+
+# Runs cancelled per transaction by a batch cancel: bounded so no single
+# statement holds many row locks or runs long (ADR-008 spirit).
+CANCEL_CHUNK = 100
+
+
+@dataclass(frozen=True)
+class CancelBatchResult:
+    evaluation: EvaluationRead
+    accepted: bool  # True: this call changed something (202); False: idempotent repeat (200)
 
 
 @dataclass(frozen=True)
@@ -332,6 +344,27 @@ class EvaluationService:
     async def get(self, evaluation_id: uuid.UUID) -> EvaluationRead:
         return await self._read(await self._get(evaluation_id))
 
+    async def cancel(self, evaluation_id: uuid.UUID) -> CancelBatchResult:
+        """Cancel a batch (F15): flag the batch (cancel_reason 'user'), then
+        cancel every non-terminal run with reason 'batch' in chunks of
+        CANCEL_CHUNK, one transaction each. Terminal runs are never touched
+        and already-written evaluations and scores stay as they are (F5:
+        cancellation never mutates metrics). Repeatable: a second call
+        finishes whatever a crashed first call left and changes nothing else."""
+        await self._get(evaluation_id)  # 404 before any write
+        changed = await self._batches.flag_cancel(evaluation_id)
+        await self._s.commit()
+        while True:
+            selected, cancelled = await self._batches.cancel_runs_chunk(evaluation_id, CANCEL_CHUNK)
+            await self._s.commit()
+            changed = changed or cancelled > 0
+            if selected == 0:
+                break
+        batch = await self._get(evaluation_id)
+        if changed:
+            log.info("evaluation_cancel_requested", evaluation_id=str(evaluation_id))
+        return CancelBatchResult(await self._read(batch), accepted=changed)
+
     async def results(self, evaluation_id: uuid.UUID, after: str | None, limit: int) -> ResultPage:
         batch = await self._get(evaluation_id)
         cursor = _parse_cursor(after) if after else None
@@ -431,6 +464,7 @@ class EvaluationService:
             scoring_config=ScoringConfig.model_validate(batch.scoring_config),
             scoring_config_hash=batch.scoring_config_hash,
             created_at=batch.created_at,
+            cancel_requested_at=batch.cancel_requested_at,
             progress=Progress(
                 runs_total=total,
                 runs_by_status={RunStatus(s): runs.get(s, 0) for s in _PHASE4_RUN_STATUSES},

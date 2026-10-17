@@ -930,7 +930,16 @@ async def test_lease_loss_removes_the_real_evaluation_container(
     _, on_lost = leases.held[("evaluation", str(eid))]
     on_lost()
     assert await asyncio.wait_for(task, 60) == eid
-    assert leftover_containers(run_id) == []
+
+    # Two removals race here by design (the lease-loss kill, on its own thread,
+    # and grading's own cleanup); Docker answers the loser "removal already in
+    # progress", so the container can still be listed for a moment after
+    # grade() returns. What matters is that it goes, not when the listing
+    # catches up.
+    async def containers_gone() -> bool:
+        return not leftover_containers(run_id)
+
+    await wait_until(containers_gone, timeout_s=30, interval=0.2)
     ev = await evaluation_of(sessionmaker, attempt.id)
     assert (ev.status, ev.lease_epoch, ev.finished_at) == ("RUNNING", 1, None)
     assert await scores_of(sessionmaker, eid) == []

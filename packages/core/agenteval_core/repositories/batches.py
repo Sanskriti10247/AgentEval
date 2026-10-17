@@ -16,7 +16,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, func, insert, select, tuple_
+from sqlalchemy import and_, func, insert, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,12 @@ from agenteval_core.models import (
     Task,
 )
 from agenteval_core.models.base import new_id
+from agenteval_core.reliability.taxonomy import CancelReason
+from agenteval_core.repositories.runs import (
+    CANCEL_LOCK_TIMEOUT,
+    CANCELLABLE_STATUSES,
+    cancel_values,
+)
 from agenteval_core.states import RunStatus
 
 
@@ -87,6 +93,52 @@ class BatchRepository:
 
     async def get(self, evaluation_id: uuid.UUID) -> Evaluation | None:
         return await self._s.get(Evaluation, evaluation_id, populate_existing=True)
+
+    async def flag_cancel(self, evaluation_id: uuid.UUID) -> bool:
+        """Set the batch's own cancel flag (F15). True if this call set it,
+        False if it was already set (or the batch is gone: the caller has
+        checked existence). One guarded UPDATE; touches only `evaluations`."""
+        await self._s.execute(CANCEL_LOCK_TIMEOUT)
+        flagged = await self._s.execute(
+            update(Evaluation)
+            .where(Evaluation.id == evaluation_id, Evaluation.cancel_requested_at.is_(None))
+            .values(cancel_requested_at=func.now(), cancel_reason=CancelReason.USER.value)
+            .returning(Evaluation.id)
+            .execution_options(synchronize_session=False)
+        )
+        return flagged.scalar_one_or_none() is not None
+
+    async def cancel_runs_chunk(self, evaluation_id: uuid.UUID, limit: int) -> tuple[int, int]:
+        """Cancel up to `limit` of the batch's runs that are not terminal and
+        not yet flagged, with reason 'batch': R2/R13 straight to CANCELLED,
+        CLAIMED/RUNNING flag only (same single guarded UPDATE as the run
+        endpoint). Terminal runs are never selected, and the UPDATE re-checks
+        the guard, so a run that finished in between simply matches 0 rows.
+        Returns (selected, changed); the caller loops until nothing is
+        selected (a run that bounced, e.g. RUNNING -> RETRYING, shows up
+        again and is cancelled then). Every changed row is flagged, so it
+        leaves the selection and the loop terminates."""
+        await self._s.execute(CANCEL_LOCK_TIMEOUT)
+        guard = (
+            Run.evaluation_id == evaluation_id,
+            Run.status.in_([s.value for s in CANCELLABLE_STATUSES]),
+            Run.cancel_requested_at.is_(None),
+        )
+        ids = list(
+            (await self._s.execute(select(Run.id).where(*guard).order_by(Run.id).limit(limit)))
+            .scalars()
+            .all()
+        )
+        if not ids:
+            return 0, 0
+        changed = await self._s.execute(
+            update(Run)
+            .where(Run.id.in_(ids), *guard)
+            .values(**cancel_values(CancelReason.BATCH))
+            .returning(Run.id)
+            .execution_options(synchronize_session=False)
+        )
+        return len(ids), len(changed.all())
 
     async def get_by_key(self, key: str) -> Evaluation | None:
         result = await self._s.execute(select(Evaluation).where(Evaluation.idempotency_key == key))

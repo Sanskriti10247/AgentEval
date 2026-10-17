@@ -37,6 +37,11 @@ class Conflict(ServiceError):
     """A uniqueness rule was violated (e.g. agent name taken)."""
 
 
+class AlreadyFinished(Conflict):
+    """A cancel arrived after the run's terminal commit (G7): the result stands,
+    nothing was written. Fixed text, never run content."""
+
+
 class InvalidEvaluation(ServiceError):
     """An evaluation spec, batch or comparison request is invalid. Messages
     are fixed text: never spec content (D11)."""

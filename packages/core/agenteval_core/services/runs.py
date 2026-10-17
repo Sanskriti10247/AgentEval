@@ -8,11 +8,12 @@ from agenteval_core.logging import get_logger
 from agenteval_core.models import Run, RunAttempt, TrajectoryEvent
 from agenteval_core.queue.streams import RunQueue
 from agenteval_core.repositories.agents import AgentVersionRepository
-from agenteval_core.repositories.runs import RunRepository
+from agenteval_core.repositories.runs import CancelDisposition, RunRepository
 from agenteval_core.repositories.tasks import TaskRepository
 from agenteval_core.repositories.trajectory import TrajectoryRepository
 from agenteval_core.services.dispatch import stamp_dispatched
 from agenteval_core.services.errors import (
+    AlreadyFinished,
     DispatchUnavailable,
     IdempotencyConflict,
     InvalidRun,
@@ -27,6 +28,12 @@ log = get_logger(__name__)
 class SubmitResult:
     run: Run
     created: bool
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    run: Run
+    accepted: bool  # True: this call changed the run (202); False: idempotent repeat (200)
 
 
 class RunService:
@@ -90,6 +97,25 @@ class RunService:
         if run is None:
             raise NotFound(f"run {run_id} not found")
         return run
+
+    async def cancel(self, run_id: uuid.UUID) -> CancelResult:
+        """Request cancellation of one run (F5, F15; R2, R13, flag for
+        CLAIMED/RUNNING). One short guarded UPDATE on `runs` and a commit; the
+        response is the run as the winning state left it. A terminal run
+        (COMPLETED/FAILED) is a 409 with nothing written (G7)."""
+        disposition = await self._runs.request_cancel(run_id)
+        if disposition is CancelDisposition.NOT_FOUND:
+            await self._s.rollback()
+            raise NotFound(f"run {run_id} not found")
+        if disposition is CancelDisposition.FINISHED:
+            await self._s.rollback()
+            raise AlreadyFinished(f"run {run_id} already finished; it can no longer be cancelled")
+        await self._s.commit()
+        run = await self.get(run_id)
+        accepted = disposition is not CancelDisposition.ALREADY
+        if accepted:
+            log.info("run_cancel_requested", run_id=str(run_id), status=run.status)
+        return CancelResult(run=run, accepted=accepted)
 
     async def list_attempts(self, run_id: uuid.UUID) -> list[RunAttempt]:
         await self.get(run_id)
