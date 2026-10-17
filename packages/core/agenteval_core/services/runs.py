@@ -1,19 +1,27 @@
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agenteval_core.config import Settings
 from agenteval_core.logging import get_logger
 from agenteval_core.models import Run, RunAttempt, TrajectoryEvent
 from agenteval_core.queue.streams import RunQueue
 from agenteval_core.repositories.agents import AgentVersionRepository
-from agenteval_core.repositories.runs import CancelDisposition, RunRepository
+from agenteval_core.repositories.runs import (
+    BudgetExceeded,
+    CancelDisposition,
+    ReplayDisposition,
+    RunRepository,
+)
 from agenteval_core.repositories.tasks import TaskRepository
 from agenteval_core.repositories.trajectory import TrajectoryRepository
 from agenteval_core.services.dispatch import stamp_dispatched
 from agenteval_core.services.errors import (
     AlreadyFinished,
+    Conflict,
     DispatchUnavailable,
     IdempotencyConflict,
     InvalidRun,
@@ -36,9 +44,34 @@ class CancelResult:
     accepted: bool  # True: this call changed the run (202); False: idempotent repeat (200)
 
 
+@dataclass(frozen=True)
+class ReplayResult:
+    run: Run
+    accepted: bool  # True: this call replayed the run (202); False: same key repeated (200)
+
+
+def encode_cursor(created_at: datetime, run_id: uuid.UUID) -> str:
+    """`<created_at, UTC, microseconds, Z>|<id>`. No '+' so it survives an unencoded
+    query string; clients still treat it as opaque."""
+    stamp = created_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return f"{stamp}|{run_id}"
+
+
+def decode_cursor(after: str) -> tuple[datetime, uuid.UUID]:
+    try:
+        stamp, run_id = after.split("|", 1)
+        created_at = datetime.fromisoformat(stamp)
+        if created_at.tzinfo is None:
+            raise ValueError("naive timestamp")
+        return created_at, uuid.UUID(run_id)
+    except ValueError:
+        raise InvalidRun("invalid runs cursor") from None
+
+
 class RunService:
-    def __init__(self, session: AsyncSession, queue: RunQueue) -> None:
+    def __init__(self, session: AsyncSession, queue: RunQueue, settings: Settings) -> None:
         self._s = session
+        self._settings = settings
         self._runs = RunRepository(session)
         self._tasks = TaskRepository(session)
         self._queue = queue
@@ -48,6 +81,7 @@ class RunService:
         task_id: uuid.UUID,
         idempotency_key: str | None,
         agent_version_id: uuid.UUID | None = None,
+        max_attempts: int | None = None,
     ) -> SubmitResult:
         """Persist a QUEUED run, commit, then XADD.
 
@@ -68,16 +102,22 @@ class RunService:
             if await AgentVersionRepository(self._s).get(agent_version_id) is None:
                 raise NotFound(f"agent version {agent_version_id} not found")
 
-        run = await self._runs.create_queued(task_id, idempotency_key, agent_version_id)
+        budget = max_attempts if max_attempts is not None else self._settings.run_max_attempts
+        run = await self._runs.create_queued(task_id, idempotency_key, agent_version_id, budget)
         created = run is not None
         if run is None:
             assert idempotency_key is not None  # conflict is only possible with a key
             run = await self._runs.get_by_idempotency_key(idempotency_key)
             assert run is not None
-            if (run.task_id, run.agent_version_id) != (task_id, agent_version_id):
+            if (run.task_id, run.agent_version_id, run.max_attempts) != (
+                task_id,
+                agent_version_id,
+                budget,
+            ):
                 raise IdempotencyConflict(
                     f"Idempotency-Key {idempotency_key!r} was already used for a different "
-                    f"request (task {run.task_id}, agent version {run.agent_version_id})"
+                    f"request (task {run.task_id}, agent version {run.agent_version_id}, "
+                    f"max_attempts {run.max_attempts})"
                 )
         await self._s.commit()
 
@@ -116,6 +156,72 @@ class RunService:
         if accepted:
             log.info("run_cancel_requested", run_id=str(run_id), status=run.status)
         return CancelResult(run=run, accepted=accepted)
+
+    async def replay(
+        self, run_id: uuid.UUID, additional_attempts: int, idempotency_key: str | None
+    ) -> ReplayResult:
+        """R14 (F10, G4): give a FAILED run more attempts and queue it again.
+
+        One transaction holds the guarded FAILED -> QUEUED update and the
+        run_replays row; the stream publish and the dispatched_at stamp come
+        after the commit, like submit. If the publish fails the run is QUEUED
+        with no stamp, so a retry with the same key (200) publishes it, and the
+        reconciler would redispatch it anyway. Errors: 404 unknown, 409 not
+        FAILED or key reused, 422 over the cap of 10 attempts."""
+        try:
+            disposition = await self._runs.replay(run_id, additional_attempts, idempotency_key)
+        except BudgetExceeded as exc:
+            await self._s.rollback()
+            raise InvalidRun(str(exc)) from None
+        if disposition is ReplayDisposition.NOT_FOUND:
+            await self._s.rollback()
+            raise NotFound(f"run {run_id} not found")
+        if disposition is ReplayDisposition.KEY_REUSED:
+            await self._s.rollback()
+            raise IdempotencyConflict(
+                f"Idempotency-Key {idempotency_key!r} was already used for a different replay"
+            )
+        if disposition is ReplayDisposition.NOT_FAILED:
+            await self._s.rollback()
+            raise Conflict(f"run {run_id} is not FAILED; only a FAILED run can be replayed")
+        await self._s.commit()
+        run = await self.get(run_id)
+        accepted = disposition is ReplayDisposition.REPLAYED
+        # A replayed key whose first call died before publishing: QUEUED, never stamped.
+        if run.status == RunStatus.QUEUED and (accepted or run.dispatched_at is None):
+            try:
+                await self._queue.publish(run.id)
+            except RedisError as exc:
+                log.error("dispatch_failed", run_id=str(run.id), error=str(exc))
+                raise DispatchUnavailable(run.id) from exc
+            await stamp_dispatched(self._s, [run.id])
+            log.info("run_replayed", run_id=str(run_id), replay_count=run.replay_count)
+        return ReplayResult(run=run, accepted=accepted)
+
+    async def list_runs(
+        self,
+        *,
+        status: RunStatus | None,
+        dead_letter: bool | None,
+        evaluation_id: uuid.UUID | None,
+        task_id: uuid.UUID | None,
+        after: str | None,
+        limit: int,
+    ) -> tuple[list[Run], str | None]:
+        """One page of runs, newest first, and the cursor for the next page (None
+        on the last). Fetches one extra row to know whether another page exists."""
+        cursor = decode_cursor(after) if after else None
+        rows = await self._runs.list_page(
+            status=status,
+            dead_letter=dead_letter,
+            evaluation_id=evaluation_id,
+            task_id=task_id,
+            after=cursor,
+            limit=limit + 1,
+        )
+        page = rows[:limit]
+        more = len(rows) > limit
+        return page, encode_cursor(page[-1].created_at, page[-1].id) if more else None
 
     async def list_attempts(self, run_id: uuid.UUID) -> list[RunAttempt]:
         await self.get(run_id)

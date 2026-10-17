@@ -40,8 +40,9 @@ RESPONSE_MODELS: dict[str, list[str]] = {
         "task_ids", "version",
     ],
     "EvaluationRead": [
-        "agent_version_id", "cancel_requested_at", "created_at", "dataset_id", "id", "name",
-        "progress", "repetitions", "scoring_config", "scoring_config_hash",
+        "agent_version_id", "cancel_requested_at", "created_at", "dataset_id",
+        "eval_max_attempts", "id", "name", "progress", "repetitions", "run_max_attempts",
+        "scoring_config", "scoring_config_hash",
     ],
     "Latency": ["p50", "p95"],
     "MeanScore": ["efficiency", "overall", "reliability", "task_success", "test_score"],
@@ -68,11 +69,12 @@ RESPONSE_MODELS: dict[str, list[str]] = {
         "started_at", "status", "stderr", "stderr_truncated", "stdout", "stdout_truncated",
         "steps", "tokens_in", "tokens_out", "worker_id",
     ],
+    "RunPage": ["next_after", "runs"],
     "RunRead": [
         "agent_version_id", "attempt_count", "cancel_reason", "cancel_requested_at", "claimed_at",
-        "created_at", "error_message",
-        "evaluation_id", "finished_at", "id", "idempotency_key", "outcome", "repetition",
-        "started_at", "status", "task_id", "worker_id",
+        "created_at", "dead_letter_reason", "error_message", "evaluation_id", "failure_reason",
+        "finished_at", "id", "idempotency_key", "max_attempts", "next_attempt_at", "outcome",
+        "repetition", "replay_count", "started_at", "status", "task_id", "worker_id",
     ],
     "ScoringConfig": ["version", "weights"],
     "ScoringWeights": ["efficiency", "reliability", "task_success", "test_score"],
@@ -201,6 +203,13 @@ async def test_no_route_returns_hidden_evaluation_data(
          f"/api/v1/evaluations/{ev}/summary", {}),
         # Cancels last: they change run states the GETs above read (C3 is still QUEUED, B2 is
         # COMPLETED -> 409).
+        # The seed's FAILED runs carry MARKER in their (public) run error_message, so the
+        # sweep lists COMPLETED ones; replaying B3 below clears that message.
+        ("GET", "/api/v1/runs", "/api/v1/runs", {"params": {"status": "COMPLETED", "limit": 200}}),
+        ("GET", "/api/v1/runs", "/api/v1/runs", {"params": {"dead_letter": "true"}}),
+        ("GET", "/api/v1/runs", "/api/v1/runs", {"params": {"after": "garbage"}}),
+        ("POST", "/api/v1/runs/{run_id}/replay", f"/api/v1/runs/{s.runs['B3']}/replay", {}),
+        ("POST", "/api/v1/runs/{run_id}/replay", f"/api/v1/runs/{b2}/replay", {}),
         ("POST", "/api/v1/runs/{run_id}/cancel", f"/api/v1/runs/{s.runs['C3']}/cancel", {}),
         ("POST", "/api/v1/runs/{run_id}/cancel", f"/api/v1/runs/{b2}/cancel", {}),
         ("POST", "/api/v1/evaluations/{evaluation_id}/cancel",
@@ -222,3 +231,79 @@ async def test_no_route_returns_hidden_evaluation_data(
     assert {200, 404} <= statuses["/api/v1/runs/{run_id}/attempts/{attempt_no}/evaluation"]
     assert {200, 422} <= statuses["/api/v1/evaluations/compare"]
     assert {201, 422} <= statuses["/api/v1/tasks"]
+    assert {200, 422} <= statuses["/api/v1/runs"]
+    assert {202, 409} <= statuses["/api/v1/runs/{run_id}/replay"]
+
+
+# -- the snapshot: what live responses actually contain -------------------------------------
+
+# Names that exist on internal rows and must never be a key anywhere in a public body (D11, F15).
+INTERNAL_KEYS = frozenset({
+    "lease_epoch", "lease_expires_at", "heartbeat_at", "dispatched_at", "unstarted_claims",
+    "storage_key", "workspace_capture", "error_reason", "error_kind", "eval_attempts",
+    "max_eval_attempts", "failure_detail", "integrity", "hidden_files", "retryable",
+    "content", "sha256",
+    # evaluation check internals: only position/passed/score/duration_ms are public
+    "name", "kind", "expected", "actual", "detail", "required", "weight", "reliability_detail",
+})  # fmt: skip
+
+
+def all_keys(node: Any) -> set[str]:
+    if isinstance(node, dict):
+        return set(node) | {k for v in node.values() for k in all_keys(v)}
+    if isinstance(node, list):
+        return {k for v in node for k in all_keys(v)}
+    return set()
+
+
+async def test_public_json_key_sets_are_pinned_and_no_internal_field_leaks(
+    client: httpx.AsyncClient, sessionmaker: SM
+) -> None:
+    s = await seed(client, sessionmaker)
+    a1, b3 = s.runs["A1"], s.runs["B3"]
+
+    async def get(url: str, **params: Any) -> Any:
+        resp = await client.get(url, params=params)
+        assert resp.status_code == 200, (url, resp.text)
+        return resp.json()
+
+    run = await get(f"/api/v1/runs/{a1}")
+    attempts = await get(f"/api/v1/runs/{a1}/attempts")
+    listing = await get("/api/v1/runs", status="COMPLETED", limit=5)
+    evaluation = await get(f"/api/v1/evaluations/{s.evaluation_id}")
+    results = await get(f"/api/v1/evaluations/{s.evaluation_id}/results", limit=500)
+    summary = await get(f"/api/v1/evaluations/{s.evaluation_id}/summary")
+    attempt_evaluation = await get(f"/api/v1/runs/{a1}/attempts/1/evaluation")
+    failed_without_attempt = await get(f"/api/v1/runs/{b3}")
+
+    run_keys = set(RESPONSE_MODELS["RunRead"])
+    assert set(run) == set(failed_without_attempt) == run_keys
+    assert set(listing) == {"runs", "next_after"} and listing["runs"]
+    assert all(set(r) == run_keys for r in listing["runs"])
+    assert set(attempts[0]) == set(RESPONSE_MODELS["RunAttemptRead"])
+    assert set(evaluation) == set(RESPONSE_MODELS["EvaluationRead"])
+    assert set(evaluation["progress"]) == set(RESPONSE_MODELS["Progress"])
+    assert set(evaluation["progress"]["runs_by_status"]) == {
+        "QUEUED", "CLAIMED", "RUNNING", "RETRYING", "COMPLETED", "FAILED", "CANCELLED",
+    }  # fmt: skip
+    assert set(results) == {"results", "next_after"}
+    assert all(set(row) == set(RESPONSE_MODELS["ResultRow"]) for row in results["results"])
+    graded = [r["evaluation"] for r in results["results"] if r["evaluation"] is not None]
+    assert graded and all(set(e) == set(RESPONSE_MODELS["PublicEvaluation"]) for e in graded)
+    assert {k for e in graded for c in e["checks"] for k in c} == set(
+        RESPONSE_MODELS["PublicCheck"]
+    )
+    assert set(summary) == set(RESPONSE_MODELS["Summary"])
+    assert set(attempt_evaluation) == set(RESPONSE_MODELS["AttemptEvaluationRead"])
+    assert set(attempt_evaluation["checks"][0]) == set(RESPONSE_MODELS["PublicCheck"])
+
+    for name, body in {
+        "run": run, "attempts": attempts, "listing": listing, "evaluation": evaluation,
+        "results": results, "summary": summary, "attempt evaluation": attempt_evaluation,
+    }.items():  # fmt: skip
+        # ScoringConfig/weights/`task_name` are public; "name" is only banned as a check key.
+        leaked = all_keys(body) & (INTERNAL_KEYS - {"name"})
+        assert not leaked, (name, leaked)
+        assert MARKER not in str(body), name
+    for e in [*graded, attempt_evaluation]:
+        assert all_keys(e["checks"]).isdisjoint(INTERNAL_KEYS)

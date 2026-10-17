@@ -87,7 +87,8 @@ async def clean_state(engine: AsyncEngine, settings: Settings) -> AsyncIterator[
         await conn.execute(
             text(
                 "TRUNCATE scores, attempt_evaluations, attempt_artifacts, trajectory_events, "
-                "run_attempts, runs, evaluations, tasks, datasets, agent_versions, agents, workers"
+                "run_attempts, run_replays, runs, evaluations, tasks, datasets, agent_versions, "
+                "agents, workers"
             )
         )
     r = Redis.from_url(settings.redis_url)

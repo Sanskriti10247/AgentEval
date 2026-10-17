@@ -1,6 +1,6 @@
-# Evaluation API (Phase 4)
+# Evaluation and run API (Phase 4–5)
 
-These are the dataset, evaluation-spec, benchmark-evaluation and result endpoints. All paths are under `/api/v1`. The OpenAPI schema at `/docs` is the source of truth; this page explains behaviour that a schema can't. The architecture is in [docs/architecture/evaluation.md](../architecture/evaluation.md).
+These are the dataset, evaluation-spec, benchmark-evaluation, result and run-management (list, cancel, replay) endpoints. All paths are under `/api/v1`. The OpenAPI schema at `/docs` is the source of truth; this page explains behaviour that a schema can't. The architecture is in [docs/architecture/evaluation.md](../architecture/evaluation.md).
 
 - **Errors** are RFC 7807-style `application/problem+json`: `{type, title, status, detail}`.
 - **Validation errors (422)** are sanitised; see [below](#validation-errors-422).
@@ -47,21 +47,23 @@ Examples are trimmed from real responses of the README walkthrough (FakeProvider
 
 ```json
 {"name": "calc-demo", "dataset_id": "…", "agent_version_id": "…", "repetitions": 2,
+ "run_max_attempts": 3, "eval_max_attempts": 3,
  "scoring_config": {"version": "v1", "weights": {"task_success": "0.6", "test_score": "0.2",
                                                 "reliability": "0.1", "efficiency": "0.1"}}}
 ```
 
 - **`scoring_config` is optional** and defaults to scoring v1. The weights must be ≥ 0 and sum to exactly 1.
+- **`run_max_attempts` and `eval_max_attempts`** (both optional, 1–10) pin the batch's budgets (F6, F9). The first is copied onto every run of the batch as its `max_attempts` (attempts before it is dead-lettered); the second is the grading budget of every evaluation of the batch. Omitted, they default to `AGENTEVAL_RUN_MAX_ATTEMPTS` and `AGENTEVAL_EVAL_MAX_ATTEMPTS` (both 3). Both are returned by `GET /evaluations/{id}`.
 - **Header `Idempotency-Key`** (optional, 1–255 characters).
 - **One transaction** creates the batch row and one QUEUED run per (task, repetition). Each run's `idempotency_key` is `eval:{evaluation}:{task}:{repetition}`. The runs are then dispatched.
 
 | Status | When |
 |---|---|
 | **202** | a new batch |
-| **200** | a replay of the same key with the same request (name, dataset, agent version, repetitions, scoring hash). Runs that are still QUEUED are re-dispatched |
+| **200** | a replay of the same key with the same request (name, dataset, agent version, repetitions, scoring hash, `run_max_attempts`, `eval_max_attempts`; an omitted budget compares as its default). Runs that are still QUEUED are re-dispatched |
 | **409** | the dataset isn't FROZEN; or the key was already used for a different request |
 | **404** | unknown dataset or agent version |
-| **422** | an invalid scoring config or repetitions (1–10); or more than 1000 runs (tasks × repetitions) |
+| **422** | an invalid scoring config, repetitions (1–10) or budget (1–10); or more than 1000 runs (tasks × repetitions) |
 | **503** + `Retry-After: 1` | the batch is stored but dispatch failed. Retry with the **same key** and the runs are re-dispatched |
 
 **Concurrency and duplicates:**
@@ -78,19 +80,23 @@ The batch, plus **derived** progress (never stored):
 {"id": "…", "name": "calc-demo", "dataset_id": "…", "agent_version_id": "…", "repetitions": 2,
  "scoring_config": {"version": "v1", "weights": {"task_success": "0.60", "test_score": "0.20",
                                                 "reliability": "0.10", "efficiency": "0.10"}},
- "scoring_config_hash": "6a5118ea…", "created_at": "…",
+ "scoring_config_hash": "6a5118ea…", "created_at": "…", "cancel_requested_at": null,
+ "run_max_attempts": 3, "eval_max_attempts": 3,
  "progress": {"runs_total": 4,
-              "runs_by_status": {"QUEUED": 0, "CLAIMED": 0, "RUNNING": 0, "COMPLETED": 4, "FAILED": 0},
+              "runs_by_status": {"QUEUED": 0, "CLAIMED": 0, "RUNNING": 0, "RETRYING": 0,
+                                 "COMPLETED": 4, "FAILED": 0, "CANCELLED": 0},
               "evaluations_by_status": {"PENDING": 0, "RUNNING": 0, "SUCCEEDED": 4, "ERROR": 0, "SKIPPED": 0},
               "awaiting_evaluation": 0, "complete": true}}
 ```
 
 - **`scoring_config` and its hash are exposed** as benchmark policy (R3).
-- **`complete`** means every run is terminal and none awaits evaluation. A crash between an attempt's commit and its evaluation record keeps `complete` false (a recovery gap, Phase 5).
+- **`runs_by_status`** has a key for every run status, including `RETRYING` and `CANCELLED` (it had only the five Phase 4 keys before Step 9).
+- **`complete`** means every run is terminal (COMPLETED, FAILED or CANCELLED) and none awaits evaluation. A RETRYING or replayed (QUEUED) run is not terminal, so the batch stays open.
+- **Each run is read by its latest attempt and its current status (F13).** `evaluations_by_status` counts the evaluation of a COMPLETED or FAILED run's latest attempt only; the earlier, failed attempt of a run that is being retried or replayed, and the attempt of a cancelled run, are history, not results.
 
 ### `POST /evaluations/{id}/cancel`
 
-Cancels the batch: sets `cancel_requested_at` on it, then cancels each run that has not finished (reason `batch`) in chunks of 100. Runs that already finished keep their attempts, evaluations and scores. **202** with the batch when this call changed something; **200** for a repeat (a repeat also finishes any runs a crashed call left); **404** unknown. Runs that are CLAIMED or RUNNING are only flagged, so the batch becomes `complete` once their workers stop them (see the run endpoint). CANCELLED counts as terminal for `complete`; `runs_by_status` keeps its Phase 4 keys until Step 9, so cancelled runs show in `runs_total` only.
+Cancels the batch: sets `cancel_requested_at` on it, then cancels each run that has not finished (reason `batch`) in chunks of 100. Runs that already finished keep their attempts, evaluations and scores. **202** with the batch when this call changed something; **200** for a repeat (a repeat also finishes any runs a crashed call left); **404** unknown. Runs that are CLAIMED or RUNNING are only flagged, so the batch becomes `complete` once their workers stop them (see the run endpoint). CANCELLED counts as terminal for `complete`, and cancelled runs show under `runs_by_status.CANCELLED`.
 
 ### `GET /evaluations/{id}/results?after=&limit=`
 
@@ -110,6 +116,7 @@ One row per run, ordered by (task, repetition). It's keyset-paged: `limit` 1–5
 ```
 
 - **`evaluation` is a `PublicEvaluation`,** or null when no evaluation is recorded yet (or the run failed before any attempt).
+- **A run that is QUEUED, CLAIMED, RETRYING or CANCELLED has no result (F13):** its row has `run_outcome`, `attempt_no`, the attempt figures and `evaluation` all null, even if an earlier attempt exists. A COMPLETED or FAILED run is shown by its latest attempt (`attempt_no` is that attempt's number).
 - **`score`** is the score under *this batch's* scoring config.
 - **`checks`** are identified by position only.
 
@@ -130,7 +137,8 @@ One row per run, ordered by (task, repetition). It's keyset-paged: `limit` 1–5
 **How the counts are defined (D7):**
 - **`success_rate`** = passed ÷ graded, with a Wilson 95% `ci95`.
 - **`platform_failures`, `evaluation_errors` and `ungraded`** (tasks without a spec) are excluded from the denominator and reported separately.
-- **`in_progress`** attempts aren't counted yet.
+- **`in_progress`** runs aren't counted yet: runs not terminal (including RETRYING and replayed ones, whatever their earlier attempts say) and terminal runs whose latest attempt is not evaluated yet. A CANCELLED run is neither counted nor in progress: it has no result, so a cancelled batch's summary is `complete`.
+- **A retried run counts once, by its latest attempt** (`success_rate`, categories, latency, cost and tokens never include its earlier failed attempts).
 - **`mean_score`** averages graded attempts under the batch's config.
 - **`latency_ms`** is the nearest-rank p50/p95 of attempt `duration_ms`.
 - **`failure_categories`** uses only the closed `FailureCategory` vocabulary.
@@ -155,11 +163,15 @@ A task with nothing graded has a null rate and a null delta.
 |---|---|
 | `GET /runs/{id}` | `evaluation_id`, `repetition` (null for ad-hoc runs) |
 | `GET /runs/{id}` | also `cancel_requested_at` and `cancel_reason` (`user` or `batch`), null until a cancel is requested |
+| `GET /runs/{id}` | also `max_attempts` (the pinned budget; grows on replay), `replay_count`, `dead_letter_reason` (`retries_exhausted` or `non_retryable`, set on a FAILED run), `failure_reason` (run-level: `claim_abandoned` or `internal_inconsistent`, for a run that failed without an attempt) and `next_attempt_at` (while RETRYING) |
+| `POST /runs` | optional `max_attempts` (1–10, default `AGENTEVAL_RUN_MAX_ATTEMPTS` = 3), pinned on the run and part of the `Idempotency-Key` comparison: the same key with a different budget (an omitted one counts as the default) is **409** |
+| `GET /runs` | the run listing, see below |
 | `POST /runs/{id}/cancel` | see below |
+| `POST /runs/{id}/replay` | see below |
 | `GET /runs/{id}/attempts` | `sandbox_image_id`: the image ID the agent's sandbox actually ran (agent attempts) |
 | `GET /runs/{id}/attempts/{n}/evaluation` | the attempt's `PublicEvaluation` + `{attempt_no, created_at, finished_at}`, scored under the run's batch config (or scoring v1 for ad-hoc runs). **404** when no evaluation is recorded (command tasks, not yet evaluated, or the run failed before an attempt) |
 
-`GET /evaluations/{id}` also returns `cancel_requested_at`.
+`GET /evaluations/{id}` also returns `cancel_requested_at`, `run_max_attempts` and `eval_max_attempts`.
 
 ### `POST /runs/{id}/cancel`
 
@@ -171,6 +183,35 @@ A task with nothing graded has a null rate and a null delta.
 | **404** | unknown run |
 
 A flagged run ends CANCELLED with its attempt CANCELLED (`cancelled_by_user`), no artifact and no evaluation. The worker learns of the flag on its next lease heartbeat (10 s by default), so the stop latency is at most one heartbeat plus the runtime's next check (an agent run stops between steps; a command task's container is killed). If the worker is gone, the reconciler cancels the run when its lease expires. The endpoint only writes `runs`, so it never waits for artifact work.
+
+### `GET /runs?status=&dead_letter=&evaluation_id=&task_id=&limit=&after=`
+
+Runs, **newest first**, keyset-paged on `(created_at, id)` descending. The response is `{"runs": [RunRead, …], "next_after": "…" | null}`.
+
+| Parameter | Meaning |
+|---|---|
+| `status` | one of QUEUED, CLAIMED, RUNNING, RETRYING, COMPLETED, FAILED, CANCELLED. There is no `DEAD_LETTER` status (F1) |
+| `dead_letter` | `true`: FAILED runs that carry a `dead_letter_reason`, the dead-letter queue view (served by the partial index on FAILED runs). `false`: runs without one |
+| `evaluation_id`, `task_id` | only runs of that batch or task |
+| `limit` | 1–200, default 50 |
+| `after` | the previous page's `next_after`. **Opaque**: pass it back unchanged. It encodes the last row's `created_at` and id |
+
+Filters combine with AND. A bad `status`, `limit`, id or `after` is **422**. The cursor is a position, not an offset, so pages never repeat or skip a row, even while runs are created between requests: new runs sort before the cursor and are simply not part of an ongoing walk. `next_after` is null on the last page (a final page that is exactly full is not followed by an empty one).
+
+### `POST /runs/{id}/replay`
+
+Gives a **FAILED** run more attempts and queues it again (R14, F10): a guarded `FAILED → QUEUED` transition. Body `{"additional_attempts": 1–9}` (default 1; the body may be omitted), optional `Idempotency-Key` (1–255 characters).
+
+| Status | When |
+|---|---|
+| **202** | replayed. The run is QUEUED with `max_attempts` raised by `additional_attempts` and `replay_count` + 1. `outcome`, `error_message`, `failure_reason`, `dead_letter_reason` and `finished_at` are cleared. **`attempt_count` is not reset**: the next attempt is numbered `attempt_count + 1`, and every earlier attempt, its trajectory and its evaluation are kept |
+| **200** | the same `Idempotency-Key` was already applied to this run with the same `additional_attempts`. Nothing changes, whatever state the run is in now; if the first call committed but never published (503), this call publishes |
+| **409** | the run is not FAILED (COMPLETED, CANCELLED and every non-terminal run included); or the key was already used for another run or a different `additional_attempts` |
+| **422** | `additional_attempts` outside 1–9, or `max_attempts + additional_attempts` would exceed 10 |
+| **404** | unknown run |
+| **503** + `Retry-After: 1` | replayed and committed, but the dispatch failed. Retry with the **same key** (200); the reconciler would also redispatch it |
+
+One transaction locks the run row, checks the key, applies the guarded update and records the replay in `run_replays`; the stream message is published **after** the commit. Concurrent requests with one key replay once (one **202**, the rest **200**); concurrent requests with different keys replay once (one **202**, the rest **409**, because the run is no longer FAILED). A claim-abandonment budget is renewed too, so a run that failed with `claim_abandoned` can be replayed. A replayed run that belongs to a batch re-opens the batch (`complete` turns false) until it finishes again.
 
 Ad-hoc agent runs (`POST /runs`) of a task that has a spec are evaluated the same way, without belonging to a batch.
 

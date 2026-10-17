@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agenteval_core.evaluation.public import PublicEvaluation
 from agenteval_core.evaluation.scoring import ScoringConfig
+from agenteval_core.reliability.policy import MAX_ATTEMPTS_CAP
 from agenteval_core.states import Outcome, RunStatus
 
 MAX_BATCH_RUNS = 1000
@@ -35,6 +36,11 @@ class EvaluationCreate(BaseModel):
     repetitions: int = Field(default=1, ge=1, le=10)
     # Default: scoring v1 (DEFAULT_SCORING_CONFIG). Weights must sum to 1.
     scoring_config: ScoringConfig | None = None
+    # Budgets pinned on the batch (F6, F9, G1): run_max_attempts is copied onto every
+    # batch run, eval_max_attempts onto each of their evaluations. Omitted: the
+    # AGENTEVAL_RUN_MAX_ATTEMPTS / AGENTEVAL_EVAL_MAX_ATTEMPTS settings.
+    run_max_attempts: int | None = Field(default=None, ge=1, le=MAX_ATTEMPTS_CAP)
+    eval_max_attempts: int | None = Field(default=None, ge=1, le=MAX_ATTEMPTS_CAP)
 
 
 class Progress(_Read):
@@ -59,6 +65,8 @@ class EvaluationRead(_Read):
     created_at: datetime
     # Set once a user cancelled the batch (F15); the batch's runs follow.
     cancel_requested_at: datetime | None = None
+    run_max_attempts: int
+    eval_max_attempts: int
     progress: Progress
 
 

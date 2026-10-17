@@ -38,8 +38,8 @@ def get_task_service(session: SessionDep, settings: SettingsDep) -> TaskService:
     return TaskService(session, settings.image_allowlist)
 
 
-def get_run_service(session: SessionDep, queue: QueueDep) -> RunService:
-    return RunService(session, queue)
+def get_run_service(session: SessionDep, queue: QueueDep, settings: SettingsDep) -> RunService:
+    return RunService(session, queue, settings)
 
 
 def get_agent_service(session: SessionDep, settings: SettingsDep) -> AgentService:
@@ -50,8 +50,10 @@ def get_dataset_service(session: SessionDep) -> DatasetService:
     return DatasetService(session)
 
 
-def get_evaluation_service(session: SessionDep, queue: QueueDep) -> EvaluationService:
-    return EvaluationService(session, queue)
+def get_evaluation_service(
+    session: SessionDep, queue: QueueDep, settings: SettingsDep
+) -> EvaluationService:
+    return EvaluationService(session, queue, settings)
 
 
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]

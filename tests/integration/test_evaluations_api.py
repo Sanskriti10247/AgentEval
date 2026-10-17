@@ -192,7 +192,8 @@ async def test_progress_counts(client: httpx.AsyncClient, sessionmaker: SM) -> N
     progress = (await client.get(f"/api/v1/evaluations/{s.evaluation_id}")).json()["progress"]
     assert progress["runs_total"] == 9
     assert progress["runs_by_status"] == {
-        "QUEUED": 1, "CLAIMED": 0, "RUNNING": 0, "COMPLETED": 6, "FAILED": 2,
+        "QUEUED": 1, "CLAIMED": 0, "RUNNING": 0, "RETRYING": 0, "COMPLETED": 6, "FAILED": 2,
+        "CANCELLED": 0,
     }  # fmt: skip
     assert progress["evaluations_by_status"] == {
         "PENDING": 0, "RUNNING": 1, "SUCCEEDED": 3, "ERROR": 1, "SKIPPED": 2,
