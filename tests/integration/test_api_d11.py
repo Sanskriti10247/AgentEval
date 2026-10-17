@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from agenteval_core.evaluation import results, spec
 from agenteval_core.evaluation.scoring import ScoringConfig, ScoringWeights
@@ -23,7 +24,9 @@ from tests.integration.api_routes import api_routes
 from tests.integration.eval_seed import MARKER, SM, SPEC, agent_task, create_evaluation, seed
 
 RESPONSE_MODELS: dict[str, list[str]] = {
+    "AgentPage": ["agents", "next_after"],
     "AgentRead": ["created_at", "id", "name"],
+    "AgentSummary": ["created_at", "id", "latest_version", "name"],
     "AgentVersionRead": [
         "agent_id", "config_hash", "created_at", "id", "limits", "model", "model_provider",
         "model_settings", "shell_allowlist", "system_prompt", "tools", "version",
@@ -35,21 +38,30 @@ RESPONSE_MODELS: dict[str, list[str]] = {
     "Compare": ["dataset_id", "evaluations", "per_task", "scoring_config_hash"],
     "CompareEntry": ["agent_version_id", "evaluation_id", "summary"],
     "CostTotals": ["mean_per_attempt", "total"],
+    "DatasetPage": ["datasets", "next_after"],
+    "DatasetSummary": [
+        "created_at", "description", "frozen_at", "id", "name", "status", "task_count", "version",
+    ],
     "DatasetRead": [
         "created_at", "description", "frozen_at", "id", "name", "status", "task_count",
         "task_ids", "version",
     ],
+    "EvaluationCounts": ["cancel_requested", "total"],
+    "EvaluationPage": ["evaluations", "next_after"],
     "EvaluationRead": [
         "agent_version_id", "cancel_requested_at", "created_at", "dataset_id",
         "eval_max_attempts", "id", "name", "progress", "repetitions", "run_max_attempts",
         "scoring_config", "scoring_config_hash",
     ],
     "Latency": ["p50", "p95"],
+    "LatencyStats": ["count", "p50", "p95"],
+    "LatestVersion": ["id", "model", "model_provider", "tools", "version"],
     "MeanScore": ["efficiency", "overall", "reliability", "task_success", "test_score"],
     "Progress": [
         "awaiting_evaluation", "complete", "evaluations_by_status", "runs_by_status",
         "runs_total",
     ],
+    "QueueDepth": ["evaluations_pending", "runs_queued", "runs_retrying", "total"],
     "PublicCheck": ["duration_ms", "passed", "position", "score"],
     "PublicEvaluation": [
         "checks", "failure_category", "metrics", "score", "status", "tags", "task_success",
@@ -69,6 +81,7 @@ RESPONSE_MODELS: dict[str, list[str]] = {
         "started_at", "status", "stderr", "stderr_truncated", "stdout", "stdout_truncated",
         "steps", "tokens_in", "tokens_out", "worker_id",
     ],
+    "RunCounts": ["by_status", "total"],
     "RunPage": ["next_after", "runs"],
     "RunRead": [
         "agent_version_id", "attempt_count", "cancel_reason", "cancel_requested_at", "claimed_at",
@@ -78,11 +91,21 @@ RESPONSE_MODELS: dict[str, list[str]] = {
     ],
     "ScoringConfig": ["version", "weights"],
     "ScoringWeights": ["efficiency", "reliability", "task_success", "test_score"],
+    "StatsOverview": [
+        "active_workers", "evaluations", "generated_at", "queue", "run_latency_ms", "runs",
+        "success", "usage", "window_h",
+    ],
+    "SuccessStats": ["graded", "passed", "success_rate"],
     "Summary": [
         "attempts", "ci95", "complete", "cost_usd", "evaluation_errors", "evaluation_id",
         "failure_categories", "graded", "in_progress", "latency_ms", "mean_score", "passed",
         "per_task", "platform_failure_rate", "platform_failures", "success_rate", "tokens",
         "ungraded",
+    ],
+    "TaskPage": ["next_after", "tasks"],
+    "TaskListItem": [
+        "cpu_limit", "created_at", "dataset_id", "description", "difficulty", "has_evaluation",
+        "id", "image", "memory_mb", "name", "task_type", "timeout_s",
     ],
     "TaskComparison": ["delta_vs_first", "success_rate", "task_id"],
     "TaskRead": [
@@ -95,6 +118,12 @@ RESPONSE_MODELS: dict[str, list[str]] = {
         "task_id", "task_name",
     ],
     "TokenTotals": ["tokens_in", "tokens_out"],
+    "UsageStats": ["attempts", "cost_usd", "tokens_in", "tokens_out"],
+    "WorkerPage": ["next_after", "workers"],
+    "WorkerRead": [
+        "alive", "concurrency", "hostname", "id", "last_heartbeat_at", "started_at", "stop_reason",
+        "stopped_at", "version",
+    ],
     "TrajectoryEventRead": [
         "cache_read_tokens", "cache_write_tokens", "cost_usd", "duration_ms", "error_class",
         "event_type", "input", "output", "seq", "status", "step", "tokens_in", "tokens_out",
@@ -165,6 +194,13 @@ async def test_no_route_returns_hidden_evaluation_data(
         ("GET", "/ready", "/ready", {}),
         ("POST", "/api/v1/agents", "/api/v1/agents",
          {"json": {"name": f"b-{uuid.uuid4().hex[:6]}"}}),
+        ("GET", "/api/v1/agents", "/api/v1/agents", {}),
+        ("GET", "/api/v1/agents", "/api/v1/agents", {"params": {"after": "garbage"}}),
+        ("GET", "/api/v1/tasks", "/api/v1/tasks", {"params": {"limit": 200}}),
+        ("GET", "/api/v1/datasets", "/api/v1/datasets", {"params": {"status": "FROZEN"}}),
+        ("GET", "/api/v1/evaluations", "/api/v1/evaluations", {}),
+        ("GET", "/api/v1/workers", "/api/v1/workers", {}),
+        ("GET", "/api/v1/stats/overview", "/api/v1/stats/overview", {}),
         ("GET", "/api/v1/agents/{agent_id}", f"/api/v1/agents/{agent['id']}", {}),
         ("POST", "/api/v1/agents/{agent_id}/versions",
          f"/api/v1/agents/{agent['id']}/versions", {"json": version_body}),
@@ -275,6 +311,20 @@ async def test_public_json_key_sets_are_pinned_and_no_internal_field_leaks(
     summary = await get(f"/api/v1/evaluations/{s.evaluation_id}/summary")
     attempt_evaluation = await get(f"/api/v1/runs/{a1}/attempts/1/evaluation")
     failed_without_attempt = await get(f"/api/v1/runs/{b3}")
+    async with sessionmaker() as session:
+        await session.execute(
+            text(
+                "INSERT INTO workers (id, hostname, pid, version, concurrency) "
+                "VALUES ('w-d11', 'h', 1, '0', 2)"
+            )
+        )
+        await session.commit()
+    agents_page = await get("/api/v1/agents")
+    tasks_page = await get("/api/v1/tasks")
+    datasets_page = await get("/api/v1/datasets")
+    evaluations_page = await get("/api/v1/evaluations")
+    workers_page = await get("/api/v1/workers")
+    stats = await get("/api/v1/stats/overview")
 
     run_keys = set(RESPONSE_MODELS["RunRead"])
     assert set(run) == set(failed_without_attempt) == run_keys
@@ -294,11 +344,34 @@ async def test_public_json_key_sets_are_pinned_and_no_internal_field_leaks(
         RESPONSE_MODELS["PublicCheck"]
     )
     assert set(summary) == set(RESPONSE_MODELS["Summary"])
+
+    assert set(agents_page) == set(RESPONSE_MODELS["AgentPage"]) and agents_page["agents"]
+    assert all(set(a) == set(RESPONSE_MODELS["AgentSummary"]) for a in agents_page["agents"])
+    versions = [a["latest_version"] for a in agents_page["agents"] if a["latest_version"]]
+    assert versions and all(set(v) == set(RESPONSE_MODELS["LatestVersion"]) for v in versions)
+    assert set(tasks_page) == set(RESPONSE_MODELS["TaskPage"]) and tasks_page["tasks"]
+    assert all(set(t) == set(RESPONSE_MODELS["TaskListItem"]) for t in tasks_page["tasks"])
+    assert set(datasets_page) == set(RESPONSE_MODELS["DatasetPage"]) and datasets_page["datasets"]
+    assert all(set(d) == set(RESPONSE_MODELS["DatasetSummary"]) for d in datasets_page["datasets"])
+    assert set(evaluations_page) == set(RESPONSE_MODELS["EvaluationPage"])
+    assert evaluations_page["evaluations"]
+    assert all(
+        set(e) == set(RESPONSE_MODELS["EvaluationRead"]) for e in evaluations_page["evaluations"]
+    )
+    assert set(workers_page) == set(RESPONSE_MODELS["WorkerPage"]) and workers_page["workers"]
+    assert all(set(w) == set(RESPONSE_MODELS["WorkerRead"]) for w in workers_page["workers"])
+    assert set(stats) == set(RESPONSE_MODELS["StatsOverview"])
+    assert set(stats["queue"]) == set(RESPONSE_MODELS["QueueDepth"])
+    assert set(stats["usage"]) == set(RESPONSE_MODELS["UsageStats"])
+    assert set(stats["success"]) == set(RESPONSE_MODELS["SuccessStats"])
+    assert set(stats["run_latency_ms"]) == set(RESPONSE_MODELS["LatencyStats"])
     assert set(attempt_evaluation) == set(RESPONSE_MODELS["AttemptEvaluationRead"])
     assert set(attempt_evaluation["checks"][0]) == set(RESPONSE_MODELS["PublicCheck"])
 
     for name, body in {
         "run": run, "attempts": attempts, "listing": listing, "evaluation": evaluation,
+        "agents": agents_page, "tasks": tasks_page, "datasets": datasets_page,
+        "evaluations": evaluations_page, "workers": workers_page, "stats": stats,
         "results": results, "summary": summary, "attempt evaluation": attempt_evaluation,
     }.items():  # fmt: skip
         # ScoringConfig/weights/`task_name` are public; "name" is only banned as a check key.

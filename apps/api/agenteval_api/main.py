@@ -2,10 +2,20 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
 from agenteval_api.errors import install_error_handlers
-from agenteval_api.routes import agents, datasets, evaluations, health, runs, tasks
+from agenteval_api.routes import (
+    agents,
+    datasets,
+    evaluations,
+    health,
+    runs,
+    stats,
+    tasks,
+    workers,
+)
 from agenteval_core.config import Settings, get_settings
 from agenteval_core.db import create_engine, create_sessionmaker
 from agenteval_core.logging import configure_logging, get_logger
@@ -39,6 +49,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="AgentEval API", version="0.1.0", lifespan=lifespan)
     install_error_handlers(app)
+    # The dashboard's origin(s) only; no credentials (there is no auth yet), and
+    # just the methods and headers the API uses.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "Idempotency-Key"],
+        allow_credentials=False,
+        max_age=600,
+    )
     app.include_router(health.router)
     v1 = APIRouter(prefix="/api/v1")
     v1.include_router(agents.router)
@@ -46,6 +66,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(runs.router)
     v1.include_router(datasets.router)
     v1.include_router(evaluations.router)
+    v1.include_router(workers.router)
+    v1.include_router(stats.router)
     app.include_router(v1)
     return app
 

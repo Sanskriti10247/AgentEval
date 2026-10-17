@@ -1,14 +1,16 @@
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Query, Response, status
 
-from agenteval_api.deps import AgentServiceDep
+from agenteval_api.deps import AgentServiceDep, ReadServiceDep
 from agenteval_core.schemas.agent import (
     AgentCreate,
     AgentRead,
     AgentVersionCreate,
     AgentVersionRead,
 )
+from agenteval_core.schemas.read import AgentPage
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -17,6 +19,17 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 async def create_agent(body: AgentCreate, agents: AgentServiceDep) -> AgentRead:
     """409 if the name is taken."""
     return AgentRead.model_validate(await agents.create_agent(body))
+
+
+@router.get("", response_model=AgentPage)
+async def list_agents(
+    read: ReadServiceDep,
+    after: Annotated[str | None, Query(max_length=100)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> AgentPage:
+    """Agents newest first, keyset-paged, each with its latest version's number,
+    provider, model and tool names. `next_after` is opaque."""
+    return await read.agents(after, limit)
 
 
 @router.get("/{agent_id}", response_model=AgentRead)

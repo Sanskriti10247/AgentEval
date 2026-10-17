@@ -295,10 +295,12 @@ The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style 
 | --- | --- | --- |
 | GET | `/health`, `/ready` | liveness; readiness checks Postgres and Redis (503 if either is down) |
 | POST | `/api/v1/agents` | 201; 409 if the name is taken |
+| GET | `/api/v1/agents` | newest first, keyset-paged (`after`, `limit` 1–200); each agent has its `latest_version` (number, provider, model, tools); `{agents, next_after}` |
 | GET | `/api/v1/agents/{id}` | |
 | POST | `/api/v1/agents/{id}/versions` | 201 new version; **200** when an equivalent config already exists; 422 if it can't run |
 | GET | `/api/v1/agents/{id}/versions`, `…/versions/{n}` | versions are immutable |
 | POST | `/api/v1/tasks` | `task_type` `command` (default) or `agent`. 201; 422 on validation or an image not on the allowlist |
+| GET | `/api/v1/tasks` | newest first, keyset-paged; filters `dataset_id`, `task_type`, `difficulty`; public fields only (`has_evaluation`, never the spec); `{tasks, next_after}` |
 | GET | `/api/v1/tasks/{id}` | |
 | POST | `/api/v1/runs` | body `{task_id, agent_version_id?, max_attempts?}` (budget 1–10, default `AGENTEVAL_RUN_MAX_ATTEMPTS` = 3, pinned on the run), optional `Idempotency-Key` header |
 | GET | `/api/v1/runs` | newest first; filters `status`, `dead_letter` (the DLQ view), `evaluation_id`, `task_id`; keyset-paged by an opaque `after` cursor, `limit` 1–200; `{runs, next_after}` |
@@ -309,14 +311,21 @@ The OpenAPI docs are at <http://localhost:8000/docs>. Errors are RFC 7807-style 
 | GET | `/api/v1/runs/{id}/attempts/{n}/events` | the trajectory, paged by `after_seq` (default -1) and `limit` (1–1000, default 100); `next_after_seq` is null on the last page |
 | GET | `/api/v1/runs/{id}/attempts/{n}/evaluation` | the attempt's **public** evaluation; 404 if none is recorded |
 | POST | `/api/v1/datasets` | 201 DRAFT dataset; 409 if `(name, version)` exists |
+| GET | `/api/v1/datasets` | newest first, keyset-paged; filter `status`; `task_count` per dataset; `{datasets, next_after}` |
 | GET | `/api/v1/datasets/{id}` | includes `task_ids` |
 | POST | `/api/v1/datasets/{id}/freeze` | DRAFT → FROZEN (idempotent); 409 if it has no tasks |
 | POST | `/api/v1/evaluations` | a benchmark evaluation: agent version × frozen dataset × repetitions, with optional budgets `run_max_attempts` / `eval_max_attempts` (1–10, default 3); optional `Idempotency-Key`; 202 new / 200 replay / 409 / 503 |
+| GET | `/api/v1/evaluations` | newest first, keyset-paged; filters `agent_version_id`, `dataset_id`; each batch with its progress; `{evaluations, next_after}` |
 | GET | `/api/v1/evaluations/{id}` | the batch, scoring config and hash, derived progress |
 | POST | `/api/v1/evaluations/{id}/cancel` | cancel the batch and its unfinished runs; finished runs and scores are untouched; 202 / 200 repeat / 404 |
 | GET | `/api/v1/evaluations/{id}/results` | public per-run results, keyset-paged |
 | GET | `/api/v1/evaluations/{id}/summary` | success rate + CI, failure categories, score means, latency, cost, per task |
 | GET | `/api/v1/evaluations/compare?ids=a,b` | 2–5 batches on the same dataset and scoring config (else 422) |
+
+| GET | `/api/v1/workers` | live workers first, keyset-paged; each has an `alive` flag (not stopped, heartbeat within 3 × lease TTL); `{workers, next_after}` |
+| GET | `/api/v1/stats/overview` | `window_h` 1–720 (default 24): evaluation and run counts, success rate, run latency p50/p95, cost and tokens, active workers, queue depth |
+
+The dashboard endpoints (the lists and `/stats/overview`) are defined in [docs/api/read.md](docs/api/read.md). CORS allows only the origins in `AGENTEVAL_CORS_ORIGINS` (default `http://localhost:3000`), for `GET` and `POST`.
 
 The full reference for the Phase 4 endpoints is [docs/api/evaluations.md](docs/api/evaluations.md). `POST /tasks` also accepts `dataset_id`, `difficulty` and a **write-only** `evaluation` spec: responses only say `has_evaluation`. `RunRead` gains `evaluation_id` and `repetition`, and attempts gain `sandbox_image_id`.
 

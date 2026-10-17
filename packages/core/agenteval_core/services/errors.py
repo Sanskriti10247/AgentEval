@@ -33,6 +33,10 @@ class InvalidRun(ServiceError):
     """The run request is inconsistent (e.g. agent task without an agent version)."""
 
 
+class InvalidCursor(ServiceError):
+    """A list endpoint's `after` is not a cursor it issued. Fixed text."""
+
+
 class Conflict(ServiceError):
     """A uniqueness rule was violated (e.g. agent name taken)."""
 

@@ -1,9 +1,12 @@
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
-from agenteval_api.deps import DatasetServiceDep
+from agenteval_api.deps import DatasetServiceDep, ReadServiceDep
+from agenteval_core.evaluation.taxonomy import DatasetStatus
 from agenteval_core.schemas.dataset import DatasetCreate, DatasetRead
+from agenteval_core.schemas.read import DatasetPage
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -13,6 +16,17 @@ async def create_dataset(body: DatasetCreate, datasets: DatasetServiceDep) -> Da
     """A DRAFT dataset. Add agent tasks with POST /tasks and `dataset_id`.
     409 if (name, version) exists."""
     return await datasets.create(body)
+
+
+@router.get("", response_model=DatasetPage)
+async def list_datasets(
+    read: ReadServiceDep,
+    status: Annotated[DatasetStatus | None, Query()] = None,
+    after: Annotated[str | None, Query(max_length=100)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> DatasetPage:
+    """Datasets newest first, keyset-paged, with `task_count` (not the id list)."""
+    return await read.datasets(status=status, after=after, limit=limit)
 
 
 @router.get("/{dataset_id}", response_model=DatasetRead)

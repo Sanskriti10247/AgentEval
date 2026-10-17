@@ -469,28 +469,35 @@ class EvaluationService:
 
     async def _read(self, batch: Evaluation) -> EvaluationRead:
         runs, evals, awaiting = await self._batches.progress_counts(batch.id)
-        total = sum(runs.values())
-        terminal = sum(n for s, n in runs.items() if s in TERMINAL)
-        return EvaluationRead(
-            id=batch.id,
-            name=batch.name,
-            dataset_id=batch.dataset_id,
-            agent_version_id=batch.agent_version_id,
-            repetitions=batch.repetitions,
-            scoring_config=ScoringConfig.model_validate(batch.scoring_config),
-            scoring_config_hash=batch.scoring_config_hash,
-            created_at=batch.created_at,
-            cancel_requested_at=batch.cancel_requested_at,
-            run_max_attempts=batch.run_max_attempts,
-            eval_max_attempts=batch.eval_max_attempts,
-            progress=Progress(
-                runs_total=total,
-                runs_by_status={RunStatus(s): runs.get(s, 0) for s in RunStatus},
-                evaluations_by_status={s.value: evals.get(s.value, 0) for s in EvaluationStatus},
-                awaiting_evaluation=awaiting,
-                complete=terminal == total and awaiting == 0,
-            ),
-        )
+        return evaluation_read(batch, runs, evals, awaiting)
+
+
+def evaluation_read(
+    batch: Evaluation, runs: dict[str, int], evals: dict[str, int], awaiting: int
+) -> EvaluationRead:
+    """The one place a batch row becomes API output (get, create, cancel, list)."""
+    total = sum(runs.values())
+    terminal = sum(n for s, n in runs.items() if s in TERMINAL)
+    return EvaluationRead(
+        id=batch.id,
+        name=batch.name,
+        dataset_id=batch.dataset_id,
+        agent_version_id=batch.agent_version_id,
+        repetitions=batch.repetitions,
+        scoring_config=ScoringConfig.model_validate(batch.scoring_config),
+        scoring_config_hash=batch.scoring_config_hash,
+        created_at=batch.created_at,
+        cancel_requested_at=batch.cancel_requested_at,
+        run_max_attempts=batch.run_max_attempts,
+        eval_max_attempts=batch.eval_max_attempts,
+        progress=Progress(
+            runs_total=total,
+            runs_by_status={RunStatus(s): runs.get(s, 0) for s in RunStatus},
+            evaluations_by_status={s.value: evals.get(s.value, 0) for s in EvaluationStatus},
+            awaiting_evaluation=awaiting,
+            complete=terminal == total and awaiting == 0,
+        ),
+    )
 
 
 def _row(r: ResultRecord, scoring_config_hash: str) -> ResultRow:

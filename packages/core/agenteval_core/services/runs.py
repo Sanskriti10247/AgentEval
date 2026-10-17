@@ -1,10 +1,11 @@
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agenteval_core import pagination
 from agenteval_core.config import Settings
 from agenteval_core.logging import get_logger
 from agenteval_core.models import Run, RunAttempt, TrajectoryEvent
@@ -50,20 +51,9 @@ class ReplayResult:
     accepted: bool  # True: this call replayed the run (202); False: same key repeated (200)
 
 
-def encode_cursor(created_at: datetime, run_id: uuid.UUID) -> str:
-    """`<created_at, UTC, microseconds, Z>|<id>`. No '+' so it survives an unencoded
-    query string; clients still treat it as opaque."""
-    stamp = created_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    return f"{stamp}|{run_id}"
-
-
 def decode_cursor(after: str) -> tuple[datetime, uuid.UUID]:
     try:
-        stamp, run_id = after.split("|", 1)
-        created_at = datetime.fromisoformat(stamp)
-        if created_at.tzinfo is None:
-            raise ValueError("naive timestamp")
-        return created_at, uuid.UUID(run_id)
+        return pagination.decode_cursor(after)
     except ValueError:
         raise InvalidRun("invalid runs cursor") from None
 
@@ -221,7 +211,7 @@ class RunService:
         )
         page = rows[:limit]
         more = len(rows) > limit
-        return page, encode_cursor(page[-1].created_at, page[-1].id) if more else None
+        return page, pagination.encode_cursor(page[-1].created_at, page[-1].id) if more else None
 
     async def list_attempts(self, run_id: uuid.UUID) -> list[RunAttempt]:
         await self.get(run_id)

@@ -12,6 +12,7 @@ from agenteval_core.queue.streams import RunQueue
 from agenteval_core.services.agents import AgentService
 from agenteval_core.services.datasets import DatasetService
 from agenteval_core.services.evaluations import EvaluationService
+from agenteval_core.services.read import ReadService
 from agenteval_core.services.runs import RunService
 from agenteval_core.services.tasks import TaskService
 
@@ -56,6 +57,11 @@ def get_evaluation_service(
     return EvaluationService(session, queue, settings)
 
 
+def get_read_service(session: SessionDep, settings: SettingsDep) -> ReadService:
+    return ReadService(session, settings)
+
+
+ReadServiceDep = Annotated[ReadService, Depends(get_read_service)]
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 RunServiceDep = Annotated[RunService, Depends(get_run_service)]
