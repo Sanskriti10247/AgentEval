@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     self_fence_margin_s: float = 10.0
     reconcile_interval_s: float = 5.0
     worker_liveness_timeout_s: float = 15.0
+    # Reconciler (Step 5): a QUEUED run, or a pending stream entry, idle this
+    # long is republished / reclaimed; orphan containers are swept at this
+    # interval; the stream is trimmed approximately to stream_maxlen entries.
+    redispatch_after_s: float = 60.0
+    orphan_sweep_interval_s: float = 300.0
+    stream_maxlen: int = 100_000
 
     def lease_timing(self) -> LeaseTiming:
         return LeaseTiming(
