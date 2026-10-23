@@ -63,5 +63,5 @@ List endpoints with keyset pagination for agents, tasks, datasets, evaluations a
 |---|---|
 | Metrics derived only from Postgres (no client library) | No latency histograms for model/tool calls, which never hit the DB; scraping would be the only cost but the detail would be lost |
 | StatsD / push gateway | An extra moving part; Prometheus pull is enough on one host |
-| Grafana as the only dashboard | Good for operators, but the product needs agent/evaluation views over the API (CLAUDE.md §14); Prometheus remains usable from Grafana |
+| Grafana as the only dashboard | Good for operators, but the product needs agent/evaluation views over the API; Prometheus remains usable from Grafana |
 | Vendor APM SDK | Lock-in; OpenTelemetry exports to any backend |
