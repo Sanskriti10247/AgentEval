@@ -6,7 +6,7 @@
 #
 # What changes relative to the development stack:
 #   - no bind-mounted source, no `--reload`, no `watchfiles`: the images are what runs;
-#   - `restart: unless-stopped`, memory and CPU limits, healthchecks on /ready;
+#   - `restart: unless-stopped`, memory and CPU limits, healthchecks on /ready, rotated logs;
 #   - Postgres and Redis require passwords and publish no port; the API, the worker metrics
 #     port and the dashboard publish nothing either. The ONLY published ports are Caddy's
 #     80 and 443, which terminate TLS (automatic certificates for ${AGENTEVAL_DOMAIN}) and
@@ -23,9 +23,18 @@ x-prod-env: &prod-env
   AGENTEVAL_LOG_JSON: "true"
   AGENTEVAL_AUTH_ENABLED: ${AGENTEVAL_AUTH_ENABLED:-true}
 
+# Docker's default json-file driver never rotates, so a busy worker or proxy can fill the disk.
+# Every service below caps its logs at 5 x 50 MB (this overrides /etc/docker/daemon.json).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   postgres:
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     ports: !reset []
@@ -35,6 +44,7 @@ services:
 
   redis:
     restart: unless-stopped
+    logging: *logging
     # Append-only persistence (as in the base file) plus a password. The password comes from
     # the container environment so it never appears in the process list.
     command: ["sh", "-c", 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
@@ -49,6 +59,7 @@ services:
   api:
     image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-api:${AGENTEVAL_VERSION:-latest}
     restart: unless-stopped
+    logging: *logging
     environment: *prod-env
     # Security review F-P3: the API needs no privileges at all (it is non-root already).
     security_opt: ["no-new-privileges:true"]
@@ -78,6 +89,7 @@ services:
   worker:
     image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-worker:${AGENTEVAL_VERSION:-latest}
     restart: unless-stopped
+    logging: *logging
     environment: *prod-env
     # Security review F-P3. The worker stays root (the Docker socket), but it keeps no Linux
     # capabilities it does not use and cannot gain any.
@@ -110,6 +122,7 @@ services:
     image: ${AGENTEVAL_IMAGE_PREFIX:-ghcr.io/sanskriti10247/agenteval}-web:${AGENTEVAL_VERSION:-latest}
     profiles: !reset []
     restart: unless-stopped
+    logging: *logging
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
     build:
@@ -132,6 +145,7 @@ services:
   caddy:
     image: caddy:2.10.2-alpine
     restart: unless-stopped
+    logging: *logging
     # Only what binding 80/443 needs.
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -157,12 +171,14 @@ services:
   # Optional (`--profile observability`, see docs/deployment.md). Both stay bound to loopback.
   prometheus:
     restart: unless-stopped
+    logging: *logging
     deploy:
       resources:
         limits: { cpus: "1.0", memory: 1g }
 
   jaeger:
     restart: unless-stopped
+    logging: *logging
     deploy:
       resources:
         limits: { cpus: "1.0", memory: 1g }
