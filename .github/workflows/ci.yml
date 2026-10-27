@@ -133,6 +133,9 @@ jobs:
           - name: web
             dockerfile: infrastructure/docker/web.Dockerfile
             context: .
+          - name: api-demo
+            dockerfile: infrastructure/docker/api-demo.Dockerfile
+            context: .
           - name: sandbox
             dockerfile: infrastructure/docker/sandbox/Dockerfile
             context: infrastructure/docker/sandbox

@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { clearApiKey } from "@/lib/auth";
+import { useReadOnly } from "@/lib/hooks";
 import { useAuth } from "./auth-gate";
 
 const ITEMS = [
@@ -18,6 +19,7 @@ const ITEMS = [
 export function Nav() {
   const pathname = usePathname();
   const auth = useAuth();
+  const readOnly = useReadOnly();
   const qc = useQueryClient();
   return (
     <nav aria-label="Primary" className="w-48 shrink-0 border-r border-line bg-panel px-3 py-4">
@@ -40,7 +42,9 @@ export function Nav() {
           );
         })}
       </ul>
-      {auth?.key ? (
+      {readOnly ? (
+        <p className="mt-5 px-2 text-xs text-muted">Read-only demo: browsing only, no new runs.</p>
+      ) : auth?.key ? (
         <button
           type="button"
           onClick={() => {

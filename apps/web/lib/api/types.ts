@@ -447,3 +447,9 @@ export interface RunFilters extends PageParams {
   evaluation_id?: Uuid;
   task_id?: Uuid;
 }
+
+/** GET /health (outside /api/v1, no key needed). read_only: the API refuses every write. */
+export interface ApiHealth {
+  status: string;
+  read_only?: boolean;
+}

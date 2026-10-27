@@ -3,6 +3,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { getAuthState, setApiKey, subscribeAuth, type AuthState } from "@/lib/auth";
+import { useApiHealth } from "@/lib/hooks";
 import { Button } from "./ui";
 
 const UNKNOWN: AuthState | null = null; // server render and first client render: don't flash the form
@@ -11,12 +12,17 @@ export function useAuth(): AuthState | null {
   return useSyncExternalStore(subscribeAuth, getAuthState, () => UNKNOWN);
 }
 
-/** Shows the page only once an API key is stored; asks for one first, or again after a 401. */
+/**
+ * Shows the page only once an API key is stored; asks for one first, or again after a 401.
+ * A read-only API (GET /health says so) needs no key, so its pages show straight away.
+ */
 export function AuthGate({ children }: { children: ReactNode }) {
   const auth = useAuth();
+  const health = useApiHealth();
   if (auth === null) return null;
-  if (auth.key === null) return <KeyForm rejected={auth.rejected} />;
-  return <>{children}</>;
+  if (auth.key !== null || health.data?.read_only) return <>{children}</>;
+  if (health.isPending) return <p className="text-sm text-muted">Connecting to the API…</p>;
+  return <KeyForm rejected={auth.rejected} />;
 }
 
 export function KeyForm({ rejected }: { rejected: boolean }) {

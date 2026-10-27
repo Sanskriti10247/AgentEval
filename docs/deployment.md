@@ -2,6 +2,8 @@
 
 How to run AgentEval on a single dedicated Linux host with Docker Compose (ADR-012 F). This is a research and portfolio deployment, not a hardened multi-tenant platform: read [the Docker socket](#the-docker-socket) before you expose it.
 
+For a public, read-only showcase that costs nothing, see [Free hosting (Vercel + Render)](#free-hosting-vercel--render) at the end.
+
 What runs:
 
 | Service | Published | Notes |
@@ -205,3 +207,83 @@ The limits in `docker-compose.prod.yml` are starting points for a 4 vCPU / 8 GB 
 - Add capacity with more worker replicas: `$AEC up -d --scale worker=3` (Prometheus discovers every replica). All workers share the one `artifacts` volume, so the replicas must run on the same host.
 - `AGENTEVAL_API_WORKERS` defaults to 1. `/metrics` reads a per-process registry, so with more than one uvicorn process each scrape returns one arbitrary process's counters. Raise it only if you accept that, or scrape elsewhere.
 - Leave the lease settings at their defaults. The short timings in `docker-compose.e2e.yml` are for the test suite only.
+
+## Free hosting (Vercel + Render)
+
+A read-only showcase of real data on free tiers: the dashboard on Vercel and the API on one Render web service. It is not a deployment of the platform. It cannot run anything:
+
+- No new runs. With `AGENTEVAL_READ_ONLY=true` the API answers 403 to every route that would change state (agents, tasks, datasets, runs, evaluations, cancel, replay, keys) and serves reads without an API key. The dashboard reads `GET /health`, sees `"read_only": true`, skips the key screen and hides Cancel and Replay.
+- No worker and no sandboxes, so no Docker socket either. Overview shows zero active workers and an empty queue.
+- No persistent disk. The image carries its own PostgreSQL 16 and Redis, and every start restores the same snapshot (`infrastructure/demo/agenteval-demo.sql.gz`) into a fresh temporary directory. Render's free instance sleeps after 15 minutes without traffic and starts again on the next request, so the data resets often. Postgres runs with `fsync` off; nothing in this container is meant to survive.
+- At startup every timestamp in the snapshot is moved by the same interval so the newest is ten minutes old (`infrastructure/demo/refresh-timestamps.sql`). Without that, the overview's 24-hour to 30-day windows would be empty once the snapshot is a month old. Durations and ordering are unchanged.
+
+The snapshot is about 57 KB gzipped. It holds one frozen dataset of six tasks (`calc-bench` v1) and eight scripted agents evaluated on it with the offline `fake` provider: 8 evaluations, 84 runs, 618 trajectory events. Between them the agents produce every failure category the comparison page shows (passed, tests failed, wrong answer, missing output, tampering, max steps) and a platform failure. The `api_keys` table is empty. Workspace snapshot files are not included; the API never serves them, only the worker reads them.
+
+### What it uses
+
+`infrastructure/docker/api-demo.Dockerfile` adds PostgreSQL 16 (from the PostgreSQL project's Debian repository), `redis-server` and `tini` to the API image. `infrastructure/demo/entrypoint.sh` runs as the unprivileged `app` user: `initdb` under `/tmp`, Postgres on `127.0.0.1` with `shared_buffers=16MB`, `max_connections=10` and no autovacuum, Redis on `127.0.0.1` with no persistence and `maxmemory 16mb`, the restore, then one uvicorn process on `$PORT`. The API's pool is 3 connections plus 2 overflow (`AGENTEVAL_DB_POOL_SIZE`, `AGENTEVAL_DB_MAX_OVERFLOW`). uvicorn trusts `X-Forwarded-For`, so the per-client read budget (600 a minute) applies to each visitor rather than to Render's proxy. A visitor who forges the header only escapes that budget.
+
+Measured locally with `docker run --memory 512m --memory-swap 512m` after every dashboard read endpoint, 26 rejected writes, three bursts of 36 concurrent heavy reads and a browser pass over every page:
+
+| | `--cpus 0.5` | `--cpus 0.1` (Render free) |
+|---|---|---|
+| Container start to passing `/ready` | 10 s | 34 s |
+| cgroup `memory.peak` (includes page cache) | 289 MiB | 180 MiB |
+| cgroup `memory.current` minus page cache, after the run | 116 MiB | 106 MiB |
+| uvicorn, VmHWM | 104 MiB | 105 MiB |
+| Postgres postmaster, VmHWM / each of 3 backends | 18 MiB / 20-22 MiB | 18 MiB / 20 MiB |
+| Redis, VmHWM | 11 MiB | 8 MiB |
+
+The Postgres per-process figures count the 16 MB of shared buffers in every process; their proportional share (PSS) adds up to about 35 MiB. The page cache is reclaimable, so the instance stays well inside 512 MiB. At 0.1 CPU most of the 34 s is Python importing the API; the restore takes about 7 s. A request that wakes a sleeping instance waits for Render to start the container plus that time, and the dashboard shows "Connecting to the API" meanwhile.
+
+### Render (API)
+
+New, Web Service, connect the repository, then:
+
+| Setting | Value |
+|---|---|
+| Language | Docker |
+| Branch | `main` |
+| Root Directory | empty (the repository root) |
+| Dockerfile Path | `infrastructure/docker/api-demo.Dockerfile` |
+| Docker Build Context Directory | `.` |
+| Docker Command | empty (the image's entrypoint) |
+| Instance Type | Free |
+| Health Check Path | `/ready` |
+| Environment | `AGENTEVAL_CORS_ORIGINS=["https://<project>.vercel.app"]` |
+
+Render sets `PORT` (10000) itself, and the image already sets `AGENTEVAL_READ_ONLY=true` and the database, Redis and pool settings, so the CORS origin is the only variable to add. It is a JSON list; add a custom domain or a preview URL to it if you use one. `make demo-image` builds the same image locally.
+
+### Vercel (dashboard)
+
+Add New, Project, import the repository, then:
+
+| Setting | Value |
+|---|---|
+| Root Directory | `apps/web` |
+| Framework Preset | Next.js (detected) |
+| Build and install commands | defaults (`next build`, `npm install` from `package-lock.json`) |
+| Environment variable | `NEXT_PUBLIC_API_URL=https://<service>.onrender.com` |
+
+`NEXT_PUBLIC_API_URL` is inlined at build time, so redeploy after changing it. Nothing else is needed: the dashboard calls the API from the browser and reads no files or Docker paths. Preview deployments get their own `*.vercel.app` origins, which the API rejects unless you add them to `AGENTEVAL_CORS_ORIGINS`.
+
+### Regenerating the snapshot
+
+Do this after any migration (the image applies none, and `packages/core/tests/test_demo_snapshot.py` fails when the snapshot is behind the head) or to change the data. Use a fresh stack under its own project name and ports, so the local one is untouched:
+
+```bash
+make sandbox-image
+export COMPOSE_PROJECT_NAME=agenteval-demo-seed AGENTEVAL_PG_HOST_PORT=18232 \
+  AGENTEVAL_REDIS_HOST_PORT=18233 AGENTEVAL_API_HOST_PORT=18280 AGENTEVAL_WORKER_CONCURRENCY=4
+docker compose up -d --build --wait postgres redis api worker
+docker compose run --rm api alembic -c packages/core/alembic.ini upgrade head
+docker compose restart worker
+docker compose exec -T api python -m agenteval_api.keys create --name seed --scopes read,write
+AGENTEVAL_API_URL=http://127.0.0.1:18280 AGENTEVAL_API_KEY=ae_... uv run python scripts/demo_seed.py
+docker compose stop worker                                       # records the worker as stopped
+scripts/make_demo_snapshot.sh agenteval-demo-seed-postgres-1     # writes infrastructure/demo/agenteval-demo.sql.gz
+docker compose down -v
+```
+
+`scripts/demo_seed.py` takes a few minutes and prints each evaluation's summary and a comparison link. `scripts/make_demo_snapshot.sh` dumps the schema and data without owners or grants, leaves out the rows of `api_keys`, and refuses to write the file if the dump contains anything shaped like an AgentEval or Anthropic key, a private key, a home directory or the Docker socket path. Trajectories only ever hold sandbox paths (`/workspace/...`). Read the diff of the dump before committing it all the same.
+

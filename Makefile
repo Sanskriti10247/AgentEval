@@ -1,4 +1,4 @@
-.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up observability-up observability-down bench-smoke bench bench-report prod-config ci-local
+.PHONY: help sync sandbox-image build up down logs migrate test test-unit test-docker e2e lint fmt web web-check web-up observability-up observability-down bench-smoke bench bench-report prod-config demo-image ci-local
 
 COMPOSE := docker compose
 # The e2e suite runs the worker with short lease timings (docker-compose.e2e.yml).
@@ -78,6 +78,9 @@ bench-report:  ## Re-render docs/benchmarks/README.md from benchmarks/results/*.
 prod-config:  ## Sanity-check the production compose files (throwaway secrets; nothing is started)
 	AGENTEVAL_DOMAIN=agenteval.example.com POSTGRES_PASSWORD=x REDIS_PASSWORD=x \
 		docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+
+demo-image:  ## Build the single-container read-only demo (docs/deployment.md, "Free hosting")
+	docker build -f infrastructure/docker/api-demo.Dockerfile -t agenteval-api-demo .
 
 ci-local:  ## The checks CI runs without Docker: lint, unit tests, dashboard checks
 	uv run ruff check .

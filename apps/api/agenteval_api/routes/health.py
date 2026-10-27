@@ -6,9 +6,10 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
-async def health() -> dict[str, str]:
-    """Liveness: the process is up."""
-    return {"status": "ok"}
+async def health(request: Request) -> dict[str, str | bool]:
+    """Liveness: the process is up. `read_only` tells the dashboard whether this API
+    accepts writes (and so whether it needs an API key to browse)."""
+    return {"status": "ok", "read_only": request.app.state.settings.read_only}
 
 
 @router.get("/ready")

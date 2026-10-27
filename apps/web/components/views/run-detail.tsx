@@ -23,7 +23,15 @@ import {
 import { flatten } from "@/components/pages-util";
 import { TERMINAL_RUN_STATUSES, type AttemptEvaluationRead, type RunAttemptRead, type TrajectoryEventRead } from "@/lib/api/types";
 import { compactJson, formatCost, formatDuration, formatInt, formatScore, formatTimestamp, humanize } from "@/lib/format";
-import { useAttemptEvaluation, useAttemptEvents, useAttempts, useCancelRun, useReplayRun, useRun } from "@/lib/hooks";
+import {
+  useAttemptEvaluation,
+  useAttemptEvents,
+  useAttempts,
+  useCancelRun,
+  useReadOnly,
+  useReplayRun,
+  useRun,
+} from "@/lib/hooks";
 
 function isErrorEvent(e: TrajectoryEventRead) {
   return !!e.error_class || e.status === "error" || e.status === "timeout" || e.event_type.includes("error");
@@ -36,6 +44,7 @@ export function RunDetailView({ id }: { id: string }) {
   const attempts = useAttempts(id, live);
   const cancel = useCancelRun(id);
   const replay = useReplayRun(id);
+  const readOnly = useReadOnly();
   const [extra, setExtra] = useState(1);
   const [picked, setPicked] = useState<number | null>(null);
 
@@ -53,24 +62,28 @@ export function RunDetailView({ id }: { id: string }) {
           r ? (
             <>
               <RunStatusBadge status={r.status} />
-              <Button variant="danger" disabled={!canCancel || cancel.isPending} onClick={() => cancel.mutate()}>
-                {cancel.isPending ? "Cancelling…" : "Cancel"}
-              </Button>
-              <label className="flex items-center gap-1 text-xs text-muted">
-                +
-                <input
-                  type="number"
-                  min={1}
-                  max={9}
-                  value={extra}
-                  aria-label="Additional attempts"
-                  onChange={(e) => setExtra(Math.min(9, Math.max(1, Number(e.target.value) || 1)))}
-                  className="w-12 rounded border border-line bg-panel px-1 py-1 font-mono text-sm text-fg"
-                />
-              </label>
-              <Button disabled={!canReplay || replay.isPending} onClick={() => replay.mutate(extra)}>
-                {replay.isPending ? "Replaying…" : "Replay"}
-              </Button>
+              {readOnly ? null : (
+                <>
+                  <Button variant="danger" disabled={!canCancel || cancel.isPending} onClick={() => cancel.mutate()}>
+                    {cancel.isPending ? "Cancelling…" : "Cancel"}
+                  </Button>
+                  <label className="flex items-center gap-1 text-xs text-muted">
+                    +
+                    <input
+                      type="number"
+                      min={1}
+                      max={9}
+                      value={extra}
+                      aria-label="Additional attempts"
+                      onChange={(e) => setExtra(Math.min(9, Math.max(1, Number(e.target.value) || 1)))}
+                      className="w-12 rounded border border-line bg-panel px-1 py-1 font-mono text-sm text-fg"
+                    />
+                  </label>
+                  <Button disabled={!canReplay || replay.isPending} onClick={() => replay.mutate(extra)}>
+                    {replay.isPending ? "Replaying…" : "Replay"}
+                  </Button>
+                </>
+              )}
             </>
           ) : null
         }

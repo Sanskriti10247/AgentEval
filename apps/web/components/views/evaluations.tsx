@@ -36,6 +36,7 @@ import {
 } from "@/lib/format";
 import {
   useCancelEvaluation,
+  useReadOnly,
   useCompare,
   useDatasets,
   useEvaluation,
@@ -201,6 +202,7 @@ export function EvaluationDetailView({ id }: { id: string }) {
   const summary = useEvaluationSummary(id, live);
   const results = useEvaluationResults(id, live);
   const cancel = useCancelEvaluation(id);
+  const readOnly = useReadOnly();
   const { index } = useVersionIndex();
   const datasets = useDatasets();
   const dataset = datasets.data?.datasets.find((d) => d.id === e?.dataset_id);
@@ -218,9 +220,11 @@ export function EvaluationDetailView({ id }: { id: string }) {
           e ? (
             <>
               <EvalStateBadge state={progressSummary(e).state} />
-              <Button variant="danger" disabled={!canCancel || cancel.isPending} onClick={() => cancel.mutate()}>
-                {cancel.isPending ? "Cancelling…" : "Cancel evaluation"}
-              </Button>
+              {readOnly ? null : (
+                <Button variant="danger" disabled={!canCancel || cancel.isPending} onClick={() => cancel.mutate()}>
+                  {cancel.isPending ? "Cancelling…" : "Cancel evaluation"}
+                </Button>
+              )}
             </>
           ) : null
         }

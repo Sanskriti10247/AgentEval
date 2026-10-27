@@ -13,6 +13,17 @@ import { TERMINAL_RUN_STATUSES } from "./api/types";
 
 const LIVE_MS = 10_000;
 
+/** GET /health once per page load: whether the API is a read-only demo. */
+export const useApiHealth = () =>
+  useQuery({
+    queryKey: ["health"],
+    queryFn: ({ signal }) => api.getHealth(signal),
+    staleTime: Infinity,
+  });
+
+/** True only once the API has said it is read-only; false while unknown or on error. */
+export const useReadOnly = (): boolean => useApiHealth().data?.read_only === true;
+
 export const useOverview = (windowH: number) =>
   useQuery({
     queryKey: ["overview", windowH],

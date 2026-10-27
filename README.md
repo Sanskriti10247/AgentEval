@@ -113,8 +113,9 @@ apps/worker/agenteval_worker/   consumer, executor, agent_runner, evaluation_run
                                 lease_manager, trajectory writer, sandbox/, providers/
 apps/web/                       Next.js dashboard
 benchmarks/                     the benchmark harness (run, matrix, sampler, report) and its tests
-scripts/                        demo.sh, capture-screenshots.mjs
-infrastructure/                 Dockerfiles (api, worker, web, sandbox), caddy/, monitoring/
+scripts/                        demo.sh, capture-screenshots.mjs, demo_seed.py, make_demo_snapshot.sh
+infrastructure/                 Dockerfiles (api, worker, web, sandbox, api-demo), caddy/, monitoring/,
+                                demo/ (the read-only demo's snapshot and entrypoint)
 tests/integration/, tests/e2e/  testcontainers Postgres 16 + Redis 7; the running compose stack
 docs/                           ADRs, architecture, API, benchmarks, deployment, security review
 docker-compose*.yml             dev stack; prod, e2e (short leases) and observability overrides
@@ -439,6 +440,8 @@ The service is opt-in (profile `web`), so `make up` and the e2e runs never pay f
 ### Deployment
 
 `docker-compose.prod.yml`, applied on top of `docker-compose.yml`, runs the stack on a single dedicated host: images by tag, no source mounts or reload, `restart: unless-stopped`, resource limits, secrets from an env file outside the repository (`.env.prod.example`), and Caddy with automatic TLS as the only published service (ports 80 and 443). Postgres, Redis and the metrics ports stay on the internal network. `make prod-config` checks that the production compose files parse, using throwaway secrets and starting nothing. Release images are published to GHCR on version tags by `.github/workflows/release.yml`. The first deploy, upgrades, backups, rollback, the Docker-socket caveat and sizing are in [docs/deployment.md](docs/deployment.md).
+
+A read-only copy with sample data runs on the free tiers of Vercel (dashboard) and Render (API, Postgres and Redis in one container); [Free hosting](docs/deployment.md#free-hosting-vercel--render) has the settings and its limits.
 
 ## Demo
 

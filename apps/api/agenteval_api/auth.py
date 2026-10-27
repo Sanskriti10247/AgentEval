@@ -16,6 +16,10 @@ not use is throttled like any other. With `AGENTEVAL_AUTH_ENABLED=false` the cal
 anonymous with every scope and the budgets are keyed by client IP (the address the
 socket shows; behind a reverse proxy that is the proxy, so use the proxy's own limits
 or leave auth on).
+
+With `AGENTEVAL_READ_ONLY=true` (the public demo) any route that needs more than the
+read scope answers 403 before anything else, an `Authorization` header is ignored, and
+every caller is an anonymous visitor holding only the read scope, rate limited by IP.
 """
 
 from dataclasses import dataclass
@@ -52,6 +56,8 @@ class Principal:
 
 
 ANONYMOUS = Principal("anonymous", None, ALL_SCOPES)
+VISITOR = Principal("visitor", None, frozenset({Scope.READ}))
+READ_ONLY_DETAIL = "This AgentEval deployment is a read-only demo; it accepts no changes"
 
 
 def _unauthorized(reason: str, request: Request) -> ApiError:
@@ -78,11 +84,16 @@ class ScopeGuard:
         settings = state.settings
         structlog.contextvars.unbind_contextvars("api_key_prefix", "api_key_name")
 
-        if settings.auth_enabled:
+        client_ip = f"ip:{request.client.host if request.client else 'unknown'}"
+        if settings.read_only:
+            if self.scope is not Scope.READ:
+                metrics.auth_failure("forbidden")
+                raise ApiError(403, "Forbidden", READ_ONLY_DETAIL)
+            principal, subject = VISITOR, client_ip
+        elif settings.auth_enabled:
             principal, subject = await self._authenticate(request, credentials)
         else:
-            principal = ANONYMOUS
-            subject = f"ip:{request.client.host if request.client else 'unknown'}"
+            principal, subject = ANONYMOUS, client_ip
         request.state.principal = principal
 
         kind = "read" if request.method in _SAFE_METHODS else "write"

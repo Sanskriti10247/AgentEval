@@ -16,6 +16,10 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://agenteval:agenteval@localhost:55432/agenteval"
     redis_url: str = "redis://localhost:56379/0"
+    # SQLAlchemy connection pool per process. The defaults are SQLAlchemy's own; the
+    # single-container demo image shrinks them to fit its small Postgres.
+    db_pool_size: int = Field(default=5, ge=1)
+    db_max_overflow: int = Field(default=10, ge=0)
 
     # Queue
     dispatch_stream: str = "runs.dispatch"
@@ -36,6 +40,10 @@ class Settings(BaseSettings):
     # Largest request body the API reads (bytes); bigger gets 413 before it is parsed. Must stay
     # above the biggest legitimate body (a task: 1 MB of files + a 2 MiB evaluation spec).
     max_request_bytes: int = Field(default=5 * 1024 * 1024, ge=1024)
+
+    # Read-only showcase (docs/deployment.md, "Free hosting"): every route that would
+    # change state answers 403, reads need no API key, and nothing waits for a worker.
+    read_only: bool = False
 
     # Sandbox
     image_allowlist: list[str] = Field(default_factory=lambda: ["agenteval-sandbox:py312"])

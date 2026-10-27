@@ -12,6 +12,8 @@ curl -s -H "Authorization: Bearer $AGENTEVAL_API_KEY" localhost:8000/api/v1/runs
 
 `/health`, `/ready` and `/metrics` need no key. `/metrics` is unauthenticated on purpose and is meant for the internal network only (the compose file binds the API to `127.0.0.1`; the production profile publishes nothing but the reverse proxy). `/docs` and `/openapi.json` are served without a key too: they describe the API, not its data. The OpenAPI schema declares the bearer scheme, so the Swagger "Authorize" button works.
 
+With `AGENTEVAL_READ_ONLY=true` (the public demo, see [deployment](../deployment.md#free-hosting-vercel--render)), every route that needs the `write` or `admin` scope answers **403** `This AgentEval deployment is a read-only demo; it accepts no changes`, with or without a key, before the body is validated. Read routes need no key; an `Authorization` header is ignored, and the read budget is counted per client IP. `GET /health` returns `{"status": "ok", "read_only": true}`, which is how the dashboard knows not to ask for a key.
+
 A key looks like `ae_<8 hex>_<43 characters>`. Only its SHA-256 is stored; the full key is shown once, when it is created, and cannot be recovered (create a new one and revoke the old). The 8-character **prefix** is not secret: it identifies the key in `list`, in logs and in `revoke`.
 
 ## Getting the first key

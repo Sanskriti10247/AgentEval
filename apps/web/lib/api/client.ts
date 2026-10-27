@@ -1,6 +1,7 @@
 import { getApiKey, rejectApiKey } from "../auth";
 import type {
   AgentPage,
+  ApiHealth,
   AgentRead,
   AgentVersionRead,
   AttemptEvaluationRead,
@@ -136,6 +137,19 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 const page = (p: PageParams | undefined) => ({ after: p?.after, limit: p?.limit });
 
 // ---- reads -------------------------------------------------------------------
+
+/** The API's liveness probe, which also says whether it is a read-only deployment. */
+export async function getHealth(signal?: AbortSignal): Promise<ApiHealth> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl()}/health`, { headers: { Accept: "application/json" }, signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError(`Cannot reach the API at ${apiBaseUrl()}. Is it running?`, 0);
+  }
+  if (!response.ok) throw new ApiError(`Request failed with status ${response.status}`, response.status);
+  return (await response.json()) as ApiHealth;
+}
 
 export const getOverview = (windowH = 24, signal?: AbortSignal) =>
   request<StatsOverview>("/stats/overview", { params: { window_h: windowH }, signal });
