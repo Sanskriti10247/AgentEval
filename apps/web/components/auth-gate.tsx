@@ -3,7 +3,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { getAuthState, setApiKey, subscribeAuth, type AuthState } from "@/lib/auth";
-import { useApiHealth } from "@/lib/hooks";
+import { apiBaseUrl } from "@/lib/api/client";
+import { isUnreachable, useApiHealth } from "@/lib/hooks";
 import { Button, Loading, Notice } from "./ui";
 
 const UNKNOWN: AuthState | null = null; // server render and first client render: don't flash the form
@@ -22,8 +23,35 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const health = useApiHealth();
   if (auth === null) return null;
   if (auth.key !== null || health.data?.read_only || health.data?.public_demo) return <>{children}</>;
-  if (health.isPending) return <Loading label="Connecting to the API" />;
+  if (health.isPending) {
+    return (
+      <div className="mt-10 max-w-[34rem] md:mt-20">
+        <Loading label={health.failureCount > 0 ? "Waking the API" : "Connecting to the API"} />
+        {health.failureCount > 0 ? (
+          <p className="text-[13px] leading-relaxed text-muted">
+            No answer from <span className="font-mono text-ink-2">{apiBaseUrl()}</span> yet. A free instance that has
+            been idle takes about a minute to start; this page carries on by itself once it does.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+  // A key cannot help while the API is unreachable, so say what is wrong instead of asking for one.
+  if (isUnreachable(health.error) && auth.key === null) return <Unreachable onRetry={() => void health.refetch()} />;
   return <KeyForm rejected={auth.rejected} />;
+}
+
+function Unreachable({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="mt-10 max-w-[34rem] space-y-4 md:mt-20">
+      <h1 className="font-display text-[26px] font-semibold leading-tight">The API is not answering</h1>
+      <Notice title={`No response from ${apiBaseUrl()}/health`}>
+        Either it is down, the address is wrong, or it does not allow requests from this site. The address comes
+        from NEXT_PUBLIC_API_URL at build time, and the API must list this site in AGENTEVAL_CORS_ORIGINS.
+      </Notice>
+      <Button onClick={onRetry}>Try again</Button>
+    </div>
+  );
 }
 
 export function KeyForm({ rejected }: { rejected: boolean }) {

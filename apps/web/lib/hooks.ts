@@ -35,11 +35,24 @@ function useRefreshOnSettle(key: readonly unknown[], settled: boolean | undefine
 }
 
 /** GET /health once per page load: whether the API is a read-only demo. */
+/**
+ * GET /health, retried for about three minutes: a free-tier API that has been idle takes
+ * a minute or so to wake, and until it answers we cannot tell a public demo from a
+ * deployment that wants a key.
+ */
+export const HEALTH_RETRIES = 36;
+
+/** No answer at all (network, CORS) or a gateway error: the API is down or still starting. */
+export const isUnreachable = (err: unknown): boolean =>
+  err instanceof api.ApiError && (err.status === 0 || err.status >= 500);
+
 export const useApiHealth = () =>
   useQuery({
     queryKey: ["health"],
     queryFn: ({ signal }) => api.getHealth(signal),
     staleTime: Infinity,
+    retry: (count, err) => isUnreachable(err) && count < HEALTH_RETRIES,
+    retryDelay: 5_000,
   });
 
 /** True only once the API has said it is read-only; false while unknown or on error. */
