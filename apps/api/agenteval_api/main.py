@@ -53,9 +53,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.ratelimiter = RateLimiter(app.state.redis)
         if settings.read_only:
             log.warning("read_only", note="writes answer 403; reads need no API key")
+        elif settings.public_demo:
+            log.warning(
+                "public_demo",
+                note="no API key; only evaluations, runs, cancel and replay are writable",
+                max_repetitions=settings.demo_max_repetitions,
+                max_active_runs=settings.demo_max_active_runs,
+            )
         elif not settings.auth_enabled:
             log.warning("auth_disabled", note="every caller is anonymous with all scopes")
-        log.info("api_started", auth_enabled=settings.auth_enabled, read_only=settings.read_only)
+        log.info(
+            "api_started",
+            auth_enabled=settings.auth_enabled,
+            read_only=settings.read_only,
+            public_demo=settings.public_demo,
+        )
         try:
             yield
         finally:

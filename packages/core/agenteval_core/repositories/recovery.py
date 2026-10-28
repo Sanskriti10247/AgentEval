@@ -1,4 +1,4 @@
-"""The reconciler's SQL (Step 5; PROGRESS.md section 17, ADR-008 H4).
+"""The reconciler's SQL (ADR-008 H4).
 
 Each method is one recovery step run inside a transaction the *caller* owns
 (the repository flushes, never commits). The shape is always the same:

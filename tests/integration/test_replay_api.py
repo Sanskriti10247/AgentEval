@@ -1,4 +1,4 @@
-"""Phase 5 Step 9: POST /runs/{id}/replay (PROGRESS.md section 21; R14, F10, G4).
+"""POST /runs/{id}/replay (R14, F10, G4).
 
 DB-level cases use hand-seeded FAILED runs so every response code and every
 cleared column is hit exactly; the last test drives the real worker: a run that

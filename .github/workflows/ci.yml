@@ -46,7 +46,7 @@ jobs:
           enable-cache: true
       - run: uv sync --all-packages
       # Same selection as `make test-unit`, plus the benchmark harness tests.
-      - run: uv run pytest packages/core/tests apps/worker/tests/test_bounded_buffer.py benchmarks/tests
+      - run: uv run pytest packages/core/tests apps/worker/tests/test_bounded_buffer.py apps/worker/tests/test_local_sandbox.py benchmarks/tests
 
   integration:
     name: Integration tests (Docker)

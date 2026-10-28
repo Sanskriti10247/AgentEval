@@ -4,9 +4,10 @@ PublicEvaluation built by public_view(); see services/evaluations.py."""
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Query, Response, status
+from fastapi import APIRouter, Header, Query, Request, Response, status
 
-from agenteval_api.auth import READ, WRITE
+from agenteval_api import demo
+from agenteval_api.auth import DEMO_WRITE, READ
 from agenteval_api.deps import EvaluationServiceDep, ReadServiceDep
 from agenteval_core.schemas.evaluation import (
     Compare,
@@ -26,17 +27,20 @@ router = APIRouter(prefix="/evaluations", tags=["evaluations"])
     status_code=status.HTTP_202_ACCEPTED,
     response_model=EvaluationRead,
     responses={200: {"description": "Replay of an earlier request with the same Idempotency-Key"}},
-    dependencies=[WRITE],
+    dependencies=[DEMO_WRITE],
 )
 async def create_evaluation(
     body: EvaluationCreate,
     evaluations: EvaluationServiceDep,
+    request: Request,
     response: Response,
     idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
 ) -> EvaluationRead:
     """Run an agent version on every task of a FROZEN dataset, `repetitions`
     times. 202 for a new batch, 200 when the key is replayed (runs still
-    QUEUED are re-dispatched)."""
+    QUEUED are re-dispatched). In a public demo, 422 above the demo's repetition
+    cap and 429 while its cap on queued + running runs is reached."""
+    await demo.check_evaluation(request, body.dataset_id, body.repetitions)
     result = await evaluations.create(body, idempotency_key)
     if not result.created:
         response.status_code = status.HTTP_200_OK
@@ -84,7 +88,7 @@ async def get_evaluation(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=EvaluationRead,
     responses={200: {"description": "Already cancelled: nothing changed"}},
-    dependencies=[WRITE],
+    dependencies=[DEMO_WRITE],
 )
 async def cancel_evaluation(
     evaluation_id: uuid.UUID, evaluations: EvaluationServiceDep, response: Response

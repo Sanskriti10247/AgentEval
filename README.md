@@ -115,7 +115,7 @@ apps/web/                       Next.js dashboard
 benchmarks/                     the benchmark harness (run, matrix, sampler, report) and its tests
 scripts/                        demo.sh, capture-screenshots.mjs, demo_seed.py, make_demo_snapshot.sh
 infrastructure/                 Dockerfiles (api, worker, web, sandbox, api-demo), caddy/, monitoring/,
-                                demo/ (the read-only demo's snapshot and entrypoint)
+                                demo/ (the public demo's snapshot and entrypoint)
 tests/integration/, tests/e2e/  testcontainers Postgres 16 + Redis 7; the running compose stack
 docs/                           ADRs, architecture, API, benchmarks, deployment, security review
 docker-compose*.yml             dev stack; prod, e2e (short leases) and observability overrides
@@ -340,7 +340,7 @@ The evaluation container has the same controls, plus `noexec,nosuid,nodev` on ev
 
 Model credentials live only in the worker's environment. They are never passed into a sandbox (a test inspects a live one) and never put in prompts. Structured logs redact `sk-ant-…` values, `ae_…` API keys, `Bearer …` text and credential-named fields (`api_key`, `authorization`, `x-api-key`, …). Tasks may only use images listed in `AGENTEVAL_IMAGE_ALLOWLIST`, checked by the API at task creation and again by the worker before it creates a container; the worker never pulls images.
 
-Because the worker mounts `/var/run/docker.sock`, it is a trusted component and runs as root in its container, with all Linux capabilities dropped in production. The API has no socket access, runs as a non-root user, and its image installs neither the Docker SDK nor the Anthropic SDK.
+Because the worker mounts `/var/run/docker.sock`, it is a trusted component and runs as root in its container, with all Linux capabilities dropped in production. The worker's other backend, `AGENTEVAL_SANDBOX_BACKEND=local`, runs tasks as its own subprocesses with no isolation at all; it exists for the free-hosting demo, where public demo mode limits runs to seeded agents and tasks, and must not be used anywhere that accepts new ones. The API has no socket access, runs as a non-root user, and its image installs neither the Docker SDK nor the Anthropic SDK.
 
 Every `/api/v1` request needs an API key (`ae_<prefix>_<secret>`, 256 bits of randomness, stored only as a SHA-256 and compared in constant time). Keys have `read`, `write` and `admin` scopes, can expire and can be revoked, and a test fails if any route lacks a scope. The first key is minted by an operator CLI inside the API container; there is no anonymous endpoint for it. `/health`, `/ready` and `/metrics` are open, and `/metrics` is meant for the internal network only (the production proxy answers it with 404). Each key has a per-minute budget of 600 reads and 120 writes, counted in Redis and answered with 429 and `Retry-After`; it fails open if Redis is down, since Redis is never the authority. Request bodies are capped at 5 MiB (`AGENTEVAL_MAX_REQUEST_BYTES`, 413), tasks and specs have their own size and count limits, 422s never echo the input, and a value Postgres cannot store is a fixed-text 422 rather than a 500. Details: [docs/api/auth.md](docs/api/auth.md) and [ADR-012](docs/decisions/ADR-012-production-polish.md).
 
@@ -441,7 +441,7 @@ The service is opt-in (profile `web`), so `make up` and the e2e runs never pay f
 
 `docker-compose.prod.yml`, applied on top of `docker-compose.yml`, runs the stack on a single dedicated host: images by tag, no source mounts or reload, `restart: unless-stopped`, resource limits, secrets from an env file outside the repository (`.env.prod.example`), and Caddy with automatic TLS as the only published service (ports 80 and 443). Postgres, Redis and the metrics ports stay on the internal network. `make prod-config` checks that the production compose files parse, using throwaway secrets and starting nothing. Release images are published to GHCR on version tags by `.github/workflows/release.yml`. The first deploy, upgrades, backups, rollback, the Docker-socket caveat and sizing are in [docs/deployment.md](docs/deployment.md).
 
-A read-only copy with sample data runs on the free tiers of Vercel (dashboard) and Render (API, Postgres and Redis in one container); [Free hosting](docs/deployment.md#free-hosting-vercel--render) has the settings and its limits.
+A small public demo runs on the free tiers of Vercel (dashboard) and Render (API, worker, Postgres and Redis in one container, no Docker). Visitors need no key and can launch evaluations and runs of the sample agents and watch them execute, but nothing else: there is no Docker daemon there, so the worker runs tasks as plain subprocesses, which is only safe because the demo accepts nothing but the seeded agents and tasks. Its data resets whenever the instance restarts or sleeps. [Free hosting](docs/deployment.md#free-hosting-vercel--render) has the settings, the limits and measurements.
 
 ## Demo
 

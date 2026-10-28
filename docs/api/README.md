@@ -18,7 +18,7 @@ CORS allows only the origins in `AGENTEVAL_CORS_ORIGINS` (default `http://localh
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/health`, `/ready` | Open (no key). Liveness (`{"status": "ok", "read_only": false}`; `read_only` is true on the demo deployment); readiness checks Postgres and Redis (503 if either is down). `/metrics` is open too |
+| GET | `/health`, `/ready` | Open (no key). Liveness (`{"status": "ok", "read_only": false, "public_demo": false, "demo_limits": null}`; the flags and limits describe the demo modes, see [auth.md](auth.md)); readiness checks Postgres and Redis (503 if either is down). `/metrics` is open too |
 | POST, GET | `/api/v1/keys` | `admin`. Create a key (201; the full `key` is returned once) / list keys (never secrets) |
 | DELETE | `/api/v1/keys/{prefix}` | `admin`. Revoke; 204, idempotent; 404 unknown |
 | POST | `/api/v1/agents` | 201; 409 if the name is taken |

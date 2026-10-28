@@ -2,28 +2,37 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { useState, type ReactNode } from "react";
+import { Bar, BarChart, CartesianGrid, ErrorBar, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
-  Badge,
   Button,
+  ButtonLink,
   CategoryBadge,
   Empty,
-  ErrorState,
   Gate,
   IdLink,
   KeyValue,
+  Live,
   LoadMore,
+  Meter,
   Mono,
+  Notice,
+  Num,
   PageHeader,
-  Panel,
+  RateCell,
+  Readouts,
   RunStatusBadge,
+  Section,
   Stat,
+  StatusMark,
   Table,
   Td,
   Th,
+  Timestamp,
 } from "@/components/ui";
 import { flatten } from "@/components/pages-util";
+import { StatusStrip } from "@/components/views/dashboard";
+import { describeWriteError } from "@/components/launch/write-error";
 import { RUN_STATUSES, TERMINAL_RUN_STATUSES, type EvaluationRead, type EvaluationSummary } from "@/lib/api/types";
 import {
   formatCost,
@@ -36,7 +45,7 @@ import {
 } from "@/lib/format";
 import {
   useCancelEvaluation,
-  useReadOnly,
+  useCapabilities,
   useCompare,
   useDatasets,
   useEvaluation,
@@ -47,16 +56,14 @@ import {
   useVersionIndex,
   type VersionInfo,
 } from "@/lib/hooks";
-import { RUN_STATUS_COLOR } from "@/lib/status";
-
-const CATEGORY_COLORS = ["#6aa7ff", "#3fb97a", "#e5a63a", "#ef5f5f", "#a78bfa", "#5eb0ef", "#d98fd0", "#8b93a0"];
+import type { Tone } from "@/lib/status";
 
 function AgentCell({ versionId, index }: { versionId: string; index: Map<string, VersionInfo> }) {
   const info = index.get(versionId);
   if (!info) return <IdLink id={versionId} />;
   return (
-    <span title={`${info.provider}/${info.model} (version ${versionId})`}>
-      <Link href={`/agents/${info.agentId}`}>{info.agentName}</Link> <Mono className="text-muted">v{info.version}</Mono>
+    <span title={`${info.provider}/${info.model} (version ${versionId})`} className="whitespace-nowrap">
+      <Link href={`/agents/${info.agentId}`}>{info.agentName}</Link> <Mono className="text-[12px] text-faint">v{info.version}</Mono>
     </span>
   );
 }
@@ -68,8 +75,10 @@ export function progressSummary(e: EvaluationRead) {
   return { done, total: e.progress.runs_total, state };
 }
 
+const STATE_TONE: Record<string, Tone> = { COMPLETE: "good", CANCELLED: "muted", RUNNING: "active" };
+
 function EvalStateBadge({ state }: { state: string }) {
-  return <Badge tone={state === "COMPLETE" ? "good" : state === "CANCELLED" ? "muted" : "active"}>{state}</Badge>;
+  return <StatusMark tone={STATE_TONE[state] ?? "neutral"}>{state}</StatusMark>;
 }
 
 export function EvaluationRows({
@@ -91,52 +100,67 @@ export function EvaluationRows({
     <Table caption="Evaluations">
       <thead>
         <tr>
-          {onToggle ? <Th>Compare</Th> : null}
+          {onToggle ? (
+            <Th className="w-6">
+              <span className="sr-only">Compare</span>
+            </Th>
+          ) : null}
           <Th>Evaluation</Th>
-          <Th>Agent</Th>
-          <Th>Dataset</Th>
-          <Th>State</Th>
-          <Th className="text-right">Runs done</Th>
+          <Th className="hidden sm:table-cell">Agent</Th>
+          <Th className="hidden lg:table-cell">Dataset</Th>
+          <Th>Progress</Th>
           <Th className="text-right">Success</Th>
-          <Th className="text-right">Latency p50</Th>
-          <Th className="text-right">Cost / task</Th>
-          <Th>Created</Th>
+          <Th className="hidden text-right md:table-cell">p50</Th>
+          <Th className="hidden text-right md:table-cell">Cost / task</Th>
+          <Th className="hidden xl:table-cell">Created</Th>
         </tr>
       </thead>
       <tbody>
         {evaluations.map((e, i) => {
           const s = summaries[i];
           const p = progressSummary(e);
+          const checked = selected?.includes(e.id) ?? false;
           return (
-            <tr key={e.id}>
+            <tr key={e.id} className={checked ? "bg-accent-soft" : "hover:bg-sunken/50"}>
               {onToggle ? (
                 <Td>
                   <input
                     type="checkbox"
                     aria-label={`Select ${e.name} for comparison`}
-                    checked={selected?.includes(e.id) ?? false}
+                    checked={checked}
                     onChange={() => onToggle(e.id)}
                   />
                 </Td>
               ) : null}
               <Td>
-                <Link href={`/evaluations/${e.id}`}>{e.name}</Link>
-                <div className="font-mono text-xs text-muted">{shortId(e.id)}</div>
+                <Link href={`/evaluations/${e.id}`} className="font-medium">
+                  {e.name}
+                </Link>
+                <div className="font-mono text-[11px] text-faint">{shortId(e.id)}</div>
               </Td>
-              <Td>
+              <Td className="hidden sm:table-cell">
                 <AgentCell versionId={e.agent_version_id} index={index} />
               </Td>
-              <Td>{datasetNames?.get(e.dataset_id) ?? <IdLink id={e.dataset_id} />}</Td>
-              <Td>
-                <EvalStateBadge state={p.state} />
+              <Td className="hidden whitespace-nowrap lg:table-cell">{datasetNames?.get(e.dataset_id) ?? <IdLink id={e.dataset_id} />}</Td>
+              <Td className="min-w-[8.5rem]">
+                <div className="flex items-baseline justify-between gap-3">
+                  <EvalStateBadge state={p.state} />
+                  <span className="font-mono text-[11.5px] text-faint tabular-nums">
+                    {p.done}/{p.total}
+                  </span>
+                </div>
+                <div className="mt-1.5">
+                  <StatusStrip byStatus={e.progress.runs_by_status} total={e.progress.runs_total} height={3} />
+                </div>
               </Td>
-              <Td className="text-right font-mono tabular-nums">
-                {p.done}/{p.total}
+              <Td className="text-right">
+                <RateCell rate={s?.success_rate} text={formatPercent(s?.success_rate)} />
               </Td>
-              <Td className="text-right font-mono tabular-nums">{formatPercent(s?.success_rate)}</Td>
-              <Td className="text-right font-mono tabular-nums">{formatDuration(s?.latency_ms?.p50)}</Td>
-              <Td className="text-right font-mono tabular-nums">{formatCost(s?.cost_usd.mean_per_attempt)}</Td>
-              <Td className="whitespace-nowrap font-mono">{formatTimestamp(e.created_at)}</Td>
+              <Num className="hidden md:table-cell">{formatDuration(s?.latency_ms?.p50)}</Num>
+              <Num className="hidden md:table-cell">{formatCost(s?.cost_usd.mean_per_attempt)}</Num>
+              <Td className="hidden xl:table-cell">
+                <Timestamp value={formatTimestamp(e.created_at)} />
+              </Td>
             </tr>
           );
         })}
@@ -148,6 +172,7 @@ export function EvaluationRows({
 export function EvaluationsView() {
   const router = useRouter();
   const query = useEvaluations();
+  const caps = useCapabilities();
   const evaluations = flatten(query.data, "evaluations");
   const summaries = useEvaluationSummaries(evaluations.map((e) => e.id));
   const { index } = useVersionIndex();
@@ -161,17 +186,32 @@ export function EvaluationsView() {
   return (
     <>
       <PageHeader
+        eyebrow="Benchmarks"
         title="Evaluations"
-        subtitle="Benchmark batches: one agent version over every task of a frozen dataset. Select 2 to 5 to compare."
+        subtitle="Each evaluation runs one agent version over every task of a frozen dataset, a set number of times, and grades every attempt. Tick two to five rows on the same dataset to compare them."
         actions={
-          <Button disabled={!canCompare} onClick={() => router.push(`/evaluations/compare?ids=${selected.join(",")}`)}>
-            Compare selected ({selected.length})
-          </Button>
+          <>
+            <Button disabled={!canCompare} onClick={() => router.push(`/evaluations/compare?ids=${selected.join(",")}`)}>
+              Compare selected ({selected.length})
+            </Button>
+            {caps.canLaunch ? (
+              <ButtonLink href="/evaluations/new" variant="primary">
+                New evaluation
+              </ButtonLink>
+            ) : null}
+          </>
         }
       />
       <Gate query={query}>
         {evaluations.length === 0 ? (
-          <Empty>No evaluations yet. Start one with POST /api/v1/evaluations.</Empty>
+          <Empty
+            title="No evaluations yet"
+            action={caps.canLaunch ? <ButtonLink href="/evaluations/new" variant="primary">New evaluation</ButtonLink> : undefined}
+          >
+            {caps.canLaunch
+              ? "Pick an agent version and a frozen dataset, and the platform queues one run per task and repetition."
+              : "Evaluations are started through the API (POST /api/v1/evaluations); they appear here as soon as they are queued."}
+          </Empty>
         ) : (
           <>
             <EvaluationRows
@@ -195,6 +235,22 @@ export function EvaluationsView() {
   );
 }
 
+/** Success rate on a 0..100% scale, with the 95% interval drawn as a band behind the mark. */
+function RateWithInterval({ rate, ci }: { rate: number | null; ci: [number, number] | null }) {
+  return (
+    <div className="relative h-[9px]" aria-hidden="true">
+      <div className="absolute inset-x-0 top-[3px] h-[3px] bg-sunken" />
+      {ci ? (
+        <div
+          className="absolute top-[3px] h-[3px] bg-rule-strong"
+          style={{ left: `${ci[0] * 100}%`, width: `${Math.max(0, ci[1] - ci[0]) * 100}%` }}
+        />
+      ) : null}
+      {rate !== null ? <div className="absolute top-0 h-[9px] w-[2px] -translate-x-1/2 bg-ink" style={{ left: `${rate * 100}%` }} /> : null}
+    </div>
+  );
+}
+
 export function EvaluationDetailView({ id }: { id: string }) {
   const evaluation = useEvaluation(id);
   const e = evaluation.data;
@@ -202,7 +258,7 @@ export function EvaluationDetailView({ id }: { id: string }) {
   const summary = useEvaluationSummary(id, live);
   const results = useEvaluationResults(id, live);
   const cancel = useCancelEvaluation(id);
-  const readOnly = useReadOnly();
+  const caps = useCapabilities();
   const { index } = useVersionIndex();
   const datasets = useDatasets();
   const dataset = datasets.data?.datasets.find((d) => d.id === e?.dataset_id);
@@ -210,17 +266,41 @@ export function EvaluationDetailView({ id }: { id: string }) {
   const rows = flatten(results.data, "results");
   const taskNames = new Map((s?.per_task ?? []).map((t) => [t.task_id, t.task_name]));
   const canCancel = !!e && !e.cancel_requested_at && !e.progress.complete;
+  const info = e ? index.get(e.agent_version_id) : undefined;
+  const categoryTotal = s ? Object.values(s.failure_categories).reduce((a, b) => a + b, 0) : 0;
 
   return (
     <>
       <PageHeader
+        eyebrow={
+          <>
+            <Link href="/evaluations" className="no-underline hover:text-ink">
+              Evaluations
+            </Link>{" "}
+            / {shortId(id)}
+          </>
+        }
         title={e?.name ?? "Evaluation"}
-        subtitle={e ? <span className="font-mono">{e.id}</span> : undefined}
+        subtitle={
+          e ? (
+            <>
+              {info ? (
+                <>
+                  <Link href={`/agents/${info.agentId}`}>{info.agentName}</Link> v{info.version}
+                </>
+              ) : (
+                <Mono>{shortId(e.agent_version_id)}</Mono>
+              )}{" "}
+              on {dataset ? `${dataset.name} v${dataset.version}` : <Mono>{shortId(e.dataset_id)}</Mono>}, {e.repetitions}{" "}
+              repetition{e.repetitions === 1 ? "" : "s"} per task. Queued <Mono className="text-[12.5px]">{formatTimestamp(e.created_at)}</Mono> UTC.
+            </>
+          ) : undefined
+        }
         actions={
           e ? (
             <>
-              <EvalStateBadge state={progressSummary(e).state} />
-              {readOnly ? null : (
+              {live ? <Live /> : <EvalStateBadge state={progressSummary(e).state} />}
+              {caps.readOnly ? null : (
                 <Button variant="danger" disabled={!canCancel || cancel.isPending} onClick={() => cancel.mutate()}>
                   {cancel.isPending ? "Cancelling…" : "Cancel evaluation"}
                 </Button>
@@ -231,67 +311,41 @@ export function EvaluationDetailView({ id }: { id: string }) {
       />
       <Gate query={evaluation}>
         {e ? (
-          <div className="space-y-4">
-            {cancel.isError ? <ErrorState error={cancel.error} /> : null}
-            <Panel title="Summary">
-              <KeyValue
-                items={[
-                  ["Agent", <AgentCell key="a" versionId={e.agent_version_id} index={index} />],
-                  ["Dataset", dataset ? `${dataset.name} v${dataset.version}` : <IdLink key="d" id={e.dataset_id} />],
-                  ["Repetitions", <Mono key="r">{e.repetitions}</Mono>],
-                  ["Created", <Mono key="c">{formatTimestamp(e.created_at)}</Mono>],
-                  ["Cancel requested", <Mono key="cr">{formatTimestamp(e.cancel_requested_at)}</Mono>],
-                  [
-                    "Attempt budgets",
-                    <Mono key="b">
-                      runs {e.run_max_attempts}, grading {e.eval_max_attempts}
-                    </Mono>,
-                  ],
-                  [
-                    "Scoring",
-                    <Mono key="w" >
-                      {e.scoring_config.version}: success {e.scoring_config.weights.task_success}, tests{" "}
-                      {e.scoring_config.weights.test_score}, reliability {e.scoring_config.weights.reliability},
-                      efficiency {e.scoring_config.weights.efficiency}
-                    </Mono>,
-                  ],
-                ]}
-              />
-            </Panel>
+          <div className="space-y-10">
+            {cancel.isError ? <Notice title={describeWriteError(cancel.error).title}>{describeWriteError(cancel.error).body}</Notice> : null}
 
             <Gate query={summary} loadingLabel="Loading summary">
               {s ? (
-                <dl className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                  <Stat
-                    label="Success rate"
-                    value={formatPercent(s.success_rate)}
-                    hint={s.ci95 ? `95% CI ${formatPercent(s.ci95[0])} to ${formatPercent(s.ci95[1])}` : "nothing graded yet"}
-                  />
-                  <Stat label="Passed / graded" value={`${s.passed} / ${s.graded}`} hint={`${s.attempts} attempts`} />
-                  <Stat
-                    label="Latency p50 / p95"
-                    value={`${formatDuration(s.latency_ms?.p50)} / ${formatDuration(s.latency_ms?.p95)}`}
-                  />
-                  <Stat
-                    label="Cost / task"
-                    value={formatCost(s.cost_usd.mean_per_attempt)}
-                    hint={`${formatCost(s.cost_usd.total)} total`}
-                  />
-                  <Stat label="Mean score" value={formatScore(s.mean_score?.overall)} />
-                  <Stat
-                    label="Platform failures"
-                    value={formatInt(s.platform_failures)}
-                    hint="excluded from success rate"
-                  />
-                  <Stat label="Evaluation errors" value={formatInt(s.evaluation_errors)} />
-                  <Stat label="Ungraded / in progress" value={`${s.ungraded} / ${s.in_progress}`} />
-                </dl>
+                <div className="space-y-6">
+                  <Readouts>
+                    <Stat
+                      label="Success rate"
+                      value={formatPercent(s.success_rate)}
+                      meter={<RateWithInterval rate={s.success_rate} ci={s.ci95} />}
+                      hint={s.ci95 ? `95% CI ${formatPercent(s.ci95[0])} to ${formatPercent(s.ci95[1])}` : "nothing graded yet"}
+                    />
+                    <Stat label="Passed / graded" value={`${s.passed} / ${s.graded}`} hint={`${s.attempts} attempts so far`} />
+                    <Stat
+                      label="Mean score"
+                      value={formatScore(s.mean_score?.overall)}
+                      meter={<Meter value={s.mean_score ? Number(s.mean_score.overall) : null} />}
+                      hint="weighted, 0 to 1"
+                    />
+                    <Stat label="Cost / task" value={formatCost(s.cost_usd.mean_per_attempt)} hint={`${formatCost(s.cost_usd.total)} total`} />
+                  </Readouts>
+                  <Readouts>
+                    <Stat label="Latency p50 / p95" value={`${formatDuration(s.latency_ms?.p50)} / ${formatDuration(s.latency_ms?.p95)}`} />
+                    <Stat label="Platform failures" value={formatInt(s.platform_failures)} hint="sandbox or model trouble; not counted against the agent" />
+                    <Stat label="Evaluation errors" value={formatInt(s.evaluation_errors)} hint="the grader itself failed" />
+                    <Stat label="Ungraded / in progress" value={`${s.ungraded} / ${s.in_progress}`} />
+                  </Readouts>
+                </div>
               ) : null}
             </Gate>
 
-            <Panel title="Progress">
+            <Section title="Progress" note={`${progressSummary(e).done} of ${e.progress.runs_total} runs finished`}>
               <ProgressBar e={e} />
-              <div className="mt-3 grid gap-4 md:grid-cols-2">
+              <div className="mt-5 grid gap-x-10 gap-y-6 md:grid-cols-2">
                 <Table caption="Runs by status">
                   <thead>
                     <tr>
@@ -305,7 +359,7 @@ export function EvaluationDetailView({ id }: { id: string }) {
                         <Td>
                           <RunStatusBadge status={st} />
                         </Td>
-                        <Td className="text-right font-mono tabular-nums">{e.progress.runs_by_status[st] ?? 0}</Td>
+                        <Num>{e.progress.runs_by_status[st] ?? 0}</Num>
                       </tr>
                     ))}
                   </tbody>
@@ -320,76 +374,90 @@ export function EvaluationDetailView({ id }: { id: string }) {
                   <tbody>
                     {Object.entries(e.progress.evaluations_by_status).map(([k, v]) => (
                       <tr key={k}>
-                        <Td className="font-mono">{k}</Td>
-                        <Td className="text-right font-mono tabular-nums">{v}</Td>
+                        <Td className="font-mono text-[12px] text-ink-2">{k}</Td>
+                        <Num>{v}</Num>
                       </tr>
                     ))}
                     <tr>
-                      <Td>awaiting evaluation</Td>
-                      <Td className="text-right font-mono tabular-nums">{e.progress.awaiting_evaluation}</Td>
+                      <Td className="text-muted">awaiting evaluation</Td>
+                      <Num>{e.progress.awaiting_evaluation}</Num>
                     </tr>
                   </tbody>
                 </Table>
               </div>
-            </Panel>
-
-            {s && Object.keys(s.failure_categories).length > 0 ? (
-              <Panel title="Failure categories">
-                <Table caption="Failure categories">
-                  <thead>
-                    <tr>
-                      <Th>Category</Th>
-                      <Th className="text-right">Attempts</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.entries(s.failure_categories)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([k, v]) => (
-                        <tr key={k}>
-                          <Td>
-                            <CategoryBadge category={k} />
-                          </Td>
-                          <Td className="text-right font-mono tabular-nums">{v}</Td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </Table>
-              </Panel>
-            ) : null}
+            </Section>
 
             {s && s.per_task.length > 0 ? (
-              <Panel title="Per task">
+              <Section title="Per task">
                 <Table caption="Per-task results">
                   <thead>
                     <tr>
                       <Th>Task</Th>
-                      <Th>Difficulty</Th>
-                      <Th className="text-right">Attempts</Th>
+                      <Th className="hidden sm:table-cell">Difficulty</Th>
+                      <Th className="hidden text-right sm:table-cell">Attempts</Th>
                       <Th className="text-right">Passed / graded</Th>
                       <Th className="text-right">Success</Th>
-                      <Th className="text-right">Mean score</Th>
+                      <Th className="hidden text-right md:table-cell">Mean score</Th>
                     </tr>
                   </thead>
                   <tbody>
                     {s.per_task.map((t) => (
                       <tr key={t.task_id}>
-                        <Td>{t.task_name}</Td>
-                        <Td>{t.difficulty ?? "–"}</Td>
-                        <Td className="text-right font-mono tabular-nums">{t.attempts}</Td>
-                        <Td className="text-right font-mono tabular-nums">
-                          {t.passed} / {t.graded}
+                        <Td>
+                          <Link href={`/runs?evaluation_id=${e.id}&task_id=${t.task_id}`} className="no-underline hover:underline">
+                            {t.task_name}
+                          </Link>
                         </Td>
-                        <Td className="text-right font-mono tabular-nums">{formatPercent(t.success_rate)}</Td>
-                        <Td className="text-right font-mono tabular-nums">{formatScore(t.mean_overall)}</Td>
+                        <Td className="hidden text-muted sm:table-cell">{t.difficulty ?? "–"}</Td>
+                        <Num className="hidden sm:table-cell">{t.attempts}</Num>
+                        <Num>
+                          {t.passed} / {t.graded}
+                        </Num>
+                        <Td className="text-right">
+                          <RateCell rate={t.success_rate} text={formatPercent(t.success_rate)} />
+                        </Td>
+                        <Num className="hidden md:table-cell">{formatScore(t.mean_overall)}</Num>
                       </tr>
                     ))}
                   </tbody>
                 </Table>
-              </Panel>
+              </Section>
             ) : null}
 
-            <Panel title="Results">
+            {s && categoryTotal > 0 ? (
+              <Section title="Outcomes by category" note="every graded attempt lands in exactly one category">
+                <div className="max-w-2xl">
+                  <Table caption="Failure categories">
+                    <thead>
+                      <tr>
+                        <Th>Category</Th>
+                        <Th className="text-right">Attempts</Th>
+                        <Th className="w-1/2">
+                          <span className="sr-only">Share</span>
+                        </Th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(s.failure_categories)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([k, v]) => (
+                          <tr key={k}>
+                            <Td>
+                              <CategoryBadge category={k} />
+                            </Td>
+                            <Num>{v}</Num>
+                            <Td>
+                              <Meter value={v / categoryTotal} tone={k === "passed" ? "good" : "ink"} />
+                            </Td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </Table>
+                </div>
+              </Section>
+            ) : null}
+
+            <Section title="Results" note={live ? "updates every five seconds while runs are in flight" : undefined}>
               <Gate query={results} loadingLabel="Loading results">
                 {rows.length === 0 ? (
                   <Empty>No runs in this evaluation.</Empty>
@@ -402,29 +470,29 @@ export function EvaluationDetailView({ id }: { id: string }) {
                           <Th className="text-right">Rep</Th>
                           <Th>Run</Th>
                           <Th>Status</Th>
-                          <Th>Outcome</Th>
+                          <Th className="hidden lg:table-cell">Outcome</Th>
                           <Th>Category</Th>
                           <Th className="text-right">Score</Th>
-                          <Th className="text-right">Duration</Th>
-                          <Th className="text-right">Cost</Th>
+                          <Th className="hidden text-right md:table-cell">Duration</Th>
+                          <Th className="hidden text-right md:table-cell">Cost</Th>
                         </tr>
                       </thead>
                       <tbody>
                         {rows.map((r) => (
-                          <tr key={r.run_id}>
+                          <tr key={r.run_id} className="hover:bg-sunken/50">
                             <Td>{taskNames.get(r.task_id) ?? <IdLink id={r.task_id} />}</Td>
-                            <Td className="text-right font-mono">{r.repetition}</Td>
+                            <Num className="text-faint">{r.repetition}</Num>
                             <Td>
                               <IdLink id={r.run_id} href={`/runs/${r.run_id}`} />
                             </Td>
                             <Td>
                               <RunStatusBadge status={r.run_status} />
                             </Td>
-                            <Td className="font-mono text-xs">{r.run_outcome ?? "–"}</Td>
-                            <Td>{r.evaluation ? <CategoryBadge category={r.evaluation.failure_category} /> : "–"}</Td>
-                            <Td className="text-right font-mono tabular-nums">{formatScore(r.evaluation?.score?.overall)}</Td>
-                            <Td className="text-right font-mono tabular-nums">{formatDuration(r.duration_ms)}</Td>
-                            <Td className="text-right font-mono tabular-nums">{formatCost(r.cost_usd)}</Td>
+                            <Td className="hidden font-mono text-[11.5px] text-muted lg:table-cell">{r.run_outcome ?? "–"}</Td>
+                            <Td>{r.evaluation ? <CategoryBadge category={r.evaluation.failure_category} /> : <span className="text-faint">–</span>}</Td>
+                            <Num>{formatScore(r.evaluation?.score?.overall)}</Num>
+                            <Num className="hidden md:table-cell">{formatDuration(r.duration_ms)}</Num>
+                            <Num className="hidden md:table-cell">{formatCost(r.cost_usd)}</Num>
                           </tr>
                         ))}
                       </tbody>
@@ -438,7 +506,34 @@ export function EvaluationDetailView({ id }: { id: string }) {
                   </>
                 )}
               </Gate>
-            </Panel>
+            </Section>
+
+            <Section title="Configuration">
+              <KeyValue
+                columns={2}
+                items={[
+                  ["Agent version", <AgentCell key="a" versionId={e.agent_version_id} index={index} />],
+                  ["Dataset", dataset ? `${dataset.name} v${dataset.version}` : <IdLink key="d" id={e.dataset_id} />],
+                  ["Repetitions", <Mono key="r">{e.repetitions}</Mono>],
+                  [
+                    "Attempt budgets",
+                    <Mono key="b">
+                      runs {e.run_max_attempts}, grading {e.eval_max_attempts}
+                    </Mono>,
+                  ],
+                  [
+                    "Scoring weights",
+                    <Mono key="w" className="text-[12px]">
+                      success {e.scoring_config.weights.task_success} · tests {e.scoring_config.weights.test_score} · reliability{" "}
+                      {e.scoring_config.weights.reliability} · efficiency {e.scoring_config.weights.efficiency}
+                    </Mono>,
+                  ],
+                  ["Scoring hash", <Mono key="h" className="text-[12px]">{e.scoring_config.version} · {shortId(e.scoring_config_hash)}</Mono>],
+                  ["Created", <Timestamp key="c" value={formatTimestamp(e.created_at)} />],
+                  ["Cancel requested", <Timestamp key="cr" value={formatTimestamp(e.cancel_requested_at)} />],
+                ]}
+              />
+            </Section>
           </div>
         ) : null}
       </Gate>
@@ -448,30 +543,32 @@ export function EvaluationDetailView({ id }: { id: string }) {
 
 function ProgressBar({ e }: { e: EvaluationRead }) {
   const total = e.progress.runs_total;
-  const { done, state } = progressSummary(e);
+  const { done } = progressSummary(e);
   return (
-    <div>
-      <div className="mb-1 flex justify-between text-xs text-muted">
-        <span className="font-mono">
-          {done} of {total} runs finished
-        </span>
-        <span>{state.toLowerCase()}</span>
-      </div>
-      <div
-        role="img"
-        aria-label={`${done} of ${total} runs finished`}
-        className="flex h-2 overflow-hidden rounded bg-panel2"
-      >
-        {RUN_STATUSES.map((st) => {
-          const n = e.progress.runs_by_status[st] ?? 0;
-          return n && total ? (
-            <div key={st} title={`${st}: ${n}`} style={{ width: `${(n / total) * 100}%`, background: RUN_STATUS_COLOR[st] }} />
-          ) : null;
-        })}
+    <div role="img" aria-label={`${done} of ${total} runs finished`}>
+      <StatusStrip byStatus={e.progress.runs_by_status} total={total} height={8} />
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+        {RUN_STATUSES.filter((st) => (e.progress.runs_by_status[st] ?? 0) > 0).map((st) => (
+          <span key={st} className="inline-flex items-baseline gap-1.5 font-mono text-[11px] text-faint" aria-hidden="true">
+            <span className="inline-block size-[7px] translate-y-[-1px]" style={{ background: `var(--tone-${toneVar(st)})` }} />
+            {st.toLowerCase()} {e.progress.runs_by_status[st]}
+          </span>
+        ))}
       </div>
     </div>
   );
 }
+
+const TONE_VAR: Record<string, string> = {
+  QUEUED: "neutral",
+  CLAIMED: "info",
+  RUNNING: "active",
+  RETRYING: "warn",
+  COMPLETED: "good",
+  FAILED: "bad",
+  CANCELLED: "muted",
+};
+const toneVar = (st: string) => TONE_VAR[st] ?? "neutral";
 
 export function CompareView({ ids }: { ids: string[] }) {
   const compare = useCompare(ids);
@@ -484,10 +581,11 @@ export function CompareView({ ids }: { ids: string[] }) {
   if (ids.length < 2) {
     return (
       <>
-        <PageHeader title="Compare evaluations" />
+        <PageHeader eyebrow="Benchmarks" title="Compare evaluations" />
         <Empty>
           Pick 2 to 5 evaluations on the <Link href="/evaluations">Evaluations</Link> page, or open
-          /evaluations/compare?ids=a,b,c.
+          /evaluations/compare?ids=a,b,c. They need the same dataset and scoring settings, otherwise the numbers would
+          not mean the same thing.
         </Empty>
       </>
     );
@@ -499,40 +597,62 @@ export function CompareView({ ids }: { ids: string[] }) {
     return info ? `${info.agentName} v${info.version}` : (name ?? shortId(evalId));
   };
   const categories = c
-    ? [...new Set(c.evaluations.flatMap((x) => Object.keys(x.summary.failure_categories)))].sort()
+    ? [...new Set(c.evaluations.flatMap((x) => Object.keys(x.summary.failure_categories)))].sort((a, b) =>
+        a === "passed" ? -1 : b === "passed" ? 1 : a.localeCompare(b),
+      )
     : [];
   const dataset = datasets.data?.datasets.find((d) => d.id === c?.dataset_id);
 
   return (
     <>
       <PageHeader
+        eyebrow={
+          <>
+            <Link href="/evaluations" className="no-underline hover:text-ink">
+              Evaluations
+            </Link>{" "}
+            / compare
+          </>
+        }
         title="Compare evaluations"
         subtitle={
           c ? (
             <>
-              Dataset {dataset ? `${dataset.name} v${dataset.version}` : shortId(c.dataset_id)}, scoring hash{" "}
-              <span className="font-mono">{shortId(c.scoring_config_hash)}</span>. Deltas are against the first column.
+              Dataset {dataset ? `${dataset.name} v${dataset.version}` : <Mono>{shortId(c.dataset_id)}</Mono>}, scoring{" "}
+              <Mono className="text-[12.5px]">{shortId(c.scoring_config_hash)}</Mono>. Per-task deltas are in points against the first column.
             </>
           ) : undefined
         }
       />
       <Gate query={compare}>
         {c ? (
-          <div className="space-y-4">
-            <Panel title="Headline">
+          <div className="space-y-10">
+            <Section title="Success rate" note="bar: observed rate · whisker: 95% interval">
+              <SuccessChart
+                rows={c.evaluations.map((x) => ({
+                  name: label(x.evaluation_id, x.agent_version_id),
+                  rate: x.summary.success_rate,
+                  ci: x.summary.ci95,
+                }))}
+              />
+            </Section>
+
+            <Section title="Headline">
               <Table caption="Evaluation comparison">
                 <thead>
                   <tr>
                     <Th>Metric</Th>
                     {c.evaluations.map((x) => (
-                      <Th key={x.evaluation_id} className="text-right">
-                        <Link href={`/evaluations/${x.evaluation_id}`}>{label(x.evaluation_id, x.agent_version_id)}</Link>
+                      <Th key={x.evaluation_id} className="text-right normal-case! tracking-normal!">
+                        <Link href={`/evaluations/${x.evaluation_id}`} className="font-sans text-[12.5px] text-ink">
+                          {label(x.evaluation_id, x.agent_version_id)}
+                        </Link>
                       </Th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  <MetricRow label="Success rate" cells={c.evaluations.map((x) => formatPercent(x.summary.success_rate))} />
+                  <MetricRow label="Success rate" cells={c.evaluations.map((x) => formatPercent(x.summary.success_rate))} strong />
                   <MetricRow
                     label="95% CI"
                     cells={c.evaluations.map((x) =>
@@ -540,78 +660,64 @@ export function CompareView({ ids }: { ids: string[] }) {
                     )}
                   />
                   <MetricRow label="Passed / graded" cells={c.evaluations.map((x) => `${x.summary.passed} / ${x.summary.graded}`)} />
+                  <MetricRow label="Mean score" cells={c.evaluations.map((x) => formatScore(x.summary.mean_score?.overall))} />
                   <MetricRow label="Latency p50" cells={c.evaluations.map((x) => formatDuration(x.summary.latency_ms?.p50))} />
                   <MetricRow label="Latency p95" cells={c.evaluations.map((x) => formatDuration(x.summary.latency_ms?.p95))} />
                   <MetricRow label="Cost / task" cells={c.evaluations.map((x) => formatCost(x.summary.cost_usd.mean_per_attempt))} />
                   <MetricRow label="Total cost" cells={c.evaluations.map((x) => formatCost(x.summary.cost_usd.total))} />
-                  <MetricRow label="Mean score" cells={c.evaluations.map((x) => formatScore(x.summary.mean_score?.overall))} />
                   <MetricRow label="Platform failures" cells={c.evaluations.map((x) => formatInt(x.summary.platform_failures))} />
                 </tbody>
               </Table>
-            </Panel>
+            </Section>
 
-            <Panel title="Failure categories">
+            <Section title="Outcomes by category">
               {categories.length === 0 ? (
-                <Empty>No graded attempts yet.</Empty>
+                <Empty>Nothing graded yet, so there are no outcomes to compare.</Empty>
               ) : (
-                <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
-                  <div className="h-64" aria-hidden="true">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart
-                        data={c.evaluations.map((x) => ({
-                          name: label(x.evaluation_id, x.agent_version_id),
-                          ...x.summary.failure_categories,
-                        }))}
-                      >
-                        <CartesianGrid stroke="var(--line)" vertical={false} />
-                        <XAxis dataKey="name" stroke="var(--muted)" tick={{ fontSize: 11 }} />
-                        <YAxis allowDecimals={false} stroke="var(--muted)" tick={{ fontSize: 11 }} />
-                        <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--line)", fontSize: 12 }} />
-                        <Legend wrapperStyle={{ fontSize: 11 }} />
-                        {categories.map((cat, i) => (
-                          <Bar key={cat} dataKey={cat} stackId="c" fill={CATEGORY_COLORS[i % CATEGORY_COLORS.length]} isAnimationActive={false} />
-                        ))}
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                  <Table caption="Failure categories by evaluation">
-                    <thead>
-                      <tr>
-                        <Th>Category</Th>
-                        {c.evaluations.map((x) => (
-                          <Th key={x.evaluation_id} className="text-right">
-                            {label(x.evaluation_id, x.agent_version_id)}
-                          </Th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {categories.map((cat) => (
-                        <tr key={cat}>
-                          <Td>
-                            <CategoryBadge category={cat} />
-                          </Td>
-                          {c.evaluations.map((x) => (
-                            <Td key={x.evaluation_id} className="text-right font-mono tabular-nums">
-                              {x.summary.failure_categories[cat] ?? 0}
-                            </Td>
-                          ))}
-                        </tr>
+                <Table caption="Failure categories by evaluation">
+                  <thead>
+                    <tr>
+                      <Th>Category</Th>
+                      {c.evaluations.map((x) => (
+                        <Th key={x.evaluation_id} className="text-right normal-case! tracking-normal!">
+                          <span className="font-sans text-[12.5px] text-ink-2">{label(x.evaluation_id, x.agent_version_id)}</span>
+                        </Th>
                       ))}
-                    </tbody>
-                  </Table>
-                </div>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {categories.map((cat) => (
+                      <tr key={cat}>
+                        <Td>
+                          <CategoryBadge category={cat} />
+                        </Td>
+                        {c.evaluations.map((x) => {
+                          const n = x.summary.failure_categories[cat] ?? 0;
+                          const total = Object.values(x.summary.failure_categories).reduce((a, b) => a + b, 0);
+                          return (
+                            <Td key={x.evaluation_id} className="text-right">
+                              <span className="inline-flex items-center gap-2">
+                                <span className={`font-mono text-[12.5px] tabular-nums ${n ? "text-ink" : "text-faint"}`}>{n}</span>
+                                <Meter value={total ? n / total : 0} className="w-12" tone={cat === "passed" ? "good" : "ink"} />
+                              </span>
+                            </Td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
               )}
-            </Panel>
+            </Section>
 
-            <Panel title="Per-task success rate">
+            <Section title="Per-task success rate">
               <Table caption="Per-task success rate">
                 <thead>
                   <tr>
                     <Th>Task</Th>
                     {c.evaluations.map((x) => (
-                      <Th key={x.evaluation_id} className="text-right">
-                        {label(x.evaluation_id, x.agent_version_id)}
+                      <Th key={x.evaluation_id} className="text-right normal-case! tracking-normal!">
+                        <span className="font-sans text-[12.5px] text-ink-2">{label(x.evaluation_id, x.agent_version_id)}</span>
                       </Th>
                     ))}
                   </tr>
@@ -628,13 +734,12 @@ export function CompareView({ ids }: { ids: string[] }) {
                           const rate = t.success_rate[x.evaluation_id] ?? null;
                           const delta = t.delta_vs_first[x.evaluation_id] ?? null;
                           return (
-                            <Td key={x.evaluation_id} className="text-right font-mono tabular-nums">
+                            <Td key={x.evaluation_id} className="whitespace-nowrap text-right font-mono text-[12.5px] tabular-nums">
                               {formatPercent(rate)}
                               {i > 0 && delta !== null ? (
-                                <span className={delta < 0 ? "text-bad" : delta > 0 ? "text-good" : "text-muted"}>
-                                  {" "}
-                                  ({delta > 0 ? "+" : ""}
-                                  {Math.round(delta * 100)} pt)
+                                <span className={`ml-1.5 text-[11.5px] ${delta < 0 ? "text-bad" : delta > 0 ? "text-good" : "text-faint"}`}>
+                                  {delta > 0 ? "+" : ""}
+                                  {Math.round(delta * 100)} pt
                                 </span>
                               ) : null}
                             </Td>
@@ -645,7 +750,7 @@ export function CompareView({ ids }: { ids: string[] }) {
                   })}
                 </tbody>
               </Table>
-            </Panel>
+            </Section>
           </div>
         ) : null}
       </Gate>
@@ -653,14 +758,64 @@ export function CompareView({ ids }: { ids: string[] }) {
   );
 }
 
-function MetricRow({ label, cells }: { label: string; cells: string[] }) {
+function SuccessChart({ rows }: { rows: { name: string; rate: number | null; ci: [number, number] | null }[] }) {
+  const data = rows.map((r) => ({
+    name: r.name,
+    rate: r.rate ?? 0,
+    // ErrorBar takes [below, above] offsets from the value.
+    err: r.ci && r.rate !== null ? [Math.max(0, r.rate - r.ci[0]), Math.max(0, r.ci[1] - r.rate)] : [0, 0],
+  }));
+  return (
+    <div style={{ height: 36 + rows.length * 34 }} aria-hidden="true" className="max-w-3xl">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, bottom: 4, left: 0 }} barCategoryGap={12}>
+          <CartesianGrid stroke="var(--rule)" horizontal={false} />
+          <XAxis
+            type="number"
+            domain={[0, 1]}
+            ticks={[0, 0.25, 0.5, 0.75, 1]}
+            tickFormatter={(v: number) => `${Math.round(v * 100)}%`}
+            stroke="var(--rule-strong)"
+            tick={{ fontSize: 11, fill: "var(--faint)", fontFamily: "var(--font-mono)" }}
+            tickLine={false}
+          />
+          <YAxis
+            type="category"
+            dataKey="name"
+            width={128}
+            stroke="var(--rule-strong)"
+            tick={{ fontSize: 12, fill: "var(--ink-2)" }}
+            tickLine={false}
+          />
+          <Tooltip
+            cursor={{ fill: "var(--sunken)" }}
+            formatter={(v) => formatPercent(Number(v))}
+            contentStyle={{
+              background: "var(--surface)",
+              border: "1px solid var(--rule-strong)",
+              borderRadius: 3,
+              fontSize: 12,
+              fontFamily: "var(--font-mono)",
+              color: "var(--ink)",
+            }}
+          />
+          <Bar dataKey="rate" name="success" fill="var(--ink-2)" barSize={8} isAnimationActive={false}>
+            <ErrorBar dataKey="err" width={6} strokeWidth={1.2} stroke="var(--accent)" direction="x" />
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function MetricRow({ label, cells, strong }: { label: string; cells: ReactNode[]; strong?: boolean }) {
   return (
     <tr>
-      <Td className="text-muted">{label}</Td>
+      <Td className="whitespace-nowrap text-muted">{label}</Td>
       {cells.map((v, i) => (
-        <Td key={i} className="text-right font-mono tabular-nums">
+        <Num key={i} className={strong ? "font-medium text-ink" : "text-ink-2"}>
           {v}
-        </Td>
+        </Num>
       ))}
     </tr>
   );

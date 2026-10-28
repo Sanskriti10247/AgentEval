@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dump a stack's database as the demo snapshot the read-only image restores
+# Dump a stack's database as the demo snapshot the demo image restores
 # (infrastructure/docker/api-demo.Dockerfile, docs/deployment.md "Free hosting").
 #
 #   scripts/make_demo_snapshot.sh [postgres-container] [output]

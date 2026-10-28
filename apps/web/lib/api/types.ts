@@ -122,6 +122,11 @@ export interface TaskListItem {
   has_evaluation: boolean;
 }
 
+/** GET /tasks/{id}: the list fields plus what a run is given (fields not shown here are omitted). */
+export interface TaskRead extends TaskListItem {
+  instructions: string | null;
+}
+
 export interface TaskPage {
   tasks: TaskListItem[];
   next_after: string | null;
@@ -448,8 +453,47 @@ export interface RunFilters extends PageParams {
   task_id?: Uuid;
 }
 
-/** GET /health (outside /api/v1, no key needed). read_only: the API refuses every write. */
+// ---- writes ----------------------------------------------------------------
+
+/** POST /evaluations (EvaluationCreate). Omitted budgets and scoring use the API's defaults. */
+export interface EvaluationCreate {
+  name: string;
+  dataset_id: Uuid;
+  agent_version_id: Uuid;
+  repetitions: number;
+  run_max_attempts?: number;
+  eval_max_attempts?: number;
+}
+
+/** POST /runs (RunCreate). Agent tasks need agent_version_id; command tasks must not send one. */
+export interface RunCreate {
+  task_id: Uuid;
+  agent_version_id?: Uuid;
+  max_attempts?: number;
+}
+
+/** The API's hard cap on repetitions per evaluation (EvaluationCreate.repetitions le=10). */
+export const MAX_REPETITIONS = 10;
+
+// ---- health ----------------------------------------------------------------
+
+export interface DemoLimits {
+  max_repetitions: number;
+  max_active_runs: number;
+  /** Runs the worker executes at the same time; the rest wait in the queue. */
+  concurrent_runs?: number;
+}
+
+/**
+ * GET /health (outside /api/v1, no key needed).
+ * read_only: the API refuses every write.
+ * public_demo: no key needed, and visitors may launch evaluations and runs on existing
+ * agents and datasets (within demo_limits), cancel and replay; creating agents, tasks
+ * and datasets is refused.
+ */
 export interface ApiHealth {
   status: string;
   read_only?: boolean;
+  public_demo?: boolean;
+  demo_limits?: DemoLimits | null;
 }

@@ -1,9 +1,10 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Header, Query, Response, status
+from fastapi import APIRouter, Body, Header, Query, Request, Response, status
 
-from agenteval_api.auth import READ, WRITE
+from agenteval_api import demo
+from agenteval_api.auth import DEMO_WRITE, READ
 from agenteval_api.deps import EvaluationServiceDep, RunServiceDep
 from agenteval_core.schemas.agent import TrajectoryEventRead, TrajectoryPage
 from agenteval_core.schemas.evaluation import AttemptEvaluationRead
@@ -18,18 +19,21 @@ router = APIRouter(prefix="/runs", tags=["runs"])
     status_code=status.HTTP_202_ACCEPTED,
     response_model=RunRead,
     responses={200: {"description": "Replay of an earlier request with the same Idempotency-Key"}},
-    dependencies=[WRITE],
+    dependencies=[DEMO_WRITE],
 )
 async def submit_run(
     body: RunCreate,
     runs: RunServiceDep,
+    request: Request,
     response: Response,
     idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
 ) -> RunRead:
     """Queue a run of a task. 202 for a new run, 200 when the key is replayed.
 
-    Agent tasks need `agent_version_id`; command tasks must not have one.
+    Agent tasks need `agent_version_id`; command tasks must not have one. In a public
+    demo, 429 while the demo's cap on queued + running runs is reached.
     """
+    await demo.check_capacity(request, 1)
     result = await runs.submit(
         body.task_id, idempotency_key, body.agent_version_id, body.max_attempts
     )
@@ -75,7 +79,7 @@ async def get_run(run_id: uuid.UUID, runs: RunServiceDep) -> RunRead:
         200: {"description": "Already cancelled or already flagged: nothing changed"},
         409: {"description": "The run already COMPLETED or FAILED; nothing was written"},
     },
-    dependencies=[WRITE],
+    dependencies=[DEMO_WRITE],
 )
 async def cancel_run(run_id: uuid.UUID, runs: RunServiceDep, response: Response) -> RunRead:
     """Request cancellation. A QUEUED or RETRYING run is CANCELLED at once
@@ -97,18 +101,21 @@ async def cancel_run(run_id: uuid.UUID, runs: RunServiceDep, response: Response)
         409: {"description": "The run is not FAILED, or the key was used for something else"},
         422: {"description": "The run would exceed 10 attempts in total"},
     },
-    dependencies=[WRITE],
+    dependencies=[DEMO_WRITE],
 )
 async def replay_run(
     run_id: uuid.UUID,
     runs: RunServiceDep,
+    request: Request,
     response: Response,
     body: Annotated[ReplayCreate | None, Body()] = None,
     idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
 ) -> RunRead:
     """Give a FAILED run `additional_attempts` (1-9, default 1) more attempts and
     queue it again. Attempt numbers continue; earlier attempts are kept. 202 when
-    replayed, 200 when the same Idempotency-Key repeats (nothing changes)."""
+    replayed, 200 when the same Idempotency-Key repeats (nothing changes). In a public
+    demo, 429 while the demo's cap on queued + running runs is reached."""
+    await demo.check_capacity(request, 1)
     additional = (body or ReplayCreate()).additional_attempts
     result = await runs.replay(run_id, additional, idempotency_key)
     if not result.accepted:

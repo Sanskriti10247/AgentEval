@@ -32,7 +32,7 @@ test: sandbox-image  ## Unit + integration + sandbox tests (needs Docker)
 	uv run pytest
 
 test-unit:  ## Tests that need no Docker at all
-	uv run pytest packages/core/tests apps/worker/tests/test_bounded_buffer.py
+	uv run pytest packages/core/tests apps/worker/tests/test_bounded_buffer.py apps/worker/tests/test_local_sandbox.py
 
 e2e:  ## Full-stack tests against the compose stack (make up && make migrate first); recreates the worker with short lease timings
 	$(COMPOSE_E2E) up -d --no-deps --wait worker
@@ -79,7 +79,7 @@ prod-config:  ## Sanity-check the production compose files (throwaway secrets; n
 	AGENTEVAL_DOMAIN=agenteval.example.com POSTGRES_PASSWORD=x REDIS_PASSWORD=x \
 		docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
 
-demo-image:  ## Build the single-container read-only demo (docs/deployment.md, "Free hosting")
+demo-image:  ## Build the single-container public demo (docs/deployment.md, "Free hosting")
 	docker build -f infrastructure/docker/api-demo.Dockerfile -t agenteval-api-demo .
 
 ci-local:  ## The checks CI runs without Docker: lint, unit tests, dashboard checks

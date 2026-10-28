@@ -1,4 +1,4 @@
-"""Read-only mode (AGENTEVAL_READ_ONLY=true), the public demo's API.
+"""Read-only mode (AGENTEVAL_READ_ONLY=true): a showcase that accepts no writes at all.
 
 The sweep runs over every `/api/v1` route found in the app: anything that needs more
 than the read scope answers 403 with or without a key, reads need no key, and the
@@ -82,7 +82,12 @@ async def test_reads_need_no_key_and_ignore_an_invalid_one(app: FastAPI) -> None
 
 async def test_probes_pass_without_a_worker_and_health_reports_read_only(app: FastAPI) -> None:
     async with client_for(app) as c:
-        assert (await c.get("/health")).json() == {"status": "ok", "read_only": True}
+        assert (await c.get("/health")).json() == {
+            "status": "ok",
+            "read_only": True,
+            "public_demo": False,
+            "demo_limits": None,
+        }
         ready = await c.get("/ready")
         assert ready.status_code == 200, ready.text
         assert ready.json() == {"ready": True, "checks": {"postgres": "ok", "redis": "ok"}}

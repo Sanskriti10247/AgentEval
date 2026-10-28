@@ -1,5 +1,5 @@
-"""Phase 5 Step 9: GET /runs, the run listing with keyset pagination (PROGRESS.md
-section 21; F1 dead-letter view, F15). Rows are inserted with explicit created_at
+"""GET /runs, the run listing with keyset pagination (F1 dead-letter view,
+F15). Rows are inserted with explicit created_at
 values so ties, ordering and insertion between pages are exact."""
 
 import uuid

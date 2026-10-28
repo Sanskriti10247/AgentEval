@@ -1,11 +1,28 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
-import { Badge, Empty, Field, Gate, IdLink, LoadMore, Mono, PageHeader, Select, Table, Td, Th } from "@/components/ui";
+import { Empty, Field, Gate, IdLink, LoadMore, Num, PageHeader, Select, StatusMark, Table, Tag, Td, Th, Timestamp } from "@/components/ui";
 import { flatten } from "@/components/pages-util";
 import type { Difficulty, TaskType } from "@/lib/api/types";
-import { formatTimestamp } from "@/lib/format";
+import { formatTimestamp, shortId } from "@/lib/format";
 import { useDatasets, useTasks } from "@/lib/hooks";
+
+/** Difficulty as one to three ticks, so a column of them reads at a glance. */
+function DifficultyTicks({ value }: { value: string | null }) {
+  const n = value === "easy" ? 1 : value === "medium" ? 2 : value === "hard" ? 3 : 0;
+  if (!n) return <span className="text-faint">–</span>;
+  return (
+    <span className="inline-flex items-center gap-2 text-[12.5px] text-ink-2">
+      <span className="inline-flex gap-[2px]" aria-hidden="true">
+        {[1, 2, 3].map((i) => (
+          <span key={i} className={`h-[9px] w-[3px] ${i <= n ? "bg-ink-2" : "bg-rule"}`} />
+        ))}
+      </span>
+      {value}
+    </span>
+  );
+}
 
 export function TasksView() {
   const [datasetId, setDatasetId] = useState("");
@@ -23,8 +40,9 @@ export function TasksView() {
   return (
     <>
       <PageHeader
+        eyebrow="Registry"
         title="Tasks"
-        subtitle="Units of evaluation. Instructions, files and hidden checks are never exposed by the API."
+        subtitle="The units an agent is measured on. The API never hands out a task's instructions, files or hidden checks here, so a dashboard cannot leak the answers."
         actions={
           <>
             <Field label="Dataset">
@@ -57,7 +75,7 @@ export function TasksView() {
       />
       <Gate query={query}>
         {tasks.length === 0 ? (
-          <Empty>No tasks match these filters.</Empty>
+          <Empty>No tasks match these filters. Datasets fill up through the API (POST /api/v1/tasks with a dataset_id).</Empty>
         ) : (
           <>
             <Table caption="Tasks">
@@ -66,31 +84,40 @@ export function TasksView() {
                   <Th>Task</Th>
                   <Th>Type</Th>
                   <Th>Difficulty</Th>
-                  <Th>Dataset</Th>
-                  <Th>Evaluation</Th>
-                  <Th className="text-right">Timeout</Th>
-                  <Th className="text-right">Memory</Th>
-                  <Th>Created</Th>
+                  <Th className="hidden md:table-cell">Dataset</Th>
+                  <Th className="hidden sm:table-cell">Grading</Th>
+                  <Th className="hidden text-right lg:table-cell">Timeout</Th>
+                  <Th className="hidden text-right lg:table-cell">Memory</Th>
+                  <Th className="hidden xl:table-cell">Created</Th>
                 </tr>
               </thead>
               <tbody>
                 {tasks.map((t) => (
-                  <tr key={t.id}>
+                  <tr key={t.id} className="hover:bg-sunken/50">
                     <Td>
-                      <div>{t.name}</div>
-                      <div className="font-mono text-xs text-muted" title={t.id}>
-                        {t.id.slice(0, 8)}
+                      <Link href={`/runs?task_id=${t.id}`} className="font-medium no-underline hover:underline" title="Runs of this task">
+                        {t.name}
+                      </Link>
+                      {t.description ? <div className="mt-0.5 max-w-[46ch] text-[12px] leading-snug text-muted">{t.description}</div> : null}
+                      <div className="font-mono text-[11px] text-faint" title={t.id}>
+                        {shortId(t.id)}
                       </div>
                     </Td>
                     <Td>
-                      <Badge>{t.task_type}</Badge>
+                      <Tag>{t.task_type}</Tag>
                     </Td>
-                    <Td>{t.difficulty ?? "–"}</Td>
-                    <Td>{t.dataset_id ? (names.get(t.dataset_id) ?? <IdLink id={t.dataset_id} />) : "–"}</Td>
-                    <Td>{t.has_evaluation ? <Badge tone="good">has evaluation</Badge> : <Badge tone="muted">none</Badge>}</Td>
-                    <Td className="text-right"><Mono>{t.timeout_s} s</Mono></Td>
-                    <Td className="text-right"><Mono>{t.memory_mb} MB</Mono></Td>
-                    <Td className="whitespace-nowrap font-mono">{formatTimestamp(t.created_at)}</Td>
+                    <Td>
+                      <DifficultyTicks value={t.difficulty} />
+                    </Td>
+                    <Td className="hidden whitespace-nowrap md:table-cell">{t.dataset_id ? (names.get(t.dataset_id) ?? <IdLink id={t.dataset_id} />) : <span className="text-faint">–</span>}</Td>
+                    <Td className="hidden sm:table-cell">
+                      {t.has_evaluation ? <StatusMark tone="good">has evaluation</StatusMark> : <StatusMark tone="muted">none</StatusMark>}
+                    </Td>
+                    <Num className="hidden lg:table-cell">{t.timeout_s} s</Num>
+                    <Num className="hidden lg:table-cell">{t.memory_mb} MB</Num>
+                    <Td className="hidden xl:table-cell">
+                      <Timestamp value={formatTimestamp(t.created_at)} />
+                    </Td>
                   </tr>
                 ))}
               </tbody>

@@ -73,6 +73,22 @@ def run_keeper_process(
     asyncio.run(_run(conn, database_url, timing, worker_id))
 
 
+def run_keeper_thread(
+    conn: Connection, database_url: str, timing: LeaseTiming, worker_id: str
+) -> None:
+    """The same keeper on a thread of the worker process (AGENTEVAL_LEASE_KEEPER=thread):
+    its own event loop and connection, logging left as the worker configured it. Closes
+    its end of the pipe when it returns."""
+    try:
+        asyncio.run(_run(conn, database_url, timing, worker_id))
+    except (EOFError, OSError):
+        pass  # the worker closed the pipe (stop or restart)
+    except Exception:
+        log.exception("keeper_thread_failed")
+    finally:
+        conn.close()
+
+
 async def _run(conn: Connection, database_url: str, timing: LeaseTiming, worker_id: str) -> None:
     dsn = database_url.replace("postgresql+asyncpg://", "postgresql://")
     app_name = f"agenteval-keeper-{worker_id}"

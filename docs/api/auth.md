@@ -12,7 +12,28 @@ curl -s -H "Authorization: Bearer $AGENTEVAL_API_KEY" localhost:8000/api/v1/runs
 
 `/health`, `/ready` and `/metrics` need no key. `/metrics` is unauthenticated on purpose and is meant for the internal network only (the compose file binds the API to `127.0.0.1`; the production profile publishes nothing but the reverse proxy). `/docs` and `/openapi.json` are served without a key too: they describe the API, not its data. The OpenAPI schema declares the bearer scheme, so the Swagger "Authorize" button works.
 
-With `AGENTEVAL_READ_ONLY=true` (the public demo, see [deployment](../deployment.md#free-hosting-vercel--render)), every route that needs the `write` or `admin` scope answers **403** `This AgentEval deployment is a read-only demo; it accepts no changes`, with or without a key, before the body is validated. Read routes need no key; an `Authorization` header is ignored, and the read budget is counted per client IP. `GET /health` returns `{"status": "ok", "read_only": true}`, which is how the dashboard knows not to ask for a key.
+With `AGENTEVAL_READ_ONLY=true` (a read-only showcase), every route that needs the `write` or `admin` scope answers **403** `This AgentEval deployment is a read-only demo; it accepts no changes`, with or without a key, before the body is validated. Read routes need no key; an `Authorization` header is ignored, and the read budget is counted per client IP.
+
+With `AGENTEVAL_PUBLIC_DEMO=true` (the free-hosting demo, see [deployment](../deployment.md#free-hosting-vercel--render)), nobody needs a key either, and an `Authorization` header is ignored the same way: every caller is an anonymous visitor, with the read and write budgets counted per client IP. The visitor may read everything a `read` key can, and may call exactly five write routes:
+
+| Method | Path | Demo limit |
+|---|---|---|
+| POST | `/evaluations` | `repetitions` at most `AGENTEVAL_DEMO_MAX_REPETITIONS` (default 3), else **422** |
+| POST | `/runs` | |
+| POST | `/runs/{id}/cancel` | |
+| POST | `/runs/{id}/replay` | |
+| POST | `/evaluations/{id}/cancel` | |
+
+They take the same bodies as anywhere else, so they can only point at agent versions, frozen datasets and tasks that already exist. `POST /evaluations`, `POST /runs` and replay also answer **429** with `Retry-After: 30` when the runs already queued or running, plus the runs the request would add, exceed `AGENTEVAL_DEMO_MAX_ACTIVE_RUNS` (default 20, across all visitors; read before the insert, so two racing requests can overshoot it by one batch). Every other route that needs `write` or `admin` (agents, versions, tasks, datasets, freeze, keys) answers **403** `This is a public demo: you can launch evaluations and runs of the existing agents and tasks, cancel them and replay failed runs. Nothing else can be changed here` before the body is validated. If both settings are on, read-only wins.
+
+`GET /health` tells the dashboard which mode it is talking to:
+
+```json
+{"status": "ok", "read_only": false, "public_demo": true,
+ "demo_limits": {"max_repetitions": 3, "max_active_runs": 20, "concurrent_runs": 1}}
+```
+
+`max_active_runs` caps runs queued or running at once; `concurrent_runs` is how many of them actually execute at the same time (the worker's `AGENTEVAL_WORKER_CONCURRENCY`, 1 in the demo image), so the rest wait in the queue. `demo_limits` is `null` unless `public_demo` is true, and the two flags are never both true. With neither set, the dashboard asks for a key.
 
 A key looks like `ae_<8 hex>_<43 characters>`. Only its SHA-256 is stored; the full key is shown once, when it is created, and cannot be recovered (create a new one and revoke the old). The 8-character **prefix** is not secret: it identifies the key in `list`, in logs and in `revoke`.
 

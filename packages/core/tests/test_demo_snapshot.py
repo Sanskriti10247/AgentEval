@@ -1,4 +1,4 @@
-"""The demo snapshot (infrastructure/demo/agenteval-demo.sql.gz) that the read-only image
+"""The demo snapshot (infrastructure/demo/agenteval-demo.sql.gz) that the demo image
 restores. The image runs no migrations, so the snapshot must be at the current head, and it
 must stay free of API keys. Regenerate it with scripts/make_demo_snapshot.sh."""
 

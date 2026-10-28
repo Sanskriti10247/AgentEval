@@ -194,7 +194,7 @@ On a shared single host, the API, heartbeat process, worker and Postgres need CP
 
 ## Implementation
 
-Implemented in Phase 5 as follows (design notes in `PROGRESS.md`, Steps 2 to 7):
+Implemented in Phase 5 as follows:
 
 | Part | Step | Where |
 |---|---|---|

@@ -1,4 +1,4 @@
-"""Phase 5 Step 8: the cancellation API (PROGRESS.md section 20).
+"""The cancellation API.
 
 DB-level cases use hand-seeded rows (phase5_seed, test_reconciler's seeds) so
 every transition and response code is hit exactly; the worker cases drive a
@@ -71,6 +71,9 @@ async def connect(settings: Settings) -> AsyncIterator[Callable[[], Awaitable[as
 async def lease_manager(settings: Settings) -> AsyncIterator[LeaseManager]:
     lm = LeaseManager(settings.database_url, FAST, f"w-{uuid.uuid4().hex[:8]}")
     await lm.start()
+    # FAST leaves 1.5 s from claim to self-stop: a keeper still starting on a loaded
+    # runner (a fresh interpreter, imports, a connection) would eat all of it.
+    await lm.wait_ready()
     yield lm
     await lm.stop()
 
