@@ -1,12 +1,13 @@
 "use client";
 
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as api from "./api/client";
 import type {
   AgentVersionRead,
   DemoLimits,
   EvaluationCreate,
+  EvaluationEstimateRequest,
   EvaluationFilters,
   EvaluationRead,
   RunCreate,
@@ -34,7 +35,17 @@ function useRefreshOnSettle(key: readonly unknown[], settled: boolean | undefine
   }, [client, settled, JSON.stringify(key)]);
 }
 
-/** GET /health once per page load: whether the API is a read-only demo. */
+/** Date.now(), re-read every `ms` while `active`; for elapsed times and "updated Ns ago". */
+export function useNow(active: boolean, ms = 1_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [active, ms]);
+  return now;
+}
+
 /**
  * GET /health, retried for about three minutes: a free-tier API that has been idle takes
  * a minute or so to wake, and until it answers we cannot tell a public demo from a
@@ -90,11 +101,44 @@ export function useCapabilities(): Capabilities {
   };
 }
 
-export const useOverview = (windowH: number) =>
+export const useOverview = (windowH: number, enabled = true) =>
   useQuery({
     queryKey: ["overview", windowH],
     queryFn: ({ signal }) => api.getOverview(windowH, signal),
     refetchInterval: LIVE_MS,
+    enabled,
+    // Switching the window keeps the previous numbers up (dimmed) until the new ones land.
+    placeholderData: (prev) => prev,
+  });
+
+export const useActivity = (windowH: number) =>
+  useQuery({
+    queryKey: ["activity", windowH],
+    queryFn: ({ signal }) => api.getActivity(windowH, signal),
+    refetchInterval: LIVE_MS,
+    placeholderData: (prev) => prev,
+    // The next poll is ten seconds away anyway, and an older API answers 404 every time.
+    retry: false,
+  });
+
+/** Which model providers this API can run. An older API has no such endpoint (404). */
+export const useProviders = () =>
+  useQuery({
+    queryKey: ["providers"],
+    queryFn: ({ signal }) => api.getProviders(signal),
+    staleTime: 60_000,
+    retry: false,
+  });
+
+/** Upper bounds for a launch; disabled until the form holds a complete request. */
+export const useEvaluationEstimate = (body: EvaluationEstimateRequest | null) =>
+  useQuery({
+    queryKey: ["estimate", body],
+    queryFn: ({ signal }) => api.estimateEvaluation(body as EvaluationEstimateRequest, signal),
+    enabled: body !== null,
+    staleTime: 30_000,
+    retry: false,
+    placeholderData: (prev) => prev,
   });
 
 export const useAgents = () =>

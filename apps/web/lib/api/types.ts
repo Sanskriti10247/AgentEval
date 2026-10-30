@@ -168,6 +168,38 @@ export interface WorkerPage {
 }
 
 // ---- stats -----------------------------------------------------------------
+// Fields marked optional were added after the first release of the API; an older
+// deployment omits them and the views fall back to what it does return.
+
+/**
+ * Run outcome rates over finished runs (COMPLETED or FAILED; cancelled runs are left out).
+ * A rate is null when its denominator is 0. Counts sit next to the rates on purpose.
+ */
+export interface RunRates {
+  finished: number;
+  completed: number;
+  failed: number;
+  timed_out: number;
+  retried: number;
+  completion_rate: number | null;
+  failure_rate: number | null;
+  timeout_rate: number | null;
+  retry_rate: number | null;
+}
+
+/** Summary rates add `scheduled`: every run of the evaluation that was not cancelled. */
+export interface SummaryRates extends RunRates {
+  scheduled: number;
+}
+
+export interface ProviderUsage {
+  attempts: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: DecimalString;
+  /** True for the fake provider: its cost is computed from a price table, nothing was spent. */
+  simulated: boolean;
+}
 
 export interface StatsOverview {
   window_h: number;
@@ -175,15 +207,123 @@ export interface StatsOverview {
   evaluations: { total: number; cancel_requested: number };
   runs: { total: number; by_status: Record<RunStatus, number> };
   success: { graded: number; passed: number; success_rate: number | null };
-  run_latency_ms: { count: number; p50: number | null; p95: number | null };
-  usage: { attempts: number; cost_usd: DecimalString; tokens_in: number; tokens_out: number };
+  /** Nearest-rank percentiles over finished runs in the window. */
+  run_latency_ms: { count: number; p50: number | null; p95: number | null; p99?: number | null; mean?: number | null };
+  usage: {
+    attempts: number;
+    cost_usd: DecimalString;
+    tokens_in: number;
+    tokens_out: number;
+    by_provider?: Record<string, ProviderUsage>;
+  };
   active_workers: number;
   queue: {
     runs_queued: number;
     runs_retrying: number;
     evaluations_pending: number;
     total: number;
+    /** Age in seconds of the oldest QUEUED run, null when nothing is queued. */
+    oldest_queued_s?: number | null;
   };
+  /** Runs that finished inside the window. */
+  rates?: RunRates;
+  /** stale: not stopped, but no heartbeat within the liveness window. */
+  workers?: { alive: number; stale: number };
+}
+
+/** One time bucket of GET /stats/activity, keyed by run finished_at. */
+export interface ActivityBucket {
+  start: Timestamp;
+  finished: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  graded: number;
+  passed: number;
+  p95_ms: number | null;
+}
+
+export interface ActivityEvaluation {
+  id: Uuid;
+  name: string;
+  created_at: Timestamp;
+  agent_name: string;
+  agent_version: number;
+  provider: string;
+  model: string;
+  simulated: boolean;
+  runs_total: number;
+  graded: number;
+  passed: number;
+  success_rate: number | null;
+  p95_ms: number | null;
+}
+
+/** GET /stats/activity: buckets oldest first and zero-filled; evaluations newest first, at most 50. */
+export interface StatsActivity {
+  window_h: number;
+  bucket_s: number;
+  generated_at: Timestamp;
+  buckets: ActivityBucket[];
+  evaluations: ActivityEvaluation[];
+}
+
+// ---- providers -------------------------------------------------------------
+
+export interface ProviderModel {
+  id: string;
+  priced: boolean;
+  input_usd_per_mtok?: DecimalString | null;
+  output_usd_per_mtok?: DecimalString | null;
+}
+
+export interface ProviderInfo {
+  name: string;
+  simulated: boolean;
+  available: boolean;
+  /** Why the provider cannot be used here, when it is not available. */
+  reason: string | null;
+  models: ProviderModel[];
+}
+
+/** GET /providers */
+export interface ProvidersRead {
+  providers: ProviderInfo[];
+  pricing_version: string;
+  /** Real-provider runs one worker process executes at the same time. */
+  real_provider_concurrency?: number;
+  default_real_budget_usd?: DecimalString | null;
+}
+
+/** POST /evaluations/estimate body. Writes nothing. */
+export interface EvaluationEstimateRequest {
+  agent_version_id: Uuid;
+  dataset_id: Uuid;
+  repetitions: number;
+}
+
+/** Upper bounds for an evaluation before it is launched. */
+export interface EvaluationEstimate {
+  tasks: number;
+  repetitions: number;
+  runs: number;
+  provider: string;
+  model: string;
+  simulated: boolean;
+  available: boolean;
+  max_steps_per_run: number;
+  run_max_attempts: number;
+  /** runs x max steps x run attempts. */
+  max_model_requests: number;
+  pricing_known: boolean;
+  pricing_version: string | null;
+  max_cost_usd_per_run: DecimalString | null;
+  /** runs x per-run cost cap x run attempts; null when pricing is unknown. */
+  max_cost_usd: DecimalString | null;
+  /** The budget the API applies to a real-provider evaluation launched without one. */
+  default_budget_usd: DecimalString | null;
+  /** Real providers run one at a time per worker by default. */
+  sequential: boolean;
 }
 
 // ---- runs ------------------------------------------------------------------
@@ -288,6 +428,22 @@ export interface Progress {
   complete: boolean;
 }
 
+/** What an evaluation ran on, resolved by the API. */
+export interface EvaluationContext {
+  agent_id: Uuid;
+  agent_name: string;
+  agent_version: number;
+  agent_config_hash: string;
+  provider: string;
+  model: string;
+  simulated: boolean;
+  dataset_name: string;
+  dataset_version: string;
+  task_count: number;
+  evaluator_version: string | null;
+  pricing_version: string | null;
+}
+
 export interface EvaluationRead {
   id: Uuid;
   name: string;
@@ -301,6 +457,9 @@ export interface EvaluationRead {
   run_max_attempts: number;
   eval_max_attempts: number;
   progress: Progress;
+  /** Spending cap for the whole evaluation; once reached, remaining runs fail without a model call. */
+  max_cost_usd?: DecimalString | null;
+  context?: EvaluationContext | null;
 }
 
 export interface EvaluationPage {
@@ -405,17 +564,28 @@ export interface EvaluationSummary {
     reliability: DecimalString | null;
     efficiency: DecimalString;
   } | null;
-  latency_ms: { p50: number; p95: number } | null;
+  /** Nearest-rank percentiles over attempt durations; count is the sample size. */
+  latency_ms: { p50: number; p95: number; p99?: number; mean?: number; count?: number } | null;
   cost_usd: { total: DecimalString; mean_per_attempt: DecimalString | null };
   tokens: { tokens_in: number; tokens_out: number };
   failure_categories: Record<string, number>;
   per_task: TaskSummary[];
+  rates?: SummaryRates;
+  simulated?: boolean;
 }
 
 export interface CompareEntry {
   evaluation_id: Uuid;
   agent_version_id: Uuid;
   summary: EvaluationSummary;
+  context?: EvaluationContext | null;
+  /** True when the 95% intervals of this entry and the first do not overlap; null for the first. */
+  distinguishable_from_first?: boolean | null;
+}
+
+export interface CompareDifference {
+  field: string;
+  values: Record<Uuid, string | number | null>;
 }
 
 export interface TaskComparison {
@@ -429,6 +599,8 @@ export interface Compare {
   scoring_config_hash: string;
   evaluations: CompareEntry[];
   per_task: TaskComparison[];
+  differences?: CompareDifference[];
+  warnings?: string[];
 }
 
 // ---- filters ---------------------------------------------------------------
@@ -463,6 +635,8 @@ export interface EvaluationCreate {
   repetitions: number;
   run_max_attempts?: number;
   eval_max_attempts?: number;
+  /** Budget for the whole evaluation in USD, as a decimal string. */
+  max_cost_usd?: DecimalString;
 }
 
 /** POST /runs (RunCreate). Agent tasks need agent_version_id; command tasks must not send one. */

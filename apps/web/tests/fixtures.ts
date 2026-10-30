@@ -3,11 +3,16 @@ import type {
   AgentVersionRead,
   AttemptEvaluationRead,
   Compare,
+  EvaluationContext,
+  EvaluationEstimate,
   EvaluationRead,
   EvaluationSummary,
+  ProviderInfo,
+  ProvidersRead,
   ResultRow,
   RunAttemptRead,
   RunRead,
+  StatsActivity,
   StatsOverview,
   TaskListItem,
   TrajectoryEventRead,
@@ -290,5 +295,145 @@ export const compare: Compare = {
   ],
   per_task: [
     { task_id: IDS.task, success_rate: { [IDS.eval1]: 0.75, [IDS.eval2]: 0.5 }, delta_vs_first: { [IDS.eval1]: 0, [IDS.eval2]: -0.25 } },
+  ],
+};
+
+// ---- fields added with providers, estimates and activity (all optional on the web side) ----
+
+export const overviewFull: StatsOverview = {
+  ...overview,
+  run_latency_ms: { count: 8, p50: 400, p95: 7200, p99: 9100, mean: 1850.5 },
+  rates: {
+    finished: 8, completed: 7, failed: 1, timed_out: 1, retried: 2,
+    completion_rate: 0.875, failure_rate: 0.125, timeout_rate: 0.125, retry_rate: 0.25,
+  },
+  usage: {
+    ...overview.usage,
+    by_provider: {
+      fake: { attempts: 5, tokens_in: 5000, tokens_out: 1000, cost_usd: "0.050000", simulated: true },
+      anthropic: { attempts: 2, tokens_in: 2000, tokens_out: 400, cost_usd: "0.020000", simulated: false },
+    },
+  },
+  queue: { ...overview.queue, oldest_queued_s: 95 },
+  workers: { alive: 2, stale: 1 },
+};
+
+export const activity: StatsActivity = {
+  window_h: 24,
+  bucket_s: 3600,
+  generated_at: "2026-10-17T12:00:00Z",
+  buckets: [
+    { start: "2026-10-17T10:00:00Z", finished: 3, completed: 2, failed: 1, cancelled: 0, graded: 2, passed: 1, p95_ms: 900 },
+    { start: "2026-10-17T11:00:00Z", finished: 5, completed: 5, failed: 0, cancelled: 1, graded: 5, passed: 4, p95_ms: 1200 },
+  ],
+  evaluations: [
+    {
+      id: IDS.eval2, name: "calc-demo-b", created_at: "2026-10-17T11:00:00Z", agent_name: "coder-agent", agent_version: 2,
+      provider: "anthropic", model: "claude-test-model", simulated: false,
+      runs_total: 4, graded: 4, passed: 2, success_rate: 0.5, p95_ms: 7000,
+    },
+    {
+      id: IDS.eval1, name: "calc-demo", created_at: "2026-10-17T09:00:00Z", agent_name: "fake-agent", agent_version: 1,
+      provider: "fake", model: "fake-model", simulated: true,
+      runs_total: 10, graded: 8, passed: 6, success_rate: 0.75, p95_ms: 800,
+    },
+  ],
+};
+
+export const emptyActivity: StatsActivity = {
+  ...activity,
+  buckets: activity.buckets.map((b) => ({ ...b, finished: 0, completed: 0, failed: 0, cancelled: 0, graded: 0, passed: 0, p95_ms: null })),
+  evaluations: [],
+};
+
+const fakeProvider: ProviderInfo = {
+  name: "fake", simulated: true, available: true, reason: null,
+  models: [{ id: "fake-model", priced: true, input_usd_per_mtok: "1", output_usd_per_mtok: "5" }],
+};
+const anthropicProvider: ProviderInfo = {
+  name: "anthropic", simulated: false, available: true, reason: null,
+  models: [{ id: "claude-test-model", priced: true, input_usd_per_mtok: "1", output_usd_per_mtok: "5" }],
+};
+
+/** Both providers enabled. */
+export const providers: ProvidersRead = {
+  providers: [fakeProvider, anthropicProvider],
+  pricing_version: "2026-09-28",
+  real_provider_concurrency: 1,
+  default_real_budget_usd: "2.00",
+};
+
+/** A server that only runs the fake model. */
+export const providersFakeOnly: ProvidersRead = {
+  ...providers,
+  providers: [
+    fakeProvider,
+    { ...anthropicProvider, available: false, reason: "Not enabled on this server (AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER)" },
+  ],
+};
+
+export const fakeVersion: AgentVersionRead = {
+  ...version,
+  id: "b0000000-0000-4000-8000-0000000000f1",
+  version: 3,
+  model_provider: "fake",
+  model: "fake-model",
+  limits: { max_steps: 30, max_cost_usd: "1.00" },
+  config_hash: "fffeee",
+};
+
+/** POST /evaluations/estimate as the API would answer it for a body and provider. */
+export function estimateFor(body: { agent_version_id: string; repetitions: number }, tasks = 5): EvaluationEstimate {
+  const simulated = body.agent_version_id === fakeVersion.id;
+  const runs = tasks * body.repetitions;
+  return {
+    tasks, repetitions: body.repetitions, runs,
+    provider: simulated ? "fake" : "anthropic", model: simulated ? "fake-model" : "claude-test-model",
+    simulated, available: true,
+    max_steps_per_run: simulated ? 30 : 20, run_max_attempts: 1,
+    max_model_requests: runs * (simulated ? 30 : 20),
+    pricing_known: true, pricing_version: "2026-09-28",
+    max_cost_usd_per_run: "1.00", max_cost_usd: `${runs}.00`,
+    default_budget_usd: simulated ? null : "2.00",
+    sequential: !simulated,
+  };
+}
+
+export const context: EvaluationContext = {
+  agent_id: IDS.agent, agent_name: "coder-agent", agent_version: 2, agent_config_hash: "abc",
+  provider: "fake", model: "fake-model", simulated: true,
+  dataset_name: "coding-bench", dataset_version: "1", task_count: 1,
+  evaluator_version: "grader-1.4", pricing_version: "2026-09-28",
+};
+
+export const evaluationWithContext: EvaluationRead = { ...evaluation, context, max_cost_usd: null };
+
+export const summaryFull: EvaluationSummary = {
+  ...summary,
+  latency_ms: { p50: 1200, p95: 7200, p99: 7900, mean: 2100.5, count: 4 },
+  rates: {
+    scheduled: 3, finished: 2, completed: 1, failed: 1, timed_out: 0, retried: 1,
+    completion_rate: 0.5, failure_rate: 0.5, timeout_rate: 0, retry_rate: 0.5,
+  },
+  simulated: true,
+};
+
+export const compareFull: Compare = {
+  ...compare,
+  evaluations: [
+    { ...compare.evaluations[0]!, context, distinguishable_from_first: null },
+    {
+      ...compare.evaluations[1]!,
+      context: { ...context, provider: "anthropic", model: "claude-test-model", simulated: false, agent_version: 3 },
+      distinguishable_from_first: false,
+    },
+  ],
+  differences: [
+    { field: "provider", values: { [IDS.eval1]: "fake", [IDS.eval2]: "anthropic" } },
+    { field: "model", values: { [IDS.eval1]: "fake-model", [IDS.eval2]: "claude-test-model" } },
+  ],
+  warnings: [
+    "These evaluations mix simulated and real models; their numbers are not comparable.",
+    "coder-agent v2 has only 4 graded attempts; treat differences as indicative.",
   ],
 };
