@@ -369,12 +369,22 @@ async def test_stats_on_an_empty_database_are_zeros_and_nulls(client: httpx.Asyn
     assert body["runs"]["total"] == 0
     assert set(body["runs"]["by_status"].values()) == {0}
     assert body["success"] == {"graded": 0, "passed": 0, "success_rate": None}
-    assert body["run_latency_ms"] == {"count": 0, "p50": None, "p95": None}
-    assert body["usage"] == {"attempts": 0, "cost_usd": "0", "tokens_in": 0, "tokens_out": 0}
+    assert body["run_latency_ms"] == {
+        "count": 0, "p50": None, "p95": None, "p99": None, "mean": None,
+    }  # fmt: skip
+    assert body["usage"] == {
+        "attempts": 0, "cost_usd": "0", "tokens_in": 0, "tokens_out": 0, "by_provider": {},
+    }  # fmt: skip
     assert body["active_workers"] == 0
     assert body["queue"] == {
         "runs_queued": 0, "runs_retrying": 0, "evaluations_pending": 0, "total": 0,
+        "oldest_queued_s": None,
     }  # fmt: skip
+    assert body["rates"] == {
+        "finished": 0, "completed": 0, "failed": 0, "timed_out": 0, "retried": 0,
+        "completion_rate": None, "failure_rate": None, "timeout_rate": None, "retry_rate": None,
+    }  # fmt: skip
+    assert body["workers"] == {"alive": 0, "stale": 0}
 
 
 async def give_latencies(engine: AsyncEngine) -> None:
@@ -424,17 +434,32 @@ async def test_stats_definitions_against_seeded_data(
     assert body["success"]["graded"] == 3 and body["success"]["passed"] == 1
     assert body["success"]["success_rate"] == pytest.approx(1 / 3)
     # Runs with started_at and finished_at: durations 100..700 ms, B3 never started.
+    # Nearest rank (percentile_disc), so every percentile is an observed duration.
     lat = body["run_latency_ms"]
     assert lat["count"] == 7
-    assert lat["p50"] == pytest.approx(400, abs=1)
-    assert lat["p95"] == pytest.approx(670, abs=1)  # 600 + 0.7 * (700 - 600)
-    # 7 attempts, each 0.010000 USD, 100 in, 20 out.
+    assert lat["p50"] == pytest.approx(400, abs=1)  # rank ceil(3.5) = 4
+    assert lat["p95"] == pytest.approx(700, abs=1)  # rank ceil(6.65) = 7
+    assert lat["p99"] == pytest.approx(700, abs=1)
+    assert lat["mean"] == pytest.approx(400, abs=1)
+    # 7 attempts, each 0.010000 USD, 100 in, 20 out; all of a fake-model version.
     assert body["usage"] == {
         "attempts": 7, "cost_usd": "0.070000", "tokens_in": 700, "tokens_out": 140,
+        "by_provider": {"fake": {
+            "attempts": 7, "tokens_in": 700, "tokens_out": 140, "cost_usd": "0.070000",
+            "simulated": True,
+        }},
     }  # fmt: skip
     assert body["active_workers"] == 1
-    assert body["queue"] == {
+    assert body["workers"] == {"alive": 1, "stale": 1}  # w-silent; w-stopped is neither
+    queue = body["queue"]
+    assert queue.pop("oldest_queued_s") == pytest.approx(0, abs=60)  # C3, created just now
+    assert queue == {
         "runs_queued": 1, "runs_retrying": 0, "evaluations_pending": 0, "total": 1,
+    }  # fmt: skip
+    # 8 finished runs: 6 COMPLETED, B1 and B3 FAILED; none timed out, none retried.
+    assert body["rates"] == {
+        "finished": 8, "completed": 6, "failed": 2, "timed_out": 0, "retried": 0,
+        "completion_rate": 0.75, "failure_rate": 0.25, "timeout_rate": 0.0, "retry_rate": 0.0,
     }  # fmt: skip
 
 
@@ -461,8 +486,9 @@ async def test_stats_window_restricts_success_latency_and_usage_but_not_counts(
     # A1 (the only pass) fell out of the window: 2 graded, 0 passed.
     assert day["success"] == {"graded": 2, "passed": 0, "success_rate": 0.0}
     assert day["run_latency_ms"]["count"] == 6
-    assert day["run_latency_ms"]["p50"] == pytest.approx(450, abs=1)
-    assert day["run_latency_ms"]["p95"] == pytest.approx(675, abs=1)
+    assert day["run_latency_ms"]["p50"] == pytest.approx(400, abs=1)  # 200..700: rank 3
+    assert day["run_latency_ms"]["p95"] == pytest.approx(700, abs=1)
+    assert day["rates"]["finished"] == 7  # A1 finished outside the window
     assert day["usage"]["attempts"] == 6 and day["usage"]["cost_usd"] == "0.060000"
     assert day["usage"]["tokens_in"] == 600
 
@@ -496,6 +522,7 @@ async def test_stats_queue_depth_counts_retrying_runs_and_pending_evaluations(
             {"id": s.runs["B1"]},
         )
     queue = (await client.get(f"{API}/stats/overview")).json()["queue"]
+    assert queue.pop("oldest_queued_s") >= 0  # C3
     assert queue == {
         "runs_queued": 1, "runs_retrying": 1, "evaluations_pending": 1, "total": 3,
     }  # fmt: skip

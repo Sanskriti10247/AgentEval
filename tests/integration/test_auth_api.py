@@ -74,10 +74,14 @@ def guards(dep: Dependant) -> list[ScopeGuard]:
     return found
 
 
+# POSTs that write nothing, so they need only the read scope.
+READ_POSTS = {"/api/v1/evaluations/estimate"}
+
+
 def expected_scope(method: str, path: str) -> Scope:
     if path.startswith("/api/v1/keys"):
         return Scope.ADMIN
-    return Scope.READ if method == "GET" else Scope.WRITE
+    return Scope.READ if method == "GET" or path in READ_POSTS else Scope.WRITE
 
 
 def concrete(path: str) -> str:

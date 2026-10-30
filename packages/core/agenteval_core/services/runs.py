@@ -89,8 +89,13 @@ class RunService:
         if task.task_type == "command" and agent_version_id is not None:
             raise InvalidRun("command tasks don't take an agent_version_id")
         if agent_version_id is not None:
-            if await AgentVersionRepository(self._s).get(agent_version_id) is None:
+            version = await AgentVersionRepository(self._s).get(agent_version_id)
+            if version is None:
                 raise NotFound(f"agent version {agent_version_id} not found")
+            if version.model_provider not in self._settings.enabled_providers():
+                raise InvalidRun(
+                    f"Provider '{version.model_provider}' is not enabled on this server"
+                )
 
         budget = max_attempts if max_attempts is not None else self._settings.run_max_attempts
         run = await self._runs.create_queued(task_id, idempotency_key, agent_version_id, budget)

@@ -146,7 +146,9 @@ async def test_a_retried_run_is_summarised_by_its_latest_attempt(
     # The stale attempt-1 platform_model failure is not part of the result.
     assert (summary["attempts"], summary["graded"], summary["passed"]) == (1, 1, 1)
     assert summary["platform_failures"] == 0 and summary["failure_categories"] == {"passed": 1}
-    assert summary["latency_ms"] == {"p50": 200, "p95": 200}  # attempt 2's duration
+    # attempt 2's duration
+    assert summary["latency_ms"] == {"p50": 200, "p95": 200, "p99": 200, "mean": 200.0, "count": 1}
+    assert (summary["rates"]["retried"], summary["rates"]["retry_rate"]) == (1, 1.0)
     assert summary["cost_usd"]["total"] in ("0.010000", "0.01")  # one attempt's cost, not two
     assert (summary["tokens"]["tokens_in"], summary["tokens"]["tokens_out"]) == (10, 5)
 

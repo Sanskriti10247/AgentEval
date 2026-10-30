@@ -21,7 +21,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agenteval_core.models import (
+    Agent,
+    AgentVersion,
     AttemptEvaluation,
+    Dataset,
     Evaluation,
     Run,
     RunAttempt,
@@ -64,6 +67,21 @@ class ResultRecord:
     integrity_ok: bool | None
     score_components: dict[str, Any] | None
     score_overall: Decimal | None
+
+
+@dataclass(frozen=True)
+class ContextRecord:
+    """What a batch evaluated: its agent version and dataset, public columns only."""
+
+    agent_id: uuid.UUID
+    agent_name: str
+    agent_version: int
+    agent_config_hash: str
+    provider: str
+    model: str
+    dataset_name: str
+    dataset_version: str
+    task_count: int
 
 
 @dataclass(frozen=True)
@@ -173,6 +191,64 @@ class BatchRepository:
             .order_by(Run.task_id, Run.repetition)
         )
         return list(result.scalars())
+
+    async def contexts(self, evaluation_ids: list[uuid.UUID]) -> dict[uuid.UUID, ContextRecord]:
+        """ContextRecord per batch in one statement (list pages: no per-batch round trip).
+        A batch whose version or dataset row is missing is simply absent."""
+        if not evaluation_ids:
+            return {}
+        task_count = (
+            select(func.count())
+            .select_from(Task)
+            .where(Task.dataset_id == Dataset.id)
+            .correlate(Dataset)
+            .scalar_subquery()
+        )
+        rows = await self._s.execute(
+            select(
+                Evaluation.id.label("evaluation_id"),
+                Agent.id.label("agent_id"),
+                Agent.name.label("agent_name"),
+                AgentVersion.version.label("agent_version"),
+                AgentVersion.config_hash.label("agent_config_hash"),
+                AgentVersion.model_provider.label("provider"),
+                AgentVersion.model,
+                Dataset.name.label("dataset_name"),
+                Dataset.version.label("dataset_version"),
+                task_count.label("task_count"),
+            )
+            .join(AgentVersion, AgentVersion.id == Evaluation.agent_version_id)
+            .join(Agent, Agent.id == AgentVersion.agent_id)
+            .join(Dataset, Dataset.id == Evaluation.dataset_id)
+            .where(Evaluation.id.in_(evaluation_ids))
+        )
+        out = {}
+        for row in rows:
+            values = row._asdict()
+            evaluation_id = values.pop("evaluation_id")
+            out[evaluation_id] = ContextRecord(**values)
+        return out
+
+    async def evaluation_spend(self, run_id: uuid.UUID) -> tuple[Decimal, Decimal] | None:
+        """(max_cost_usd, cost so far) of the batch `run_id` belongs to: cost_usd summed
+        over every attempt of every run of the batch, finished or not. None when the run
+        is not a batch run or its batch has no cap."""
+        batch = (
+            await self._s.execute(
+                select(Evaluation.id, Evaluation.max_cost_usd)
+                .join(Run, Run.evaluation_id == Evaluation.id)
+                .where(Run.id == run_id)
+            )
+        ).one_or_none()
+        if batch is None or batch.max_cost_usd is None:
+            return None
+        spent = await self._s.scalar(
+            select(func.coalesce(func.sum(RunAttempt.cost_usd), 0))
+            .select_from(RunAttempt)
+            .join(Run, Run.id == RunAttempt.run_id)
+            .where(Run.evaluation_id == batch.id)
+        )
+        return Decimal(batch.max_cost_usd), Decimal(str(spent or 0))
 
     async def task_meta(self, task_ids: list[uuid.UUID]) -> dict[uuid.UUID, TaskMeta]:
         if not task_ids:

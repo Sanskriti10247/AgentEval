@@ -12,6 +12,8 @@ from agenteval_api.deps import EvaluationServiceDep, ReadServiceDep
 from agenteval_core.schemas.evaluation import (
     Compare,
     EvaluationCreate,
+    EvaluationEstimate,
+    EvaluationEstimateRequest,
     EvaluationPage,
     EvaluationRead,
     ResultPage,
@@ -38,13 +40,28 @@ async def create_evaluation(
 ) -> EvaluationRead:
     """Run an agent version on every task of a FROZEN dataset, `repetitions`
     times. 202 for a new batch, 200 when the key is replayed (runs still
-    QUEUED are re-dispatched). In a public demo, 422 above the demo's repetition
-    cap and 429 while its cap on queued + running runs is reached."""
+    QUEUED are re-dispatched). 422 when the version's provider is not enabled here.
+    A real-model version without `max_cost_usd` gets AGENTEVAL_REAL_EVAL_MAX_COST_USD.
+    In a public demo, 403 for a version that is not fake-model, 422 above the demo's
+    repetition cap and 429 while its cap on queued + running runs is reached."""
+    await demo.check_agent_version(request, body.agent_version_id)
     await demo.check_evaluation(request, body.dataset_id, body.repetitions)
     result = await evaluations.create(body, idempotency_key)
     if not result.created:
         response.status_code = status.HTTP_200_OK
     return result.evaluation
+
+
+# READ, not WRITE: it writes nothing, so a read-only key and a public demo's visitor may
+# ask too. Declared before /{evaluation_id} routes, like /compare.
+@router.post("/estimate", response_model=EvaluationEstimate, dependencies=[READ])
+async def estimate_evaluation(
+    body: EvaluationEstimateRequest, evaluations: EvaluationServiceDep
+) -> EvaluationEstimate:
+    """Upper bounds for an evaluation before launching it: runs, model requests and
+    cost (from the version's per-attempt cost cap), and whether this server would run
+    it. The same 404 / 409 / 422 as POST /evaluations; nothing is written."""
+    return await evaluations.estimate(body)
 
 
 @router.get("", response_model=EvaluationPage, dependencies=[READ])

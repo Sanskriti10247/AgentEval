@@ -18,13 +18,15 @@ With `AGENTEVAL_PUBLIC_DEMO=true` (the free-hosting demo, see [deployment](../de
 
 | Method | Path | Demo limit |
 |---|---|---|
-| POST | `/evaluations` | `repetitions` at most `AGENTEVAL_DEMO_MAX_REPETITIONS` (default 3), else **422** |
-| POST | `/runs` | |
+| POST | `/evaluations` | `repetitions` at most `AGENTEVAL_DEMO_MAX_REPETITIONS` (default 3), else **422**; a version that is not fake-model is **403** |
+| POST | `/runs` | a version that is not fake-model is **403** |
 | POST | `/runs/{id}/cancel` | |
 | POST | `/runs/{id}/replay` | |
 | POST | `/evaluations/{id}/cancel` | |
 
 They take the same bodies as anywhere else, so they can only point at agent versions, frozen datasets and tasks that already exist. `POST /evaluations`, `POST /runs` and replay also answer **429** with `Retry-After: 30` when the runs already queued or running, plus the runs the request would add, exceed `AGENTEVAL_DEMO_MAX_ACTIVE_RUNS` (default 20, across all visitors; read before the insert, so two racing requests can overshoot it by one batch). Every other route that needs `write` or `admin` (agents, versions, tasks, datasets, freeze, keys) answers **403** `This is a public demo: you can launch evaluations and runs of the existing agents and tasks, cancel them and replay failed runs. Nothing else can be changed here` before the body is validated. If both settings are on, read-only wins.
+
+The demo never calls a real model: whatever providers are enabled, launching an evaluation or a run of a version whose provider is not `fake` answers **403** `The public demo only runs simulated (fake-model) agents`, and `GET /providers` reports every real provider as unavailable. `POST /evaluations/estimate` needs only the read scope and writes nothing, so visitors can call it too.
 
 `GET /health` tells the dashboard which mode it is talking to:
 
@@ -62,7 +64,7 @@ Scopes are independent (`write` does not imply `read`); give a key every scope i
 
 | Scope | Allows |
 |---|---|
-| `read` | every `GET` under `/api/v1` |
+| `read` | every `GET` under `/api/v1`, and `POST /evaluations/estimate` (it writes nothing) |
 | `write` | creating agents, versions, tasks, datasets, runs and evaluations; freezing datasets; cancelling and replaying runs and evaluations |
 | `admin` | the `/keys` endpoints |
 

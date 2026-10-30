@@ -4,6 +4,7 @@ public schema in schemas/read.py or schemas/evaluation.py, built field by
 field; the ORM rows never reach a response.
 """
 
+import math
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -14,8 +15,10 @@ from agenteval_core.config import Settings
 from agenteval_core.evaluation.taxonomy import DatasetStatus
 from agenteval_core.repositories.batches import BatchRepository
 from agenteval_core.repositories.read import Cursor, ReadRepository, WorkerCursor
-from agenteval_core.schemas.evaluation import EvaluationPage
+from agenteval_core.schemas.evaluation import EvaluationPage, FinishRates
 from agenteval_core.schemas.read import (
+    ActivityBucket,
+    ActivityEvaluation,
     AgentPage,
     AgentSummary,
     DatasetPage,
@@ -23,18 +26,22 @@ from agenteval_core.schemas.read import (
     EvaluationCounts,
     LatencyStats,
     LatestVersion,
+    ProviderUsage,
     QueueDepth,
     RunCounts,
+    StatsActivity,
     StatsOverview,
     SuccessStats,
     TaskListItem,
     TaskPage,
     UsageStats,
+    WorkerLiveness,
     WorkerPage,
     WorkerRead,
 )
 from agenteval_core.services.errors import InvalidCursor
-from agenteval_core.services.evaluations import evaluation_read
+from agenteval_core.services.evaluations import context_of, evaluation_read, finish_rates
+from agenteval_core.services.providers import is_simulated
 from agenteval_core.states import RunStatus
 
 
@@ -49,6 +56,27 @@ def _cursor(after: str | None) -> Cursor | None:
 
 def _next(rows: list[tuple[datetime, uuid.UUID]], more: bool) -> str | None:
     return pagination.encode_cursor(*rows[-1]) if more and rows else None
+
+
+# Evaluations listed by GET /stats/activity.
+ACTIVITY_EVALUATIONS = 50
+
+
+def activity_bucket_s(window_h: int) -> int:
+    """Hourly buckets up to 48 h, six-hourly up to 7 days, daily beyond."""
+    if window_h <= 48:
+        return 3600
+    if window_h <= 7 * 24:
+        return 21600
+    return 86400
+
+
+def activity_starts(now: datetime, window_h: int, bucket_s: int) -> list[datetime]:
+    """Bucket start times, oldest first: every multiple of bucket_s (Unix time) from the
+    one at or before now - window_h up to the one containing now."""
+    first = math.floor((now.timestamp() - window_h * 3600) / bucket_s)
+    last = math.floor(now.timestamp() / bucket_s)
+    return [datetime.fromtimestamp(i * bucket_s, UTC) for i in range(first, last + 1)]
 
 
 def _worker_cursor(after: str | None) -> WorkerCursor | None:
@@ -171,8 +199,11 @@ class ReadService:
         )
         page, more = pagination.split_page(rows, limit)
         progress = await self._batches.progress_counts_many([b.id for b in page])
+        contexts = await self._batches.contexts([b.id for b in page])
         return EvaluationPage(
-            evaluations=[evaluation_read(b, *progress[b.id]) for b in page],
+            evaluations=[
+                evaluation_read(b, *progress[b.id], context_of(contexts.get(b.id))) for b in page
+            ],
             next_after=_next([(b.created_at, b.id) for b in page], more),
         )
 
@@ -211,9 +242,13 @@ class ReadService:
         batches, cancel_requested = await self._read.evaluation_counts()
         pending = await self._read.pending_evaluations()
         active = await self._read.active_workers(ttl)
-        count, p50, p95 = await self._read.run_latency(since)
+        alive, stale = await self._read.worker_liveness(ttl)
+        oldest_queued = await self._read.oldest_queued_age_s()
+        count, p50, p95, p99, mean = await self._read.run_latency(since)
         attempts, cost, tokens_in, tokens_out = await self._read.usage(since)
+        by_provider = await self._read.usage_by_provider(since)
         graded, passed = await self._read.graded(since)
+        finished, completed, failed, timed_out, retried = await self._read.finish_counts(since)
         queued = by_status.get(RunStatus.QUEUED, 0)
         retrying = by_status.get(RunStatus.RETRYING, 0)
         return StatsOverview(
@@ -229,9 +264,22 @@ class ReadService:
                 passed=passed,
                 success_rate=passed / graded if graded else None,
             ),
-            run_latency_ms=LatencyStats(count=count, p50=p50, p95=p95),
+            run_latency_ms=LatencyStats(count=count, p50=p50, p95=p95, p99=p99, mean=mean),
             usage=UsageStats(
-                attempts=attempts, cost_usd=cost, tokens_in=tokens_in, tokens_out=tokens_out
+                attempts=attempts,
+                cost_usd=cost,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                by_provider={
+                    provider: ProviderUsage(
+                        attempts=n,
+                        tokens_in=t_in,
+                        tokens_out=t_out,
+                        cost_usd=c,
+                        simulated=is_simulated(provider),
+                    )
+                    for provider, (n, c, t_in, t_out) in by_provider.items()
+                },
             ),
             active_workers=active,
             queue=QueueDepth(
@@ -239,5 +287,70 @@ class ReadService:
                 runs_retrying=retrying,
                 evaluations_pending=pending,
                 total=queued + retrying + pending,
+                oldest_queued_s=oldest_queued,
             ),
+            rates=FinishRates(
+                **finish_rates(
+                    finished=finished,
+                    completed=completed,
+                    failed=failed,
+                    timed_out=timed_out,
+                    retried=retried,
+                )
+            ),
+            workers=WorkerLiveness(alive=alive, stale=stale),
+        )
+
+    async def activity(self, window_h: int) -> StatsActivity:
+        """Runs per time bucket and the evaluations created in the window
+        (docs/api/read.md). Buckets are bucketed by run finished_at."""
+        now = datetime.now(UTC)
+        bucket_s = activity_bucket_s(window_h)
+        starts = activity_starts(now, window_h, bucket_s)
+        rows = {int(r.bucket): r for r in await self._read.activity_buckets(starts[0], bucket_s)}
+        buckets = []
+        for start in starts:
+            r = rows.get(int(start.timestamp()) // bucket_s)
+            buckets.append(
+                ActivityBucket(
+                    start=start,
+                    finished=r.finished if r else 0,
+                    completed=r.completed if r else 0,
+                    failed=r.failed if r else 0,
+                    cancelled=r.cancelled if r else 0,
+                    graded=r.graded if r else 0,
+                    passed=r.passed if r else 0,
+                    p95_ms=None if r is None or r.p95_ms is None else float(r.p95_ms),
+                )
+            )
+        recent = await self._read.recent_evaluations(
+            now - timedelta(hours=window_h), ACTIVITY_EVALUATIONS
+        )
+        outcomes = await self._read.evaluation_outcomes([e.id for e in recent])
+        evaluations = []
+        for e in recent:
+            runs, graded, passed, p95 = outcomes.get(e.id, (0, 0, 0, None))
+            evaluations.append(
+                ActivityEvaluation(
+                    id=e.id,
+                    name=e.name,
+                    created_at=e.created_at,
+                    agent_name=e.agent_name,
+                    agent_version=e.agent_version,
+                    provider=e.provider,
+                    model=e.model,
+                    simulated=is_simulated(e.provider),
+                    runs_total=runs,
+                    graded=graded,
+                    passed=passed,
+                    success_rate=passed / graded if graded else None,
+                    p95_ms=p95,
+                )
+            )
+        return StatsActivity(
+            window_h=window_h,
+            bucket_s=bucket_s,
+            generated_at=now,
+            buckets=buckets,
+            evaluations=evaluations,
         )
