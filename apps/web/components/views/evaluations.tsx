@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, ErrorBar, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { AXIS_LABEL, AXIS_STROKE, AXIS_TICK, GRID_STROKE, TooltipBox } from "@/components/charts";
 import {
   Button,
   ButtonLink,
@@ -11,6 +12,7 @@ import {
   Empty,
   Gate,
   IdLink,
+  isSimulated,
   KeyValue,
   Live,
   LoadMore,
@@ -19,6 +21,7 @@ import {
   Notice,
   Num,
   PageHeader,
+  ProviderMark,
   RateCell,
   Readouts,
   RunStatusBadge,
@@ -33,7 +36,15 @@ import {
 import { flatten } from "@/components/pages-util";
 import { StatusStrip } from "@/components/views/dashboard";
 import { describeWriteError } from "@/components/launch/write-error";
-import { RUN_STATUSES, TERMINAL_RUN_STATUSES, type EvaluationRead, type EvaluationSummary } from "@/lib/api/types";
+import {
+  RUN_STATUSES,
+  TERMINAL_RUN_STATUSES,
+  type Compare,
+  type DatasetSummary,
+  type EvaluationRead,
+  type EvaluationSummary,
+  type SummaryRates,
+} from "@/lib/api/types";
 import {
   formatCost,
   formatDuration,
@@ -268,6 +279,8 @@ export function EvaluationDetailView({ id }: { id: string }) {
   const canCancel = !!e && !e.cancel_requested_at && !e.progress.complete;
   const info = e ? index.get(e.agent_version_id) : undefined;
   const categoryTotal = s ? Object.values(s.failure_categories).reduce((a, b) => a + b, 0) : 0;
+  const simulated = s?.simulated ?? e?.context?.simulated ?? (info ? isSimulated(info.provider) : undefined);
+  const costLabel = simulated ? " (simulated)" : "";
 
   return (
     <>
@@ -324,24 +337,34 @@ export function EvaluationDetailView({ id }: { id: string }) {
                       meter={<RateWithInterval rate={s.success_rate} ci={s.ci95} />}
                       hint={s.ci95 ? `95% CI ${formatPercent(s.ci95[0])} to ${formatPercent(s.ci95[1])}` : "nothing graded yet"}
                     />
-                    <Stat label="Passed / graded" value={`${s.passed} / ${s.graded}`} hint={`${s.attempts} attempts so far`} />
+                    <Stat label="Passed / graded" value={`${s.passed} / ${s.graded}`} hint={`${s.attempts} attempt${s.attempts === 1 ? "" : "s"}${s.complete ? "" : " so far"}`} />
                     <Stat
                       label="Mean score"
                       value={formatScore(s.mean_score?.overall)}
                       meter={<Meter value={s.mean_score ? Number(s.mean_score.overall) : null} />}
                       hint="weighted, 0 to 1"
                     />
-                    <Stat label="Cost / task" value={formatCost(s.cost_usd.mean_per_attempt)} hint={`${formatCost(s.cost_usd.total)} total`} />
+                    <Stat
+                      label={`Cost / task${costLabel}`}
+                      value={formatCost(s.cost_usd.mean_per_attempt)}
+                      hint={simulated ? `${formatCost(s.cost_usd.total)} total, priced from the fake model's table; nothing was spent` : `${formatCost(s.cost_usd.total)} total`}
+                    />
                   </Readouts>
+                  <LatencyReadouts latency={s.latency_ms} />
+                  {s.rates ? <RateReadouts rates={s.rates} /> : null}
                   <Readouts>
-                    <Stat label="Latency p50 / p95" value={`${formatDuration(s.latency_ms?.p50)} / ${formatDuration(s.latency_ms?.p95)}`} />
                     <Stat label="Platform failures" value={formatInt(s.platform_failures)} hint="sandbox or model trouble; not counted against the agent" />
                     <Stat label="Evaluation errors" value={formatInt(s.evaluation_errors)} hint="the grader itself failed" />
                     <Stat label="Ungraded / in progress" value={`${s.ungraded} / ${s.in_progress}`} />
+                    <Stat label="Tokens in / out" value={`${formatInt(s.tokens.tokens_in)} / ${formatInt(s.tokens.tokens_out)}`} />
                   </Readouts>
                 </div>
               ) : null}
             </Gate>
+
+            <Section title="What ran">
+              <ContextBlock e={e} info={info} dataset={dataset} spent={s?.cost_usd.total ?? null} simulated={simulated} />
+            </Section>
 
             <Section title="Progress" note={`${progressSummary(e).done} of ${e.progress.runs_total} runs finished`}>
               <ProgressBar e={e} />
@@ -474,7 +497,7 @@ export function EvaluationDetailView({ id }: { id: string }) {
                           <Th>Category</Th>
                           <Th className="text-right">Score</Th>
                           <Th className="hidden text-right md:table-cell">Duration</Th>
-                          <Th className="hidden text-right md:table-cell">Cost</Th>
+                          <Th className="hidden text-right md:table-cell">Cost{simulated ? " (sim.)" : ""}</Th>
                         </tr>
                       </thead>
                       <tbody>
@@ -512,8 +535,7 @@ export function EvaluationDetailView({ id }: { id: string }) {
               <KeyValue
                 columns={2}
                 items={[
-                  ["Agent version", <AgentCell key="a" versionId={e.agent_version_id} index={index} />],
-                  ["Dataset", dataset ? `${dataset.name} v${dataset.version}` : <IdLink key="d" id={e.dataset_id} />],
+                  ["Agent version id", <IdLink key="a" id={e.agent_version_id} />],
                   ["Repetitions", <Mono key="r">{e.repetitions}</Mono>],
                   [
                     "Attempt budgets",
@@ -528,7 +550,6 @@ export function EvaluationDetailView({ id }: { id: string }) {
                       {e.scoring_config.weights.reliability} · efficiency {e.scoring_config.weights.efficiency}
                     </Mono>,
                   ],
-                  ["Scoring hash", <Mono key="h" className="text-[12px]">{e.scoring_config.version} · {shortId(e.scoring_config_hash)}</Mono>],
                   ["Created", <Timestamp key="c" value={formatTimestamp(e.created_at)} />],
                   ["Cancel requested", <Timestamp key="cr" value={formatTimestamp(e.cancel_requested_at)} />],
                 ]}
@@ -539,6 +560,107 @@ export function EvaluationDetailView({ id }: { id: string }) {
       </Gate>
     </>
   );
+}
+
+function LatencyReadouts({ latency }: { latency: EvaluationSummary["latency_ms"] }) {
+  const n = latency?.count;
+  const nHint = n !== undefined ? `n = ${formatInt(n)} attempts` : undefined;
+  return (
+    <Readouts>
+      <Stat label="Latency p50" value={formatDuration(latency?.p50)} hint={latency ? nHint : "no finished attempts yet"} />
+      <Stat label="Latency p95" value={formatDuration(latency?.p95)} hint="nearest rank" />
+      <Stat label="Latency p99" value={formatDuration(latency?.p99)} hint={latency && latency.p99 === undefined ? "not reported by this API" : "nearest rank"} />
+      <Stat label="Latency mean" value={formatDuration(latency?.mean)} hint={latency && latency.mean === undefined ? "not reported by this API" : undefined} />
+    </Readouts>
+  );
+}
+
+function RateReadouts({ rates: r }: { rates: SummaryRates }) {
+  const of = (n: number) => (r.finished ? `${n} of ${r.finished} finished runs` : "no finished runs yet");
+  return (
+    <Readouts>
+      <Stat label="Completion rate" value={formatPercent(r.completion_rate)} hint={`${of(r.completed)}; ${r.scheduled} scheduled`} />
+      <Stat label="Failure rate" value={formatPercent(r.failure_rate)} hint={of(r.failed)} />
+      <Stat label="Timeout rate" value={formatPercent(r.timeout_rate)} hint={of(r.timed_out)} />
+      <Stat label="Retry rate" value={formatPercent(r.retry_rate)} hint={`${of(r.retried)} needed more than one attempt`} />
+    </Readouts>
+  );
+}
+
+/** Agent, model, dataset and pricing an evaluation ran with, from its context (or local lookups on an older API). */
+function ContextBlock({
+  e,
+  info,
+  dataset,
+  spent,
+  simulated,
+}: {
+  e: EvaluationRead;
+  info: VersionInfo | undefined;
+  dataset: DatasetSummary | undefined;
+  spent: string | null;
+  simulated: boolean | undefined;
+}) {
+  const c = e.context ?? null;
+  const agentId = c?.agent_id ?? info?.agentId;
+  const agentName = c?.agent_name ?? info?.agentName;
+  const agentVersion = c?.agent_version ?? info?.version;
+  const provider = c?.provider ?? info?.provider;
+  const model = c?.model ?? info?.model;
+  const datasetName = c ? `${c.dataset_name} v${c.dataset_version}` : dataset ? `${dataset.name} v${dataset.version}` : null;
+  const taskCount = c?.task_count ?? dataset?.task_count;
+  const budget = e.max_cost_usd ?? null;
+  const items: [string, ReactNode][] = [
+    [
+      "Agent",
+      agentName && agentId ? (
+        <span key="a">
+          <Link href={`/agents/${agentId}`}>{agentName}</Link> <Mono className="text-[12px] text-faint">v{agentVersion}</Mono>
+        </span>
+      ) : (
+        <IdLink key="a" id={e.agent_version_id} />
+      ),
+    ],
+    [
+      "Model",
+      model ? (
+        <span key="m" className="inline-flex flex-wrap items-center gap-2">
+          <Mono className="text-[12.5px]">
+            {provider}/{model}
+          </Mono>
+          <ProviderMark provider={provider} simulated={simulated} />
+        </span>
+      ) : (
+        "–"
+      ),
+    ],
+    ["Dataset", datasetName ? `${datasetName}${taskCount !== undefined ? `, ${taskCount} task${taskCount === 1 ? "" : "s"}` : ""}` : <IdLink key="d" id={e.dataset_id} />],
+    ["Evaluator version", <Mono key="ev" className="text-[12px]">{c?.evaluator_version ?? "–"}</Mono>],
+    ["Scoring config", <Mono key="sc" className="text-[12px]">{e.scoring_config.version} · {shortId(e.scoring_config_hash)}</Mono>],
+    ["Pricing version", <Mono key="pv" className="text-[12px]">{c?.pricing_version ?? "–"}</Mono>],
+    [
+      "Budget",
+      budget ? (
+        <Mono key="b" className="text-[12.5px]">
+          {formatCost(budget)}
+        </Mono>
+      ) : (
+        <span key="b" className="text-faint">{simulated ? "none (simulated, no spend)" : "none set"}</span>
+      ),
+    ],
+    [
+      simulated ? "Spent (simulated)" : "Spent",
+      <span key="sp">
+        <Mono className="text-[12.5px]">{formatCost(spent)}</Mono>
+        {budget && spent !== null && Number(budget) > 0 ? (
+          <span className="ml-2 inline-flex w-24 align-middle">
+            <Meter value={Number(spent) / Number(budget)} tone={Number(spent) >= Number(budget) ? "bad" : "ink"} label={`${formatPercent(Number(spent) / Number(budget))} of budget`} />
+          </span>
+        ) : null}
+      </span>,
+    ],
+  ];
+  return <KeyValue columns={2} items={items} />;
 }
 
 function ProgressBar({ e }: { e: EvaluationRead }) {
@@ -591,7 +713,10 @@ export function CompareView({ ids }: { ids: string[] }) {
     );
   }
 
+  const contextById = new Map((c?.evaluations ?? []).map((x) => [x.evaluation_id, x.context ?? null]));
   const label = (evalId: string, versionId: string) => {
+    const ctx = contextById.get(evalId);
+    if (ctx) return `${ctx.agent_name} v${ctx.agent_version}`;
     const info = index.get(versionId);
     const name = evalById.get(evalId)?.name;
     return info ? `${info.agentName} v${info.version}` : (name ?? shortId(evalId));
@@ -627,15 +752,52 @@ export function CompareView({ ids }: { ids: string[] }) {
       <Gate query={compare}>
         {c ? (
           <div className="space-y-10">
-            <Section title="Success rate" note="bar: observed rate · whisker: 95% interval">
+            <CompareWarnings c={c} label={label} />
+
+            <Section title="Success rate" note="bar: observed rate · whisker: Wilson 95% interval · n: graded attempts">
               <SuccessChart
                 rows={c.evaluations.map((x) => ({
                   name: label(x.evaluation_id, x.agent_version_id),
                   rate: x.summary.success_rate,
                   ci: x.summary.ci95,
+                  passed: x.summary.passed,
+                  graded: x.summary.graded,
                 }))}
               />
             </Section>
+
+            {c.differences && c.differences.length > 0 ? (
+              <Section title="What differs" note="configuration that is not the same across these evaluations">
+                <Table caption="Configuration differences">
+                  <thead>
+                    <tr>
+                      <Th>Field</Th>
+                      {c.evaluations.map((x) => (
+                        <Th key={x.evaluation_id} className="normal-case! tracking-normal!">
+                          <span className="font-sans text-[12.5px] text-ink-2">{label(x.evaluation_id, x.agent_version_id)}</span>
+                        </Th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {c.differences.map((d) => (
+                      <tr key={d.field}>
+                        <Td className="whitespace-nowrap font-mono text-[12px] text-muted">{d.field.replace(/_/g, " ")}</Td>
+                        {c.evaluations.map((x) => {
+                          const v = d.values[x.evaluation_id];
+                          const text = v === null || v === undefined ? "–" : String(v);
+                          return (
+                            <Td key={x.evaluation_id} className="break-all font-mono text-[12px] text-ink-2">
+                              {d.field === "agent_config_hash" ? text.slice(0, 12) : text}
+                            </Td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              </Section>
+            ) : null}
 
             <Section title="Headline">
               <Table caption="Evaluation comparison">
@@ -660,9 +822,30 @@ export function CompareView({ ids }: { ids: string[] }) {
                     )}
                   />
                   <MetricRow label="Passed / graded" cells={c.evaluations.map((x) => `${x.summary.passed} / ${x.summary.graded}`)} />
+                  {c.evaluations.some((x) => x.distinguishable_from_first !== undefined) ? (
+                    <MetricRow
+                      label="Differs from first at 95%"
+                      cells={c.evaluations.map((x, i) =>
+                        i === 0 ? "baseline" : x.distinguishable_from_first === true ? "yes" : x.distinguishable_from_first === false ? "no" : "–",
+                      )}
+                    />
+                  ) : null}
+                  <MetricRow
+                    label="Model"
+                    cells={c.evaluations.map((x) =>
+                      x.context ? (
+                        <span key="m" className="inline-flex items-center gap-1.5">
+                          {x.context.model} <ProviderMark provider={x.context.provider} simulated={x.context.simulated} />
+                        </span>
+                      ) : (
+                        "–"
+                      ),
+                    )}
+                  />
                   <MetricRow label="Mean score" cells={c.evaluations.map((x) => formatScore(x.summary.mean_score?.overall))} />
                   <MetricRow label="Latency p50" cells={c.evaluations.map((x) => formatDuration(x.summary.latency_ms?.p50))} />
                   <MetricRow label="Latency p95" cells={c.evaluations.map((x) => formatDuration(x.summary.latency_ms?.p95))} />
+                  <MetricRow label="Latency p99" cells={c.evaluations.map((x) => formatDuration(x.summary.latency_ms?.p99))} />
                   <MetricRow label="Cost / task" cells={c.evaluations.map((x) => formatCost(x.summary.cost_usd.mean_per_attempt))} />
                   <MetricRow label="Total cost" cells={c.evaluations.map((x) => formatCost(x.summary.cost_usd.total))} />
                   <MetricRow label="Platform failures" cells={c.evaluations.map((x) => formatInt(x.summary.platform_failures))} />
@@ -758,48 +941,91 @@ export function CompareView({ ids }: { ids: string[] }) {
   );
 }
 
-function SuccessChart({ rows }: { rows: { name: string; rate: number | null; ci: [number, number] | null }[] }) {
+/** Warnings from the API and an explicit note for every pair the data cannot tell apart. */
+function CompareWarnings({ c, label }: { c: Compare; label: (evalId: string, versionId: string) => string }) {
+  const first = c.evaluations[0];
+  const overlaps = first ? c.evaluations.slice(1).filter((x) => x.distinguishable_from_first === false) : [];
+  const warnings = c.warnings ?? [];
+  if (!first || (warnings.length === 0 && overlaps.length === 0)) return null;
+  const firstName = label(first.evaluation_id, first.agent_version_id);
+  return (
+    <div className="space-y-3">
+      {warnings.length > 0 ? (
+        <Notice tone="warn" title="Read this comparison with care">
+          <ul className="list-disc space-y-0.5 pl-4">
+            {warnings.map((w) => (
+              <li key={w}>{w}</li>
+            ))}
+          </ul>
+        </Notice>
+      ) : null}
+      {overlaps.map((x) => (
+        <Notice key={x.evaluation_id} tone="info" title={`${label(x.evaluation_id, x.agent_version_id)}: not distinguishable from ${firstName} at 95%`}>
+          The 95% intervals overlap, so this data does not show that one success rate is higher than the other. More
+          repetitions would narrow the intervals.
+        </Notice>
+      ))}
+    </div>
+  );
+}
+
+interface SuccessRow {
+  name: string;
+  rate: number | null;
+  ci: [number, number] | null;
+  passed: number;
+  graded: number;
+}
+
+function SuccessChart({ rows }: { rows: SuccessRow[] }) {
   const data = rows.map((r) => ({
-    name: r.name,
-    rate: r.rate ?? 0,
+    ...r,
+    label: `${r.name} (n=${r.graded})`,
+    value: r.rate ?? 0,
     // ErrorBar takes [below, above] offsets from the value.
     err: r.ci && r.rate !== null ? [Math.max(0, r.rate - r.ci[0]), Math.max(0, r.ci[1] - r.rate)] : [0, 0],
   }));
   return (
-    <div style={{ height: 36 + rows.length * 34 }} aria-hidden="true" className="max-w-3xl">
+    <div style={{ height: 56 + rows.length * 34 }} aria-hidden="true" className="max-w-3xl">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, bottom: 4, left: 0 }} barCategoryGap={12}>
-          <CartesianGrid stroke="var(--rule)" horizontal={false} />
+        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, bottom: 18, left: 0 }} barCategoryGap={12}>
+          <CartesianGrid stroke={GRID_STROKE} horizontal={false} />
           <XAxis
             type="number"
             domain={[0, 1]}
             ticks={[0, 0.25, 0.5, 0.75, 1]}
             tickFormatter={(v: number) => `${Math.round(v * 100)}%`}
-            stroke="var(--rule-strong)"
-            tick={{ fontSize: 11, fill: "var(--faint)", fontFamily: "var(--font-mono)" }}
+            stroke={AXIS_STROKE}
+            tick={AXIS_TICK}
             tickLine={false}
+            label={{ value: "Success rate (passed / graded)", position: "insideBottom", offset: -12, style: AXIS_LABEL }}
           />
           <YAxis
             type="category"
-            dataKey="name"
-            width={128}
-            stroke="var(--rule-strong)"
+            dataKey="label"
+            width={170}
+            stroke={AXIS_STROKE}
             tick={{ fontSize: 12, fill: "var(--ink-2)" }}
             tickLine={false}
           />
           <Tooltip
             cursor={{ fill: "var(--sunken)" }}
-            formatter={(v) => formatPercent(Number(v))}
-            contentStyle={{
-              background: "var(--surface)",
-              border: "1px solid var(--rule-strong)",
-              borderRadius: 3,
-              fontSize: 12,
-              fontFamily: "var(--font-mono)",
-              color: "var(--ink)",
+            content={({ active, payload }) => {
+              const r = active ? (payload?.[0]?.payload as SuccessRow | undefined) : undefined;
+              if (!r) return null;
+              return (
+                <TooltipBox
+                  title={r.name}
+                  rows={[
+                    { color: "var(--ink-2)", label: "success", value: formatPercent(r.rate) },
+                    { color: "var(--accent)", label: "95% interval", value: r.ci ? `${formatPercent(r.ci[0])} to ${formatPercent(r.ci[1])}` : "–" },
+                    { label: "passed / graded", value: `${r.passed} / ${r.graded}` },
+                  ]}
+                />
+              );
             }}
           />
-          <Bar dataKey="rate" name="success" fill="var(--ink-2)" barSize={8} isAnimationActive={false}>
+          <Bar dataKey="value" name="success" fill="var(--ink-2)" barSize={8} isAnimationActive={false}>
             <ErrorBar dataKey="err" width={6} strokeWidth={1.2} stroke="var(--accent)" direction="x" />
           </Bar>
         </BarChart>

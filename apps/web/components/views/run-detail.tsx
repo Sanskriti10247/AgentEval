@@ -18,6 +18,7 @@ import {
   Notice,
   Num,
   PageHeader,
+  ProviderMark,
   RunStatusBadge,
   Section,
   StatusMark,
@@ -29,14 +30,22 @@ import {
 } from "@/components/ui";
 import { flatten } from "@/components/pages-util";
 import { describeWriteError } from "@/components/launch/write-error";
-import { TERMINAL_RUN_STATUSES, type AttemptEvaluationRead, type RunAttemptRead, type TrajectoryEventRead } from "@/lib/api/types";
-import { compactJson, formatCost, formatDuration, formatInt, formatScore, formatTimestamp, humanize, shortId } from "@/lib/format";
+import {
+  TERMINAL_RUN_STATUSES,
+  type AttemptEvaluationRead,
+  type RunAttemptRead,
+  type StatsOverview,
+  type TrajectoryEventRead,
+} from "@/lib/api/types";
+import { ageSeconds, compactJson, formatAge, formatCost, formatDuration, formatInt, formatScore, formatTimestamp, humanize, shortId } from "@/lib/format";
 import {
   useAttemptEvaluation,
   useAttemptEvents,
   useAttempts,
   useCancelRun,
   useCapabilities,
+  useNow,
+  useOverview,
   useReplayRun,
   useRun,
   useTask,
@@ -74,8 +83,16 @@ export function RunDetailView({ id }: { id: string }) {
   const canCancel = !!r && !r.cancel_requested_at && ["QUEUED", "CLAIMED", "RUNNING", "RETRYING"].includes(r.status);
   const canReplay = r?.status === "FAILED";
   const version = r?.agent_version_id ? index.get(r.agent_version_id) : undefined;
-  const runDuration =
-    r?.started_at && r.finished_at ? new Date(r.finished_at).getTime() - new Date(r.started_at).getTime() : null;
+  // Ticks every second while the run is live: elapsed time and "updated Ns ago" stay current
+  // between polls. Polling itself is still react-query's refetchInterval.
+  const now = useNow(live);
+  const runDuration = r?.started_at
+    ? (r.finished_at ? new Date(r.finished_at).getTime() : live ? now : NaN) - new Date(r.started_at).getTime()
+    : null;
+  const queued = r?.status === "QUEUED";
+  const overview = useOverview(24, queued);
+  const pollError = (run.isError && r ? run.error : null) ?? (attempts.isError && attempts.data ? attempts.error : null);
+  const updatedAgo = run.dataUpdatedAt ? Math.max(0, (now - run.dataUpdatedAt) / 1000) : null;
 
   return (
     <>
@@ -94,7 +111,11 @@ export function RunDetailView({ id }: { id: string }) {
             <>
               {version ? (
                 <>
-                  <Link href={`/agents/${version.agentId}`}>{version.agentName}</Link> v{version.version}
+                  <Link href={`/agents/${version.agentId}`}>{version.agentName}</Link> v{version.version}{" "}
+                  <span className="font-mono text-[12px]">
+                    ({version.provider}/{version.model})
+                  </span>{" "}
+                  <ProviderMark provider={version.provider} />
                 </>
               ) : r.agent_version_id ? (
                 <Mono>{shortId(r.agent_version_id)}</Mono>
@@ -118,7 +139,16 @@ export function RunDetailView({ id }: { id: string }) {
         actions={
           r ? (
             <>
-              {live ? <Live /> : null}
+              {live ? (
+                <span className="inline-flex items-center gap-2">
+                  <Live />
+                  {updatedAgo !== null ? (
+                    <span className={`font-mono text-[11px] ${pollError ? "text-bad" : "text-faint"}`} title={`Last successful refresh ${formatTimestamp(new Date(run.dataUpdatedAt).toISOString())} UTC`}>
+                      updated {formatAge(updatedAgo)} ago
+                    </span>
+                  ) : null}
+                </span>
+              ) : null}
               <RunStatusBadge status={r.status} />
               {caps.readOnly ? null : (
                 <>
@@ -152,6 +182,14 @@ export function RunDetailView({ id }: { id: string }) {
       <Gate query={run}>
         {r ? (
           <div className="space-y-10">
+            {pollError ? (
+              <Notice title="Lost contact with the API">
+                The last refresh failed ({pollError instanceof Error ? pollError.message : "unknown error"}). What you see is from{" "}
+                {updatedAgo !== null ? `${formatAge(updatedAgo)} ago` : "earlier"}. The page keeps retrying every few seconds and
+                clears this message once a request succeeds.
+              </Notice>
+            ) : null}
+            {queued ? <QueueNotice overview={overview.data} createdAt={r.created_at} now={now} /> : null}
             {cancel.isError ? <WriteError error={cancel.error} /> : null}
             {replay.isError ? <WriteError error={replay.error} /> : null}
 
@@ -168,11 +206,26 @@ export function RunDetailView({ id }: { id: string }) {
                       {r.replay_count ? `, replayed ${r.replay_count}×` : ""}
                     </Mono>,
                   ],
-                  ["Wall time", <Mono key="d" className="text-[12.5px]">{formatDuration(runDuration)}</Mono>],
+                  [
+                    live ? "Elapsed" : "Wall time",
+                    <Mono key="d" className="text-[12.5px]">
+                      {r.started_at ? formatDuration(runDuration) : live ? "not started" : "–"}
+                    </Mono>,
+                  ],
                   ["Dead letter", r.dead_letter_reason ? <StatusMark key="dl" tone="bad">{humanize(r.dead_letter_reason)}</StatusMark> : "–"],
                   ["Failure reason", humanize(r.failure_reason)],
                   ...(r.error_message ? ([["Error", <span key="e" className="text-bad">{r.error_message}</span>]] as [string, ReactNode][]) : []),
-                  ...(r.next_attempt_at ? ([["Next attempt", <Timestamp key="n" value={formatTimestamp(r.next_attempt_at)} />]] as [string, ReactNode][]) : []),
+                  ...(r.next_attempt_at
+                    ? ([
+                        [
+                          "Next attempt",
+                          <span key="n">
+                            <Timestamp value={formatTimestamp(r.next_attempt_at)} />
+                            {live ? <NextAttemptIn at={r.next_attempt_at} now={now} /> : null}
+                          </span>,
+                        ],
+                      ] as [string, ReactNode][])
+                    : []),
                   ...(r.cancel_requested_at
                     ? ([
                         [
@@ -198,11 +251,14 @@ export function RunDetailView({ id }: { id: string }) {
                 {list.length === 0 ? (
                   <Empty>No attempts yet. {live ? "The run is waiting for a worker to pick it up; this page refreshes on its own." : ""}</Empty>
                 ) : (
+                  <>
+                  <RetryHistory attempts={list} maxAttempts={r.max_attempts} />
                   <ol aria-label="Attempt timeline" className="border-t border-rule">
                     {list.map((a) => (
                       <AttemptRow key={a.id} a={a} selected={a.attempt_no === selectedNo} onSelect={() => setPicked(a.attempt_no)} />
                     ))}
                   </ol>
+                  </>
                 )}
               </Gate>
             </Section>
@@ -220,6 +276,55 @@ export function RunDetailView({ id }: { id: string }) {
         ) : null}
       </Gate>
     </>
+  );
+}
+
+function NextAttemptIn({ at, now }: { at: string; now: number }) {
+  const s = -(ageSeconds(at, now) ?? 0);
+  return <span className="ml-2 font-mono text-[11.5px] text-faint">{s > 0 ? `in ${formatAge(s)}` : "due now"}</span>;
+}
+
+/** Where a queued run stands: queue depth and live workers from the overview (all runs, not just this one). */
+function QueueNotice({ overview: o, createdAt, now }: { overview: StatsOverview | undefined; createdAt: string; now: number }) {
+  const waited = ageSeconds(createdAt, now);
+  const alive = o ? (o.workers?.alive ?? o.active_workers) : null;
+  return (
+    <Notice tone={alive === 0 ? "warn" : "info"} title={`Queued for ${formatAge(waited)}, waiting for a worker`}>
+      {o ? (
+        <>
+          {formatInt(o.queue.runs_queued)} run{o.queue.runs_queued === 1 ? "" : "s"} queued in total
+          {o.queue.oldest_queued_s !== undefined && o.queue.oldest_queued_s !== null ? `, the oldest for ${formatAge(o.queue.oldest_queued_s)}` : ""}.{" "}
+          {alive === 0
+            ? "No worker is alive, so nothing will pick this run up until one starts."
+            : `${formatInt(alive)} worker${alive === 1 ? "" : "s"} alive${o.workers?.stale ? `, ${o.workers.stale} stale` : ""}.`}
+        </>
+      ) : (
+        "Checking the queue…"
+      )}
+    </Notice>
+  );
+}
+
+/** One line per attempt that did not end the run: what ended it and that a retry followed. */
+function RetryHistory({ attempts, maxAttempts }: { attempts: RunAttemptRead[]; maxAttempts: number }) {
+  if (attempts.length < 2) return null;
+  const sorted = [...attempts].sort((a, b) => a.attempt_no - b.attempt_no);
+  return (
+    <div className="mb-3 text-[12.5px] text-muted">
+      <div className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">
+        Retry history · {attempts.length} of {maxAttempts} attempts used
+      </div>
+      <ol aria-label="Retry history" className="space-y-0.5">
+        {sorted.map((a, i) => (
+          <li key={a.id} className="font-mono text-[11.5px]">
+            <span className="text-ink-2">#{a.attempt_no}</span> {a.status.toLowerCase()}
+            {a.outcome ? `, ${a.outcome}` : ""} after {formatDuration(a.duration_ms)}
+            {a.error_message ? <span className="text-bad"> ({a.error_message})</span> : null}
+            {i < sorted.length - 1 ? <span className="text-faint"> → retried</span> : null}
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
