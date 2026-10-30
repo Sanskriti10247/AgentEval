@@ -78,7 +78,7 @@ export function Glyph({ tone, className = "" }: { tone: Tone; className?: string
 
 export function StatusMark({ tone, children, title }: { tone: Tone; children: ReactNode; title?: string }) {
   return (
-    <span title={title} className="inline-flex items-center gap-1.5 whitespace-nowrap font-mono text-[11.5px] tracking-[0.02em] text-ink-2">
+    <span title={title} className="inline-flex items-center gap-1.5 whitespace-nowrap font-mono text-[11.5px] text-ink-2">
       <Glyph tone={tone} />
       {children}
     </span>
@@ -88,7 +88,7 @@ export function StatusMark({ tone, children, title }: { tone: Tone; children: Re
 /** Kept for call sites that want a quiet outlined label (tools, task types). */
 export function Tag({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
-    <span className={`inline-block whitespace-nowrap rounded-[2px] border border-rule px-1.5 font-mono text-[11px] leading-[18px] text-ink-2 ${className}`}>
+    <span className={`inline-block whitespace-nowrap rounded-[3px] border border-rule bg-paper px-1.5 font-mono text-[11px] leading-[18px] text-ink-2 ${className}`}>
       {children}
     </span>
   );
@@ -109,7 +109,7 @@ export const CategoryBadge = ({ category }: { category: string | null | undefine
 /** A small "live" marker shown while a view is polling. */
 export function Live({ label = "live" }: { label?: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.08em] text-accent" title="Refreshing automatically">
+    <span className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-accent" title="Refreshing automatically">
       <span className="relative inline-flex size-[7px]">
         <span className="absolute inset-0 animate-ping rounded-full bg-accent opacity-40 motion-reduce:hidden" />
         <span className="relative inline-flex size-[7px] rounded-full bg-accent" />
@@ -128,21 +128,18 @@ export function PageHeader({
   actions,
 }: {
   title: ReactNode;
+  /** Breadcrumb or context line above the title. */
   eyebrow?: ReactNode;
   subtitle?: ReactNode;
   actions?: ReactNode;
 }) {
   return (
-    <header className="mb-7 border-b border-rule pb-4">
-      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
-        <div className="min-w-0">
-          {eyebrow ? (
-            <div className="mb-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-faint">{eyebrow}</div>
-          ) : null}
-          <h1 className="break-words font-display text-[26px] font-semibold leading-[1.1] tracking-[-0.01em] text-ink">
-            {title}
-          </h1>
-          {subtitle ? <div className="mt-2 max-w-[68ch] text-[13.5px] leading-relaxed text-muted">{subtitle}</div> : null}
+    <header className="mb-6 border-b border-rule pb-5">
+      {eyebrow ? <div className="mb-1 text-[12.5px] text-faint [&_a]:text-muted [&_a:hover]:text-ink">{eyebrow}</div> : null}
+      <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+        <div className="min-w-0 flex-1 basis-[22rem]">
+          <h1 className="break-words text-[23px] font-semibold leading-[1.2] tracking-[-0.018em] text-ink">{title}</h1>
+          {subtitle ? <div className="mt-1.5 max-w-[78ch] text-[13.5px] leading-relaxed text-muted">{subtitle}</div> : null}
         </div>
         {actions ? <div className="flex flex-wrap items-end gap-2">{actions}</div> : null}
       </div>
@@ -150,7 +147,7 @@ export function PageHeader({
   );
 }
 
-/** A titled section: a small caps label over a hairline, no box around the content. */
+/** A titled section: a heading over a hairline, no box around the content. */
 export function Section({
   title,
   actions,
@@ -167,9 +164,9 @@ export function Section({
   return (
     <section className={`min-w-0 ${className}`}>
       {title ? (
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-rule pb-1.5">
-          <h2 className="font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-muted">{title}</h2>
-          {note ? <div className="text-xs text-faint">{note}</div> : null}
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 border-b border-rule pb-2">
+          <h2 className="text-[14px] font-semibold tracking-[-0.005em] text-ink">{title}</h2>
+          {note ? <div className="text-[12px] text-faint">{note}</div> : null}
           {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
         </div>
       ) : null}
@@ -181,12 +178,14 @@ export function Section({
 /** Kept as an alias: older call sites name it Panel. */
 export const Panel = Section;
 
-/** A strip of instrument readouts separated by hairlines. */
-const READOUT_COLS = { 2: "sm:grid-cols-2", 3: "sm:grid-cols-3", 4: "sm:grid-cols-4" } as const;
+/** The headline numbers of a page: one ruled box, cells split by hairlines. */
+const READOUT_COLS = { 2: "sm:grid-cols-2", 3: "sm:grid-cols-3", 4: "sm:grid-cols-2 lg:grid-cols-4" } as const;
 
 export function Readouts({ children, className = "", cols = 4 }: { children: ReactNode; className?: string; cols?: 2 | 3 | 4 }) {
   return (
-    <dl className={`grid grid-cols-2 gap-px overflow-hidden border-y border-rule bg-rule ${READOUT_COLS[cols]} ${className}`}>
+    <dl
+      className={`grid grid-cols-2 gap-px overflow-hidden rounded-[6px] border border-rule bg-rule max-sm:[&>*:last-child:nth-child(odd)]:col-span-2 ${READOUT_COLS[cols]} ${className}`}
+    >
       {children}
     </dl>
   );
@@ -194,11 +193,34 @@ export function Readouts({ children, className = "", cols = 4 }: { children: Rea
 
 export function Stat({ label, value, hint, meter }: { label: string; value: ReactNode; hint?: ReactNode; meter?: ReactNode }) {
   return (
-    <div className="min-w-0 bg-paper px-4 py-3 [&:nth-child(2n+1)]:pl-0 sm:[&:nth-child(2n+1)]:pl-4 sm:[&:nth-child(4n+1)]:pl-0">
-      <dt className="text-[12px] text-muted">{label}</dt>
-      <dd className="mt-1 break-words font-mono text-[18px] leading-tight sm:text-[21px] tracking-[-0.02em] text-ink tabular-nums">{value}</dd>
+    <div className="min-w-0 bg-surface px-3.5 py-3 sm:px-4">
+      <dt className="text-[12.5px] text-muted">{label}</dt>
+      <dd className="mt-1 break-words text-[20px] font-medium leading-tight tracking-[-0.02em] text-ink tabular-nums sm:text-[24px]">{value}</dd>
       {meter ? <div className="mt-2">{meter}</div> : null}
       {hint ? <div className="mt-1 text-[12px] leading-snug text-faint">{hint}</div> : null}
+    </div>
+  );
+}
+
+/** A small titled list of secondary numbers: label left, value right, a hint under both. */
+export function MetricGroup({ title, aside, children }: { title: string; aside?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="min-w-0">
+      <div className="flex items-baseline justify-between gap-3 border-b border-rule-strong pb-1.5">
+        <h3 className="text-[12.5px] font-semibold text-ink-2">{title}</h3>
+        {aside}
+      </div>
+      <dl>{children}</dl>
+    </section>
+  );
+}
+
+export function Metric({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 border-b border-rule py-[7px]">
+      <dt className="text-[13px] text-muted">{label}</dt>
+      <dd className="text-right font-mono text-[13px] text-ink tabular-nums">{value}</dd>
+      {hint ? <div className="col-span-2 text-[11.5px] leading-snug text-faint">{hint}</div> : null}
     </div>
   );
 }
@@ -222,9 +244,9 @@ export function Meter({
       role={label ? "img" : undefined}
       aria-label={label}
       aria-hidden={label ? undefined : true}
-      className={`relative h-[3px] bg-sunken ${className}`}
+      className={`relative h-[3px] overflow-hidden rounded-full bg-sunken ${className}`}
     >
-      {v !== null ? <div className={`absolute inset-y-0 left-0 ${fill}`} style={{ width: `${v * 100}%` }} /> : null}
+      {v !== null ? <div className={`absolute inset-y-0 left-0 transition-[width] duration-500 ${fill}`} style={{ width: `${v * 100}%` }} /> : null}
     </div>
   );
 }
@@ -270,9 +292,13 @@ export function Timestamp({ value }: { value: string }) {
 
 export function Loading({ label = "Loading" }: { label?: string }) {
   return (
-    <div role="status" className="flex items-center gap-2 py-8 font-mono text-[12px] text-faint">
-      <span className="inline-block h-3 w-[2px] animate-pulse bg-faint motion-reduce:animate-none" />
-      {label}…
+    <div role="status" className="py-4">
+      <div className="mb-3 text-[12.5px] text-faint">{label}…</div>
+      <div aria-hidden="true" className="space-y-2.5 motion-safe:animate-pulse">
+        <div className="h-2.5 w-2/3 rounded-sm bg-sunken" />
+        <div className="h-2.5 w-1/2 rounded-sm bg-sunken" />
+        <div className="h-2.5 w-3/5 rounded-sm bg-sunken" />
+      </div>
     </div>
   );
 }
@@ -283,10 +309,10 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
   // 403 is an authorization problem of the key, not a failed load: say so.
   const heading = error instanceof ApiError && error.status === 403 ? "Not permitted" : "Could not load data";
   return (
-    <div role="alert" className="border-l-2 border-bad py-1 pl-3 text-[13px]">
+    <div role="alert" className="rounded-[6px] border border-rule border-l-bad bg-surface py-3 pl-3.5 pr-4 text-[13px] [border-left-width:3px]">
       <div className="font-medium text-ink">
         {heading}
-        <span className="font-mono text-[12px] font-normal text-muted">{status}</span>
+        <span className="font-mono text-[12px] font-normal text-faint">{status}</span>
       </div>
       <div className="mt-0.5 break-words text-muted">{message}</div>
       {onRetry ? (
@@ -300,9 +326,9 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
 
 /** An inline message for a refused or failed write: plain words, no stack of codes. */
 export function Notice({ tone = "bad", title, children }: { tone?: "bad" | "warn" | "info"; title?: ReactNode; children: ReactNode }) {
-  const border = { bad: "border-bad", warn: "border-warn", info: "border-rule-strong" }[tone];
+  const border = { bad: "border-l-bad", warn: "border-l-warn", info: "border-l-rule-strong" }[tone];
   return (
-    <div role={tone === "info" ? "note" : "alert"} className={`border-l-2 ${border} py-0.5 pl-3 text-[13px]`}>
+    <div role={tone === "info" ? "note" : "alert"} className={`rounded-[6px] border border-rule bg-surface py-2.5 pl-3.5 pr-4 text-[13px] [border-left-width:3px] ${border}`}>
       {title ? <div className="font-medium text-ink">{title}</div> : null}
       <div className="break-words text-muted">{children}</div>
     </div>
@@ -311,7 +337,7 @@ export function Notice({ tone = "bad", title, children }: { tone?: "bad" | "warn
 
 export function Empty({ title, children, action }: { title?: string; children: ReactNode; action?: ReactNode }) {
   return (
-    <div className="border-y border-dashed border-rule-strong/70 py-8 pl-1 text-[13px] text-muted">
+    <div className="rounded-[6px] border border-dashed border-rule-strong px-4 py-6 text-[13px] text-muted">
       {title ? <div className="mb-1 font-medium text-ink-2">{title}</div> : null}
       <div className="max-w-[60ch] leading-relaxed">{children}</div>
       {action ? <div className="mt-3">{action}</div> : null}
@@ -343,14 +369,14 @@ export function Gate({ query, children, loadingLabel }: { query: GateQuery; chil
 type ButtonVariant = "default" | "primary" | "danger" | "quiet";
 
 const BUTTON_VARIANT: Record<ButtonVariant, string> = {
-  default: "border-rule-strong bg-surface text-ink hover:enabled:border-ink-2",
+  default: "border-rule-strong bg-surface text-ink hover:enabled:border-faint hover:enabled:bg-paper",
   primary: "border-ink bg-ink text-on-ink hover:enabled:bg-ink-2 hover:enabled:border-ink-2",
   danger: "border-rule-strong bg-surface text-bad hover:enabled:border-bad",
   quiet: "border-transparent text-muted hover:enabled:text-ink",
 };
 
 export const buttonClass = (variant: ButtonVariant = "default", className = "") =>
-  `inline-flex h-[30px] items-center justify-center gap-1.5 whitespace-nowrap rounded-[3px] border px-3 text-[13px] font-medium no-underline transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${BUTTON_VARIANT[variant]} ${className}`;
+  `inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-[5px] border px-3 text-[13px] font-medium no-underline transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${BUTTON_VARIANT[variant]} ${className}`;
 
 export function Button({ variant = "default", className = "", ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
   return <button type="button" className={buttonClass(variant, className)} {...props} />;
@@ -368,7 +394,7 @@ export function ButtonLink({ href, variant = "default", children, className = ""
 /** A compact filter control: the label wraps the input, so getByLabelText works on it. */
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="flex flex-col gap-1 font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">
+    <label className="flex flex-col gap-1 text-[12px] text-muted">
       {label}
       {children}
     </label>
@@ -376,7 +402,7 @@ export function Field({ label, children }: { label: string; children: ReactNode 
 }
 
 const CONTROL =
-  "h-[30px] rounded-[3px] border border-rule-strong bg-surface px-2 text-[13px] normal-case tracking-normal text-ink hover:border-ink-2 aria-[invalid=true]:border-bad disabled:opacity-50";
+  "h-8 rounded-[5px] border border-rule-strong bg-surface px-2.5 text-[13px] normal-case tracking-normal text-ink hover:border-faint aria-[invalid=true]:border-bad disabled:opacity-50";
 
 export function Select({ className = "", ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
   return <select className={`${CONTROL} pr-7 font-sans ${className}`} {...props} />;
@@ -388,7 +414,7 @@ export function Input({ className = "", ...props }: InputHTMLAttributes<HTMLInpu
 
 export function LoadMore({ hasNext, loading, onClick, shown }: { hasNext: boolean; loading: boolean; onClick: () => void; shown: number }) {
   return (
-    <div className="mt-3 flex items-center gap-3 font-mono text-[11.5px] text-faint">
+    <div className="mt-3 flex items-center gap-3 text-[12px] text-faint">
       <span className="tabular-nums">{shown} shown</span>
       {hasNext ? (
         <Button onClick={onClick} disabled={loading}>
@@ -418,14 +444,14 @@ export function Table({ children, caption }: { children: ReactNode; caption: str
 export const Th = ({ children, className = "" }: { children?: ReactNode; className?: string }) => (
   <th
     scope="col"
-    className={`whitespace-nowrap border-b border-rule-strong py-1.5 pr-4 font-mono text-[10.5px] font-normal uppercase tracking-[0.1em] text-faint last:pr-0 ${className}`}
+    className={`whitespace-nowrap border-b border-rule-strong py-1.5 pr-4 text-[12px] font-medium text-muted last:pr-0 ${className}`}
   >
     {children}
   </th>
 );
 
 export const Td = ({ children, className = "" }: { children?: ReactNode; className?: string }) => (
-  <td className={`border-b border-rule py-2 pr-4 align-baseline last:pr-0 ${className}`}>{children}</td>
+  <td className={`border-b border-rule py-[7px] pr-4 align-baseline last:pr-0 ${className}`}>{children}</td>
 );
 
 /** Numeric cell: right-aligned, monospaced, tabular. */
@@ -437,7 +463,7 @@ export function KeyValue({ items, columns = 1 }: { items: [string, ReactNode][];
   return (
     <dl className={`grid gap-x-10 text-[13px] ${columns === 2 ? "md:grid-cols-2" : ""}`}>
       {items.map(([k, v]) => (
-        <div key={k} className="grid grid-cols-[minmax(7.5rem,10rem)_1fr] gap-x-4 border-b border-rule py-1.5">
+        <div key={k} className="grid grid-cols-[minmax(7rem,9.5rem)_minmax(0,1fr)] gap-x-4 border-b border-rule py-[7px]">
           <dt className="text-muted">{k}</dt>
           <dd className="min-w-0 break-words text-ink">{v}</dd>
         </div>

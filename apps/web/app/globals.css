@@ -1,89 +1,90 @@
 @import "tailwindcss";
 
 /*
- * Theme: graphite ink on cool paper (light), paper ink on graphite (dark).
+ * Theme: warm graphite on bone paper (light), bone on warm graphite (dark).
  * The OS preference decides unless the reader picked a theme in the sidebar,
- * which sets data-theme on <html>. Every colour the app uses is a token here;
- * status colours are deliberately muted because they only ever mark things.
+ * which sets data-theme on <html>. Every colour the app uses is a token here.
+ * Vermilion is the one accent: navigation, focus and "live". Status tones are
+ * muted on purpose because they only ever mark things.
  */
 :root {
   color-scheme: light;
-  --paper: #f3f4f5;
-  --surface: #fbfbfb;
-  --sunken: #e8eaec;
-  --rule: #d9dcdf;
-  --rule-strong: #b7bbc1;
-  --ink: #17191c;
-  --ink-2: #3d424a;
-  --muted: #646a73;
-  --faint: #8f959d;
-  --accent: #c4501a;
-  --accent-soft: #c4501a1f;
-  --on-ink: #f6f6f4;
+  --paper: #f6f5f1;
+  --surface: #fdfcfa;
+  --sunken: #edebe5;
+  --rule: #e2dfd8;
+  --rule-strong: #c8c4bb;
+  --ink: #1b1a17;
+  --ink-2: #3f3d38;
+  --muted: #69665e;
+  --faint: #938f86;
+  --accent: #c8461d;
+  --accent-soft: #c8461d17;
+  --on-ink: #f8f7f3;
 
-  --tone-good: #2e7a4f;
-  --tone-bad: #b0343f;
-  --tone-active: #2c67a6;
-  --tone-info: #5b7d99;
-  --tone-warn: #9a6a12;
-  --tone-neutral: #7b8189;
-  --tone-muted: #a3a8ae;
+  --tone-good: #2f7650;
+  --tone-bad: #b23a3a;
+  --tone-active: #2f62a3;
+  --tone-info: #5d7890;
+  --tone-warn: #96680f;
+  --tone-neutral: #7d796f;
+  --tone-muted: #aaa69c;
 
   /* Two categorical chart hues, checked for colour-blind separation on --paper. */
-  --chart-1: #2c67a6;
-  --chart-2: #c4501a;
+  --chart-1: #3d5f8f;
+  --chart-2: #c8461d;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --paper: #161718;
-    --surface: #1c1d1f;
-    --sunken: #111213;
-    --rule: #2b2d30;
-    --rule-strong: #3e4145;
-    --ink: #e6e6e3;
-    --ink-2: #bdbfbd;
-    --muted: #8f9296;
-    --faint: #66696e;
-    --accent: #ec7a40;
-    --accent-soft: #ec7a4024;
-    --on-ink: #161718;
-    --tone-good: #74b58f;
-    --tone-bad: #e2727c;
-    --tone-active: #7fa9d8;
-    --tone-info: #8aa2b6;
-    --tone-warn: #d1a24f;
-    --tone-neutral: #8f9296;
-    --tone-muted: #5d6065;
-    --chart-1: #5b8fd0;
-    --chart-2: #d9692f;
+    --paper: #151413;
+    --surface: #1b1a18;
+    --sunken: #100f0e;
+    --rule: #2a2826;
+    --rule-strong: #3d3a36;
+    --ink: #ebe8e1;
+    --ink-2: #c4c0b7;
+    --muted: #949087;
+    --faint: #6b6861;
+    --accent: #ee7448;
+    --accent-soft: #ee744821;
+    --on-ink: #151413;
+    --tone-good: #78b38e;
+    --tone-bad: #e27a74;
+    --tone-active: #85aee0;
+    --tone-info: #92a7b9;
+    --tone-warn: #d5a654;
+    --tone-neutral: #949087;
+    --tone-muted: #5f5c56;
+    --chart-1: #7d9fd0;
+    --chart-2: #e3683b;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --paper: #161718;
-  --surface: #1c1d1f;
-  --sunken: #111213;
-  --rule: #2b2d30;
-  --rule-strong: #3e4145;
-  --ink: #e6e6e3;
-  --ink-2: #bdbfbd;
-  --muted: #8f9296;
-  --faint: #66696e;
-  --accent: #ec7a40;
-  --accent-soft: #ec7a4024;
-  --on-ink: #161718;
-  --tone-good: #74b58f;
-  --tone-bad: #e2727c;
-  --tone-active: #7fa9d8;
-  --tone-info: #8aa2b6;
-  --tone-warn: #d1a24f;
-  --tone-neutral: #8f9296;
-  --tone-muted: #5d6065;
-  --chart-1: #5b8fd0;
-  --chart-2: #d9692f;
+  --paper: #151413;
+  --surface: #1b1a18;
+  --sunken: #100f0e;
+  --rule: #2a2826;
+  --rule-strong: #3d3a36;
+  --ink: #ebe8e1;
+  --ink-2: #c4c0b7;
+  --muted: #949087;
+  --faint: #6b6861;
+  --accent: #ee7448;
+  --accent-soft: #ee744821;
+  --on-ink: #151413;
+  --tone-good: #78b38e;
+  --tone-bad: #e27a74;
+  --tone-active: #85aee0;
+  --tone-info: #92a7b9;
+  --tone-warn: #d5a654;
+  --tone-neutral: #949087;
+  --tone-muted: #5f5c56;
+  --chart-1: #7d9fd0;
+  --chart-2: #e3683b;
 }
 
 @theme inline {
@@ -106,9 +107,8 @@
   --color-warn: var(--tone-warn);
   --color-neutral: var(--tone-neutral);
   --color-dim: var(--tone-muted);
-  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-plex-mono), ui-monospace, Menlo, Consolas, monospace;
-  --font-display: var(--font-plex-condensed), var(--font-plex-sans), ui-sans-serif, sans-serif;
+  --font-sans: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-data), ui-monospace, Menlo, Consolas, monospace;
 }
 
 @layer base {
@@ -169,16 +169,12 @@
   }
 }
 
-/* A faint horizontal tick pattern behind the page title, like graph paper on a chart recorder. */
-.ticks {
-  background-image: repeating-linear-gradient(
-    to right,
-    var(--rule) 0,
-    var(--rule) 1px,
-    transparent 1px,
-    transparent 8px
-  );
-  background-size: 100% 5px;
-  background-repeat: no-repeat;
-  background-position: bottom left;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
