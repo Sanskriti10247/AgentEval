@@ -35,6 +35,8 @@ class FailureReason(StrEnum):
     CONFIG_PROVIDER_DISABLED = "config_provider_disabled"
     CONFIG_MODEL_UNPRICED = "config_model_unpriced"
     CONFIG_INVALID = "config_invalid"
+    # The run's evaluation had already spent its max_cost_usd: the model was never called.
+    EVALUATION_BUDGET_EXHAUSTED = "evaluation_budget_exhausted"
     # Sandbox
     SANDBOX_IMAGE_NOT_FOUND = "sandbox_image_not_found"
     SANDBOX_CREATE_FAILED = "sandbox_create_failed"
@@ -104,6 +106,7 @@ POLICY: dict[FailureReason, ReasonPolicy] = {
     _R.CONFIG_PROVIDER_DISABLED: ReasonPolicy(_C.CONFIG, False, _INTERNAL),
     _R.CONFIG_MODEL_UNPRICED: ReasonPolicy(_C.CONFIG, False, _INTERNAL),
     _R.CONFIG_INVALID: ReasonPolicy(_C.CONFIG, False, _INTERNAL),
+    _R.EVALUATION_BUDGET_EXHAUSTED: ReasonPolicy(_C.CONFIG, False, _INTERNAL),
     _R.SANDBOX_IMAGE_NOT_FOUND: ReasonPolicy(_C.SANDBOX, False, _SANDBOX),
     _R.SANDBOX_CREATE_FAILED: ReasonPolicy(_C.SANDBOX, True, _SANDBOX),
     _R.SANDBOX_EXEC_FAILED: ReasonPolicy(_C.SANDBOX, True, _SANDBOX),

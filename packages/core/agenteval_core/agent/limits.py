@@ -64,3 +64,9 @@ class BudgetTracker:
     def max_tokens_for_next_call(self) -> int:
         remaining = self.limits.max_total_tokens - self.tokens_used
         return max(1, min(self.limits.max_tokens_per_call, remaining))
+
+
+def evaluation_budget_exhausted(spent_usd: Decimal, max_cost_usd: Decimal | None) -> bool:
+    """Whether an evaluation with this cap has no budget left for another run: what its
+    attempts have cost so far has reached the cap. No cap (None) never runs out."""
+    return max_cost_usd is not None and spent_usd >= max_cost_usd

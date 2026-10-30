@@ -23,9 +23,11 @@ cancel cancels the same token with the run's own reason ('user' or 'batch').
 """
 
 import asyncio
+import contextlib
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import fields, replace
 from typing import TYPE_CHECKING, Any
 
@@ -112,6 +114,7 @@ class Executor:
         artifact_insert_timeout_s: float = DEFAULT_ARTIFACT_INSERT_TIMEOUT_S,
         artifact_save_deadline_s: float = DEFAULT_ARTIFACT_SAVE_DEADLINE_S,
         evaluation_queue: RunQueue | None = None,
+        real_provider_concurrency: int = 1,
     ) -> None:
         self._sm = sessionmaker
         self._queue = queue
@@ -133,6 +136,9 @@ class Executor:
         self._active: dict[uuid.UUID, CancelToken] = {}
         # Fire-and-forget container kills, held so the loop doesn't drop them.
         self._kills: set[asyncio.Task[int]] = set()
+        # Agent runs of a real (non-fake) provider executing at once in this process
+        # (AGENTEVAL_REAL_PROVIDER_CONCURRENCY): bounds request rate and spend per worker.
+        self._real_provider_slots = asyncio.Semaphore(real_provider_concurrency)
 
     def cancel_all(self, reason: str) -> int:
         """Cancel every in-flight agent run. Returns how many were cancelled."""
@@ -409,9 +415,12 @@ class Executor:
             )
         self._active[attempt.run_id] = token
         try:
-            # Backstop only: the runtime enforces task.timeout_s itself.
-            async with asyncio.timeout(task.timeout_s + SANDBOX_GRACE_S):
-                return await self._agent_runner.run(task, attempt, version, token)
+            # The wait for a real-provider slot is outside the backstop: the run's own
+            # deadline only starts once the runner does. The lease keeps renewing.
+            async with self._provider_slot(version):
+                # Backstop only: the runtime enforces task.timeout_s itself.
+                async with asyncio.timeout(task.timeout_s + SANDBOX_GRACE_S):
+                    return await self._agent_runner.run(task, attempt, version, token)
         except TimeoutError:
             return _internal_error(
                 "agent run did not return within timeout + grace", FailureReason.WORKER_BACKSTOP
@@ -423,6 +432,11 @@ class Executor:
             )
         finally:
             self._active.pop(attempt.run_id, None)
+
+    def _provider_slot(self, version: AgentVersion) -> AbstractAsyncContextManager[Any]:
+        if version.model_provider == "fake":
+            return contextlib.nullcontext()
+        return self._real_provider_slots
 
     async def _persist(
         self,
