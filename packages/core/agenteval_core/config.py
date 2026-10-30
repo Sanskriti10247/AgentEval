@@ -157,6 +157,14 @@ class Settings(BaseSettings):
     agent_max_steps_cap: int = 100
     agent_max_total_tokens_cap: int = 2_000_000
     agent_max_cost_usd_cap: Decimal = Decimal("5.00")
+    # Spending cap for a whole evaluation of a real (non-fake) model, in USD, stored on the
+    # evaluation when its request names none. The worker checks it before each run starts
+    # its agent loop; a version's own limits.max_cost_usd still bounds every single run.
+    real_eval_max_cost_usd: Decimal = Field(default=Decimal("2.00"), gt=0, le=1000)
+    # Agent runs of a real provider that one worker process executes at the same time
+    # (an asyncio semaphore per process, so N worker processes allow N x this many).
+    # Fake-model runs are not limited by it, only by worker_concurrency.
+    real_provider_concurrency: int = Field(default=1, ge=1)
 
     @field_validator("anthropic_api_key", mode="before")
     @classmethod

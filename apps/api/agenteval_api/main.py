@@ -15,6 +15,7 @@ from agenteval_api.routes import (
     health,
     keys,
     metrics,
+    providers,
     runs,
     stats,
     tasks,
@@ -107,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(evaluations.router)
     v1.include_router(workers.router)
     v1.include_router(stats.router)
+    v1.include_router(providers.router)
     v1.include_router(keys.router)
     app.include_router(v1)
     return app
