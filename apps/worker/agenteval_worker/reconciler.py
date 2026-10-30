@@ -1,4 +1,4 @@
-"""The reconciler (F8; PROGRESS.md section 17): recovery of everything a
+"""The reconciler (F8): recovery of everything a
 crashed or stalled worker, or a lost message, left behind.
 
 It runs as an asyncio task in every worker, ticking every `reconcile_interval_s`.
@@ -13,7 +13,7 @@ strictly after the transaction commits, so a rolled-back step publishes and
 kills nothing. Each step is wrapped separately: an exception is logged and the
 loop carries on with the remaining steps and the next tick.
 
-Steps (the numbering follows PROGRESS.md sections 17 and 19):
+Steps:
   1a/1b  recover expired CLAIMED / RUNNING leases   (R4a R4b R5 / A3 R9 R10 R11)
   2      recover expired RUNNING evaluations         (E9a E9b), and A1: FINISHED agent
          attempts that never got an evaluation row are recorded (its own lock key)

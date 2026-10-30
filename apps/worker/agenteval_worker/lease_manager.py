@@ -11,12 +11,19 @@ and on the clock.
 If the keeper stops reporting `alive` (dead, or SIGKILLed), the manager
 restarts it and re-sends `hold` for every lease still held, with its current
 epoch; the deadlines already tracked here are untouched by the restart.
+
+`in_process=True` runs the same keeper on a thread of this process instead (same
+pipe protocol, its own event loop and connection). It saves a whole interpreter
+on a small host, at the cost of the process boundary: a keeper thread shares the
+GIL and dies with the worker, which is acceptable for the single-container demo
+(AGENTEVAL_LEASE_KEEPER=thread) and nowhere else by default.
 """
 
 from __future__ import annotations
 
 import asyncio
 import multiprocessing
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -27,7 +34,7 @@ from multiprocessing.process import BaseProcess
 from agenteval_core.logging import get_logger
 from agenteval_core.observability import metrics as prom
 from agenteval_core.reliability.fencing import LeaseDeadline, LeaseTiming
-from agenteval_core.reliability.keeper_process import run_keeper_process
+from agenteval_core.reliability.keeper_process import run_keeper_process, run_keeper_thread
 from agenteval_core.reliability.keeper_protocol import (
     Alive,
     Beat,
@@ -63,18 +70,21 @@ class LeaseManager:
         worker_id: str,
         *,
         clock: Callable[[], float] = time.monotonic,
+        in_process: bool = False,
     ) -> None:
         self._database_url = database_url
+        self._in_process = in_process
         self._timing = timing
         self._worker_id = worker_id
         self._clock = clock
         self._held: dict[tuple[LeaseKind, str], _Held] = {}
         self._ctx: SpawnContext = multiprocessing.get_context("spawn")
-        self._process: BaseProcess | None = None
+        self._process: BaseProcess | threading.Thread | None = None
         self._conn: Connection | None = None
         self._last_alive: float | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._stopped = False
+        self._ready = asyncio.Event()
 
     async def start(self) -> None:
         self._spawn()
@@ -84,6 +94,11 @@ class LeaseManager:
             asyncio.create_task(self._self_check_loop()),
             asyncio.create_task(self._watchdog_loop()),
         ]
+
+    async def wait_ready(self, timeout_s: float = 30.0) -> None:
+        """Until the keeper has reported `alive` once: it is up and connected. A lease
+        held before that is renewed late by however long the keeper took to start."""
+        await asyncio.wait_for(self._ready.wait(), timeout_s)
 
     async def stop(self) -> None:
         self._stopped = True
@@ -132,6 +147,18 @@ class LeaseManager:
 
     def _spawn(self) -> None:
         parent_conn, child_conn = self._ctx.Pipe(duplex=True)
+        if self._in_process:
+            thread = threading.Thread(
+                target=run_keeper_thread,
+                args=(child_conn, self._database_url, self._timing, self._worker_id),
+                name="lease-keeper",
+                daemon=True,
+            )
+            thread.start()  # the thread owns child_conn and closes it when it ends
+            self._conn = parent_conn
+            self._process = thread
+            self._last_alive = self._clock()
+            return
         process = self._ctx.Process(
             target=run_keeper_process,
             args=(child_conn, self._database_url, self._timing, self._worker_id),
@@ -144,15 +171,23 @@ class LeaseManager:
         self._last_alive = self._clock()
 
     def _kill_process(self) -> None:
-        if self._process is not None and self._process.is_alive():
+        if isinstance(self._process, threading.Thread):
+            # A thread can't be killed: closing our end makes its next read see EOF,
+            # and it returns within a tick (keeper.py).
+            self._close_conn()
+            self._process.join(timeout=2.0)
+        elif self._process is not None and self._process.is_alive():
             self._process.terminate()
             self._process.join(timeout=2.0)
+        self._close_conn()
+        self._process = None
+
+    def _close_conn(self) -> None:
         if self._conn is not None:
             try:
                 self._conn.close()
             except OSError:
                 pass
-        self._process = None
         self._conn = None
 
     def _restart(self) -> None:
@@ -191,6 +226,7 @@ class LeaseManager:
     def _handle(self, msg: object) -> None:
         if isinstance(msg, Alive):
             self._last_alive = self._clock()
+            self._ready.set()
         elif isinstance(msg, Beat):
             self._handle_beat(msg)
 

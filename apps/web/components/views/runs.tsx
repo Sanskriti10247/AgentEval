@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Badge, Empty, Field, Gate, IdLink, LoadMore, Mono, PageHeader, RunStatusBadge, Select, Table, Td, Th } from "@/components/ui";
+import { ButtonLink, Empty, Field, Gate, IdLink, LoadMore, Mono, Num, PageHeader, RunStatusBadge, Select, Table, Td, Th, Timestamp } from "@/components/ui";
 import { flatten } from "@/components/pages-util";
 import { RUN_STATUSES, type RunStatus } from "@/lib/api/types";
-import { formatDuration, formatTimestamp, humanize } from "@/lib/format";
-import { useRuns } from "@/lib/hooks";
+import { formatDuration, formatTimestamp, humanize, shortId } from "@/lib/format";
+import { useCapabilities, useRuns, useTaskOptions } from "@/lib/hooks";
 
 export interface RunsInitialFilters {
   status?: RunStatus;
@@ -18,6 +18,7 @@ export interface RunsInitialFilters {
 export function RunsView({ initial = {} }: { initial?: RunsInitialFilters }) {
   const [status, setStatus] = useState<string>(initial.status ?? "");
   const [deadLetter, setDeadLetter] = useState(initial.dead_letter ?? false);
+  const caps = useCapabilities();
   const query = useRuns({
     status: (status || undefined) as RunStatus | undefined,
     dead_letter: deadLetter ? true : undefined,
@@ -25,18 +26,23 @@ export function RunsView({ initial = {} }: { initial?: RunsInitialFilters }) {
     task_id: initial.task_id,
   });
   const runs = flatten(query.data, "runs");
+  const tasks = useTaskOptions();
+  const taskNames = new Map((tasks.data?.tasks ?? []).map((t) => [t.id, t.name]));
+  const filtered = !!(initial.evaluation_id || initial.task_id);
 
   return (
     <>
       <PageHeader
+        eyebrow="Execution"
         title="Runs"
         subtitle={
-          initial.evaluation_id || initial.task_id ? (
+          filtered ? (
             <>
-              Filtered by {initial.evaluation_id ? "evaluation" : "task"}. <Link href="/runs">Clear</Link>
+              Showing runs for one {initial.evaluation_id && initial.task_id ? "task within an evaluation" : initial.evaluation_id ? "evaluation" : "task"}.{" "}
+              <Link href="/runs">Show all runs</Link>
             </>
           ) : (
-            "Newest first. The dead-letter view lists FAILED runs that exhausted their retries or hit a non-retryable error."
+            "Every run of a task by an agent, newest first, whether it came from an evaluation or was started on its own. Dead-letter runs are the FAILED ones that used up their retries or hit an error not worth retrying."
           )
         }
         actions={
@@ -51,16 +57,24 @@ export function RunsView({ initial = {} }: { initial?: RunsInitialFilters }) {
                 ))}
               </Select>
             </Field>
-            <label className="flex items-center gap-2 self-end pb-1 text-sm">
+            <label className="flex h-[30px] items-center gap-2 text-[13px] text-ink-2">
               <input type="checkbox" checked={deadLetter} onChange={(e) => setDeadLetter(e.target.checked)} />
               Dead-letter only
             </label>
+            {caps.canLaunch ? (
+              <ButtonLink href="/runs/new" variant="primary">
+                Start a run
+              </ButtonLink>
+            ) : null}
           </>
         }
       />
       <Gate query={query}>
         {runs.length === 0 ? (
-          <Empty>No runs match these filters.</Empty>
+          <Empty>
+            No runs match these filters.{" "}
+            {status || deadLetter ? "Try All statuses, or untick Dead-letter only." : caps.canLaunch ? "Start one, or launch an evaluation to queue a batch." : ""}
+          </Empty>
         ) : (
           <>
             <Table caption="Runs">
@@ -68,45 +82,58 @@ export function RunsView({ initial = {} }: { initial?: RunsInitialFilters }) {
                 <tr>
                   <Th>Run</Th>
                   <Th>Status</Th>
-                  <Th>Outcome</Th>
+                  <Th className="hidden md:table-cell">Outcome</Th>
                   <Th className="text-right">Attempts</Th>
-                  <Th>Dead letter</Th>
-                  <Th>Failure reason</Th>
                   <Th>Task</Th>
-                  <Th>Evaluation</Th>
-                  <Th className="text-right">Duration</Th>
-                  <Th>Created</Th>
+                  <Th className="hidden lg:table-cell">Evaluation</Th>
+                  <Th className="hidden text-right sm:table-cell">Duration</Th>
+                  <Th className="hidden xl:table-cell">Created</Th>
                 </tr>
               </thead>
               <tbody>
                 {runs.map((r) => (
-                  <tr key={r.id}>
+                  <tr key={r.id} className="hover:bg-sunken/50">
                     <Td>
                       <IdLink id={r.id} href={`/runs/${r.id}`} />
                     </Td>
                     <Td>
                       <RunStatusBadge status={r.status} />
+                      {r.dead_letter_reason || r.failure_reason ? (
+                        <div className="mt-0.5 text-[11.5px] leading-snug text-muted">
+                          {r.dead_letter_reason ? <span className="text-bad">{humanize(r.dead_letter_reason)}</span> : null}
+                          {r.dead_letter_reason && r.failure_reason ? <span className="text-faint"> · </span> : null}
+                          {r.failure_reason ? <span>{humanize(r.failure_reason)}</span> : null}
+                        </div>
+                      ) : null}
                     </Td>
-                    <Td className="font-mono text-xs">{r.outcome ?? "–"}</Td>
+                    <Td className="hidden font-mono text-[11.5px] text-muted md:table-cell">{r.outcome ?? "–"}</Td>
                     <Td className="text-right">
-                      <Mono>
+                      <Mono className="text-[12.5px]">
                         {r.attempt_count}/{r.max_attempts}
                       </Mono>
                     </Td>
-                    <Td>{r.dead_letter_reason ? <Badge tone="bad">{humanize(r.dead_letter_reason)}</Badge> : "–"}</Td>
-                    <Td className="text-xs">{humanize(r.failure_reason)}</Td>
                     <Td>
-                      <IdLink id={r.task_id} />
+                      {taskNames.get(r.task_id) ? (
+                        <span title={r.task_id}>{taskNames.get(r.task_id)}</span>
+                      ) : (
+                        <IdLink id={r.task_id} />
+                      )}
                     </Td>
-                    <Td>{r.evaluation_id ? <IdLink id={r.evaluation_id} href={`/evaluations/${r.evaluation_id}`} /> : "–"}</Td>
-                    <Td className="text-right">
-                      <Mono>
-                        {r.started_at && r.finished_at
-                          ? formatDuration(new Date(r.finished_at).getTime() - new Date(r.started_at).getTime())
-                          : "–"}
-                      </Mono>
+                    <Td className="hidden lg:table-cell">
+                      {r.evaluation_id ? (
+                        <IdLink id={r.evaluation_id} href={`/evaluations/${r.evaluation_id}`} label={shortId(r.evaluation_id)} />
+                      ) : (
+                        <span className="text-[12px] text-faint">on its own</span>
+                      )}
                     </Td>
-                    <Td className="whitespace-nowrap font-mono">{formatTimestamp(r.created_at)}</Td>
+                    <Num className="hidden sm:table-cell">
+                      {r.started_at && r.finished_at
+                        ? formatDuration(new Date(r.finished_at).getTime() - new Date(r.started_at).getTime())
+                        : "–"}
+                    </Num>
+                    <Td className="hidden xl:table-cell">
+                      <Timestamp value={formatTimestamp(r.created_at)} />
+                    </Td>
                   </tr>
                 ))}
               </tbody>

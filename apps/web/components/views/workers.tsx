@@ -1,6 +1,6 @@
 "use client";
 
-import { Badge, Empty, Gate, LoadMore, Mono, PageHeader, Table, Td, Th } from "@/components/ui";
+import { Empty, Gate, LoadMore, Mono, Num, PageHeader, StatusMark, Table, Td, Th, Timestamp } from "@/components/ui";
 import { flatten } from "@/components/pages-util";
 import { ageSeconds, formatAge, formatTimestamp } from "@/lib/format";
 import { useWorkers } from "@/lib/hooks";
@@ -15,12 +15,13 @@ export function WorkersView() {
   return (
     <>
       <PageHeader
+        eyebrow="Execution"
         title="Workers"
-        subtitle={`${live} live of ${workers.length} listed. A worker is live when it has not stopped and its heartbeat is recent.`}
+        subtitle={`${live} live of ${workers.length} listed. A worker counts as live while it has not stopped and its heartbeat is recent; a stale one has gone quiet without saying goodbye, and its runs get picked up by the others.`}
       />
       <Gate query={query}>
         {workers.length === 0 ? (
-          <Empty>No workers have registered yet.</Empty>
+          <Empty>No workers have registered yet. Runs stay QUEUED until one starts and claims them.</Empty>
         ) : (
           <>
             <Table caption="Workers">
@@ -28,30 +29,36 @@ export function WorkersView() {
                 <tr>
                   <Th>Worker</Th>
                   <Th>State</Th>
-                  <Th className="text-right">Heartbeat age</Th>
-                  <Th className="text-right">Concurrency</Th>
-                  <Th>Host</Th>
-                  <Th>Version</Th>
-                  <Th>Started</Th>
-                  <Th>Stopped</Th>
+                  <Th className="text-right">Heartbeat</Th>
+                  <Th className="hidden text-right sm:table-cell">Slots</Th>
+                  <Th className="hidden md:table-cell">Host</Th>
+                  <Th className="hidden md:table-cell">Version</Th>
+                  <Th className="hidden lg:table-cell">Started</Th>
+                  <Th className="hidden lg:table-cell">Stopped</Th>
                 </tr>
               </thead>
               <tbody>
                 {workers.map((w) => {
                   const state = w.stopped_at ? "stopped" : w.alive ? "live" : "stale";
                   return (
-                    <tr key={w.id}>
-                      <Td className="font-mono">{w.id}</Td>
+                    <tr key={w.id} className="hover:bg-sunken/50">
+                      <Td className="font-mono text-[12.5px]">{w.id}</Td>
                       <Td>
-                        <Badge tone={state === "live" ? "good" : state === "stale" ? "warn" : "muted"}>{state}</Badge>
-                        {w.stop_reason ? <span className="ml-2 text-xs text-muted">{w.stop_reason}</span> : null}
+                        <StatusMark tone={state === "live" ? "good" : state === "stale" ? "warn" : "muted"}>{state}</StatusMark>
+                        {w.stop_reason ? <span className="ml-2 text-[12px] text-faint">{w.stop_reason}</span> : null}
                       </Td>
-                      <Td className="text-right"><Mono>{formatAge(ageSeconds(w.last_heartbeat_at, now))}</Mono></Td>
-                      <Td className="text-right"><Mono>{w.concurrency}</Mono></Td>
-                      <Td className="font-mono">{w.hostname}</Td>
-                      <Td className="font-mono">{w.version}</Td>
-                      <Td className="whitespace-nowrap font-mono">{formatTimestamp(w.started_at)}</Td>
-                      <Td className="whitespace-nowrap font-mono">{formatTimestamp(w.stopped_at)}</Td>
+                      <Num className={state === "stale" ? "text-warn" : ""}>{formatAge(ageSeconds(w.last_heartbeat_at, now))}</Num>
+                      <Num className="hidden sm:table-cell">{w.concurrency}</Num>
+                      <Td className="hidden font-mono text-[12.5px] text-ink-2 md:table-cell">{w.hostname}</Td>
+                      <Td className="hidden md:table-cell">
+                        <Mono className="text-[12.5px] text-ink-2">{w.version}</Mono>
+                      </Td>
+                      <Td className="hidden lg:table-cell">
+                        <Timestamp value={formatTimestamp(w.started_at)} />
+                      </Td>
+                      <Td className="hidden lg:table-cell">
+                        <Timestamp value={formatTimestamp(w.stopped_at)} />
+                      </Td>
                     </tr>
                   );
                 })}

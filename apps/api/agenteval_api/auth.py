@@ -16,6 +16,15 @@ not use is throttled like any other. With `AGENTEVAL_AUTH_ENABLED=false` the cal
 anonymous with every scope and the budgets are keyed by client IP (the address the
 socket shows; behind a reverse proxy that is the proxy, so use the proxy's own limits
 or leave auth on).
+
+With `AGENTEVAL_READ_ONLY=true` (the read-only showcase) any route that needs more than
+the read scope answers 403 before anything else, an `Authorization` header is ignored, and
+every caller is an anonymous visitor holding only the read scope, rate limited by IP.
+
+With `AGENTEVAL_PUBLIC_DEMO=true` the caller is the same anonymous visitor, but the routes
+declared with `DEMO_WRITE` (launch an evaluation or a run, cancel, replay) are open to it
+as well; every other write, and every admin route, answers 403 first. What those routes
+may launch is capped in demo.py. READ_ONLY wins when both are set.
 """
 
 from dataclasses import dataclass
@@ -52,6 +61,13 @@ class Principal:
 
 
 ANONYMOUS = Principal("anonymous", None, ALL_SCOPES)
+VISITOR = Principal("visitor", None, frozenset({Scope.READ}))
+DEMO_VISITOR = Principal("demo-visitor", None, frozenset({Scope.READ, Scope.WRITE}))
+READ_ONLY_DETAIL = "This AgentEval deployment is a read-only demo; it accepts no changes"
+PUBLIC_DEMO_DETAIL = (
+    "This is a public demo: you can launch evaluations and runs of the existing agents and "
+    "tasks, cancel them and replay failed runs. Nothing else can be changed here"
+)
 
 
 def _unauthorized(reason: str, request: Request) -> ApiError:
@@ -65,8 +81,10 @@ def _unauthorized(reason: str, request: Request) -> ApiError:
 class ScopeGuard:
     """Callable FastAPI dependency; `.scope` is what the route-sweep test reads."""
 
-    def __init__(self, scope: Scope) -> None:
+    def __init__(self, scope: Scope, *, public_demo: bool = False) -> None:
         self.scope = scope
+        # Open to the anonymous visitor of a public demo (only ever with Scope.WRITE).
+        self.public_demo = public_demo
 
     async def __call__(
         self,
@@ -78,11 +96,21 @@ class ScopeGuard:
         settings = state.settings
         structlog.contextvars.unbind_contextvars("api_key_prefix", "api_key_name")
 
-        if settings.auth_enabled:
+        client_ip = f"ip:{request.client.host if request.client else 'unknown'}"
+        if settings.read_only:
+            if self.scope is not Scope.READ:
+                metrics.auth_failure("forbidden")
+                raise ApiError(403, "Forbidden", READ_ONLY_DETAIL)
+            principal, subject = VISITOR, client_ip
+        elif settings.public_demo:
+            if self.scope is not Scope.READ and not self.public_demo:
+                metrics.auth_failure("forbidden")
+                raise ApiError(403, "Forbidden", PUBLIC_DEMO_DETAIL)
+            principal, subject = DEMO_VISITOR, client_ip
+        elif settings.auth_enabled:
             principal, subject = await self._authenticate(request, credentials)
         else:
-            principal = ANONYMOUS
-            subject = f"ip:{request.client.host if request.client else 'unknown'}"
+            principal, subject = ANONYMOUS, client_ip
         request.state.principal = principal
 
         kind = "read" if request.method in _SAFE_METHODS else "write"
@@ -135,3 +163,5 @@ class ScopeGuard:
 READ = Depends(ScopeGuard(Scope.READ))
 WRITE = Depends(ScopeGuard(Scope.WRITE))
 ADMIN = Depends(ScopeGuard(Scope.ADMIN))
+# WRITE everywhere, and also open to a public demo's visitor.
+DEMO_WRITE = Depends(ScopeGuard(Scope.WRITE, public_demo=True))

@@ -1,4 +1,4 @@
-"""Phase 5 Step 5: the reconciler (PROGRESS.md section 17) against real
+"""The reconciler against real
 Postgres and Redis. Every transition, SKIP LOCKED, fencing after recovery,
 the advisory lock, side effects strictly after commit, redispatch, stream
 hygiene and the worker registry. No Docker: the container kill and the orphan

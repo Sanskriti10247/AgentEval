@@ -37,7 +37,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         configure_logging(settings.log_level, settings.log_json)
         tracing = configure_tracing("agenteval-api")
         app.state.settings = settings
-        app.state.engine = create_engine(settings.database_url)
+        app.state.engine = create_engine(
+            settings.database_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+        )
         app.state.sessionmaker = create_sessionmaker(app.state.engine)
         app.state.redis = Redis.from_url(settings.redis_url)
         app.state.queue = RunQueue(
@@ -47,9 +51,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             maxlen=settings.stream_maxlen,
         )
         app.state.ratelimiter = RateLimiter(app.state.redis)
-        if not settings.auth_enabled:
+        if settings.read_only:
+            log.warning("read_only", note="writes answer 403; reads need no API key")
+        elif settings.public_demo:
+            log.warning(
+                "public_demo",
+                note="no API key; only evaluations, runs, cancel and replay are writable",
+                max_repetitions=settings.demo_max_repetitions,
+                max_active_runs=settings.demo_max_active_runs,
+            )
+        elif not settings.auth_enabled:
             log.warning("auth_disabled", note="every caller is anonymous with all scopes")
-        log.info("api_started", auth_enabled=settings.auth_enabled)
+        log.info(
+            "api_started",
+            auth_enabled=settings.auth_enabled,
+            read_only=settings.read_only,
+            public_demo=settings.public_demo,
+        )
         try:
             yield
         finally:

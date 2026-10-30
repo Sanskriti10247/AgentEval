@@ -1,7 +1,8 @@
 """AgentRunner: one agent attempt, from agent version to finish_attempt fields.
 
     validate config (provider enabled, model priced, limits, tools)
-    open a SandboxSession (task files copied, keepalive recorded)
+    open the sandbox: a SandboxSession (task files copied, keepalive recorded),
+        or a LocalSandbox session when the worker runs without Docker
     start a model session (system prompt + tool specs + task instructions)
     run the AgentRuntime with a Postgres TrajectoryWriter
     Phase 4: if the attempt COMPLETED and its evaluation spec needs the
@@ -22,7 +23,7 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 import docker
 import docker.errors
@@ -45,8 +46,10 @@ from agenteval_core.reliability.taxonomy import FailureReason, WorkspaceCapture
 from agenteval_core.states import COMPLETED_OUTCOMES, FAILED_OUTCOMES, Outcome
 from agenteval_core.tools.base import ToolContext
 from agenteval_core.tools.registry import ToolSet
+from agenteval_core.tools.workspace import Workspace
 from agenteval_worker.evaluation_runner import needs_workspace, parse_spec
 from agenteval_worker.sandbox.evaluation import SnapshotError, WorkspaceSnapshot, export_workspace
+from agenteval_worker.sandbox.local import LocalSandbox
 from agenteval_worker.sandbox.session import ContainerSpec, SandboxError, SandboxSession
 from agenteval_worker.sandbox.workspace import DockerWorkspace
 from agenteval_worker.trajectory import TrajectoryWriter
@@ -90,6 +93,54 @@ class AgentAttemptResult:
     snapshot: WorkspaceSnapshot | None = field(default=None, repr=False, compare=False)
 
 
+class _AgentSandbox(Protocol):
+    """An agent attempt's sandbox, whichever backend opened it. Blocking methods:
+    callers use asyncio.to_thread."""
+
+    @property
+    def workspace(self) -> Workspace: ...
+
+    def image_id(self) -> str | None: ...
+
+    def export(
+        self, *, max_bytes: int, max_unpacked_bytes: int, timeout_s: float
+    ) -> WorkspaceSnapshot:
+        """Reap, then the C1 snapshot of the workspace (or a SnapshotError)."""
+        ...
+
+    def close(self) -> None: ...
+
+
+class _DockerAgentSandbox:
+    def __init__(self, session: SandboxSession) -> None:
+        self.session = session
+        self._workspace = DockerWorkspace(session)
+
+    @property
+    def workspace(self) -> Workspace:
+        return self._workspace
+
+    def image_id(self) -> str | None:
+        try:
+            return self.session.image_id
+        except docker.errors.DockerException:
+            return None  # reproducibility metadata only; never fails the attempt
+
+    def export(
+        self, *, max_bytes: int, max_unpacked_bytes: int, timeout_s: float
+    ) -> WorkspaceSnapshot:
+        self.session.reap()  # nothing the agent started may still be writing
+        return export_workspace(
+            self.session,
+            max_bytes=max_bytes,
+            max_unpacked_bytes=max_unpacked_bytes,
+            timeout_s=timeout_s,
+        )
+
+    def close(self) -> None:
+        self.session.close()
+
+
 class _SetupError(Exception):
     def __init__(self, message: str, *, reason: FailureReason) -> None:
         super().__init__(message)
@@ -109,7 +160,7 @@ class AgentRunner:
         self,
         *,
         sessionmaker: async_sessionmaker[AsyncSession],
-        docker_client: docker.DockerClient,
+        docker_client: docker.DockerClient | None,
         providers: Mapping[str, ModelProvider],
         max_output_bytes: int = 64 * 1024,
         workspace_tmpfs_mb: int = 64,
@@ -117,10 +168,14 @@ class AgentRunner:
         retry_policy: RetryPolicy | None = None,
         snapshot_max_bytes: int = MAX_SNAPSHOT_BYTES,
         image_allowlist: Iterable[str] | None = None,
+        local_sandbox: LocalSandbox | None = None,
     ) -> None:
+        if (docker_client is None) == (local_sandbox is None):
+            raise ValueError("pass exactly one of docker_client and local_sandbox")
         self._allowlist = None if image_allowlist is None else frozenset(image_allowlist)
         self._sm = sessionmaker
         self._docker = docker_client
+        self._local = local_sandbox
         self._providers = dict(providers)
         self._max_output = max_output_bytes
         self._workspace_mb = workspace_tmpfs_mb
@@ -139,29 +194,11 @@ class AgentRunner:
             return _failed(Outcome.INTERNAL_ERROR, str(exc), started, reason=exc.reason)
 
         try:
-            session = await asyncio.to_thread(
-                SandboxSession.open_for_tools,
-                self._docker,
-                ContainerSpec(
-                    image=task.image,
-                    lifetime_s=task.timeout_s,
-                    memory_mb=task.memory_mb,
-                    cpu_limit=task.cpu_limit,
-                    labels={
-                        "agenteval.run_id": str(attempt.run_id),
-                        "agenteval.attempt_id": str(attempt.id),
-                    },
-                    image_allowlist=self._allowlist,
-                ),
-                dict(task.files),
-                max_output_bytes=self._max_output,
-                workspace_tmpfs_mb=self._workspace_mb,
-                pids_limit=self._pids_limit,
-            )
+            session = await asyncio.to_thread(self._open, task, attempt)
         except SandboxError as exc:
             return _failed(Outcome.SANDBOX_ERROR, str(exc), started, reason=exc.reason)
 
-        image_id = await asyncio.to_thread(_image_id, session)
+        image_id = await asyncio.to_thread(session.image_id)
         try:
             assert task.instructions is not None  # ck_tasks_instructions
             model_session = setup.provider.start(
@@ -179,7 +216,7 @@ class AgentRunner:
                 limits=setup.limits,
                 deadline=deadline,
                 tools=ToolContext(
-                    workspace=DockerWorkspace(session),
+                    workspace=session.workspace,
                     deadline=deadline,
                     tool_timeout_s=setup.limits.tool_timeout_s,
                     shell_allowlist=frozenset(version.shell_allowlist),
@@ -235,8 +272,39 @@ class AgentRunner:
             return False
         return spec is not None and needs_workspace(spec)
 
+    def _open(self, task: Task, attempt: RunAttempt) -> _AgentSandbox:
+        """Open the attempt's sandbox with the task files in place. Raises SandboxError."""
+        labels = {"agenteval.run_id": str(attempt.run_id), "agenteval.attempt_id": str(attempt.id)}
+        if self._local is not None:
+            # The task's image is not used here (local.py); the attempt records "local".
+            return self._local.open_agent(
+                dict(task.files),
+                lifetime_s=task.timeout_s,
+                memory_mb=task.memory_mb,
+                attempt_id=labels["agenteval.attempt_id"],
+                image=task.image,
+            )
+        assert self._docker is not None
+        return _DockerAgentSandbox(
+            SandboxSession.open_for_tools(
+                self._docker,
+                ContainerSpec(
+                    image=task.image,
+                    lifetime_s=task.timeout_s,
+                    memory_mb=task.memory_mb,
+                    cpu_limit=task.cpu_limit,
+                    labels=labels,
+                    image_allowlist=self._allowlist,
+                ),
+                dict(task.files),
+                max_output_bytes=self._max_output,
+                workspace_tmpfs_mb=self._workspace_mb,
+                pids_limit=self._pids_limit,
+            )
+        )
+
     async def _capture(
-        self, session: SandboxSession
+        self, session: _AgentSandbox
     ) -> tuple[WorkspaceCapture | None, WorkspaceSnapshot | None]:
         """C1: a complete snapshot (capture None: still to be saved), or the
         reason there isn't one (A2: an evaluator failure, never the agent's):
@@ -250,10 +318,8 @@ class AgentRunner:
             return WorkspaceCapture(kind), None
         return None, snapshot
 
-    def _export(self, session: SandboxSession) -> WorkspaceSnapshot:
-        session.reap()  # nothing the agent started may still be writing
-        return export_workspace(
-            session,
+    def _export(self, session: _AgentSandbox) -> WorkspaceSnapshot:
+        return session.export(
             max_bytes=self._snapshot_max,
             max_unpacked_bytes=self._workspace_mb * 1024 * 1024,
             timeout_s=EXPORT_TIMEOUT_S,
@@ -293,13 +359,6 @@ def _config_snapshot(version: AgentVersion) -> dict[str, Any]:
         "model": version.model,
         "config_hash": version.config_hash,
     }
-
-
-def _image_id(session: SandboxSession) -> str | None:
-    try:
-        return session.image_id
-    except docker.errors.DockerException:
-        return None  # reproducibility metadata only; never fails the attempt
 
 
 def _from_agent_result(r: AgentResult, image_id: str | None) -> AgentAttemptResult:

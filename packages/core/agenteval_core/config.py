@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +17,10 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://agenteval:agenteval@localhost:55432/agenteval"
     redis_url: str = "redis://localhost:56379/0"
+    # SQLAlchemy connection pool per process. The defaults are SQLAlchemy's own; the
+    # single-container demo image shrinks them to fit its small Postgres.
+    db_pool_size: int = Field(default=5, ge=1)
+    db_max_overflow: int = Field(default=10, ge=0)
 
     # Queue
     dispatch_stream: str = "runs.dispatch"
@@ -37,7 +42,23 @@ class Settings(BaseSettings):
     # above the biggest legitimate body (a task: 1 MB of files + a 2 MiB evaluation spec).
     max_request_bytes: int = Field(default=5 * 1024 * 1024, ge=1024)
 
-    # Sandbox
+    # Read-only showcase (docs/deployment.md, "Free hosting"): every route that would
+    # change state answers 403, reads need no API key, and nothing waits for a worker.
+    read_only: bool = False
+    # Public demo (docs/deployment.md, "Free hosting"): no API key, every caller is an
+    # anonymous visitor limited per IP, and the only writes are launching evaluations and
+    # runs of what already exists, cancelling and replaying. Repetitions per evaluation and
+    # queued + running runs overall are capped. read_only wins if both are set.
+    public_demo: bool = False
+    demo_max_repetitions: int = Field(default=3, ge=1, le=10)
+    demo_max_active_runs: int = Field(default=20, ge=1)
+
+    # Sandbox. "docker" runs every task in its own container (ADR-003). "local" runs tasks
+    # as plain subprocesses of the worker, for hosts without a Docker daemon: NOT an
+    # isolation boundary, only for the public demo's seeded tasks (sandbox/local.py).
+    # local_sandbox_dir holds its per-run directories (default: $TMPDIR or /tmp).
+    sandbox_backend: Literal["docker", "local"] = "docker"
+    local_sandbox_dir: str | None = None
     image_allowlist: list[str] = Field(default_factory=lambda: ["agenteval-sandbox:py312"])
     max_output_bytes: int = 64 * 1024
     workspace_tmpfs_mb: int = 64
@@ -66,6 +87,10 @@ class Settings(BaseSettings):
     self_fence_margin_s: float = 10.0
     reconcile_interval_s: float = 5.0
     worker_liveness_timeout_s: float = 15.0
+    # Where the lease keeper runs. "process" (ADR-008 D) keeps renewing even while the
+    # worker's own event loop is blocked; "thread" saves the second interpreter (~40 MB)
+    # on a small single-worker host such as the demo container.
+    lease_keeper: Literal["process", "thread"] = "process"
     # Reconciler (Step 5): a QUEUED run, or a pending stream entry, idle this
     # long is republished / reclaimed; orphan containers are swept at this
     # interval; the stream is trimmed approximately to stream_maxlen entries.

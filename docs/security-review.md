@@ -208,6 +208,16 @@ change, with the test named. **Accepted** means left as is, with the rationale i
 - **A8, development defaults (F-P2).** Convenience for localhost.
 - **A9, one database role (F-P7).** Splitting roles needs grants for every table each side touches.
   Worth doing before multi-tenant use, not for this scope.
+- **A10, the local sandbox backend of the free-hosting demo.** Added after this review. With
+  `AGENTEVAL_SANDBOX_BACKEND=local` the worker runs task commands as its own subprocesses: same
+  user, same network, the container's Postgres and Redis one connection away. Every control in
+  this document that relies on the container is absent; a per-run directory, a scrubbed
+  environment, rlimits, process-group timeouts and a reaper remain, as hygiene. It is accepted
+  only in the single-container demo (`infrastructure/docker/api-demo.Dockerfile`), whose API runs
+  with `AGENTEVAL_PUBLIC_DEMO=true`: visitors cannot create agents, versions, tasks or datasets, so
+  every command that runs comes from a seeded agent's fixed script and a seeded task. The demo's
+  data is disposable and it holds no credentials worth taking. Turning on new agents or tasks in
+  such a deployment, or the local backend anywhere else, removes the reason this is acceptable.
 
 ## Residual risks
 

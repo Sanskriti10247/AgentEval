@@ -1,11 +1,13 @@
 import { getApiKey, rejectApiKey } from "../auth";
 import type {
   AgentPage,
+  ApiHealth,
   AgentRead,
   AgentVersionRead,
   AttemptEvaluationRead,
   Compare,
   DatasetPage,
+  EvaluationCreate,
   EvaluationFilters,
   EvaluationPage,
   EvaluationRead,
@@ -13,12 +15,14 @@ import type {
   PageParams,
   ResultPage,
   RunAttemptRead,
+  RunCreate,
   RunFilters,
   RunPage,
   RunRead,
   StatsOverview,
   TaskFilters,
   TaskPage,
+  TaskRead,
   TrajectoryPage,
   WorkerPage,
 } from "./types";
@@ -84,6 +88,7 @@ interface RequestOptions {
   params?: Params;
   body?: unknown;
   signal?: AbortSignal;
+  headers?: Record<string, string>;
 }
 
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -97,6 +102,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
         Accept: "application/json",
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...opts.headers,
       },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       signal: opts.signal,
@@ -137,6 +143,19 @@ const page = (p: PageParams | undefined) => ({ after: p?.after, limit: p?.limit 
 
 // ---- reads -------------------------------------------------------------------
 
+/** The API's liveness probe, which also says whether it is a read-only deployment. */
+export async function getHealth(signal?: AbortSignal): Promise<ApiHealth> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl()}/health`, { headers: { Accept: "application/json" }, signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError(`Cannot reach the API at ${apiBaseUrl()}. Is it running?`, 0);
+  }
+  if (!response.ok) throw new ApiError(`Request failed with status ${response.status}`, response.status);
+  return (await response.json()) as ApiHealth;
+}
+
 export const getOverview = (windowH = 24, signal?: AbortSignal) =>
   request<StatsOverview>("/stats/overview", { params: { window_h: windowH }, signal });
 
@@ -151,6 +170,8 @@ export const listTasks = (f: TaskFilters = {}, signal?: AbortSignal) =>
     params: { dataset_id: f.dataset_id, task_type: f.task_type, difficulty: f.difficulty, ...page(f) },
     signal,
   });
+
+export const getTask = (id: string, signal?: AbortSignal) => request<TaskRead>(`/tasks/${id}`, { signal });
 
 export const listDatasets = (p?: PageParams & { status?: "DRAFT" | "FROZEN" }, signal?: AbortSignal) =>
   request<DatasetPage>("/datasets", { params: { status: p?.status, ...page(p) }, signal });
@@ -218,3 +239,20 @@ export const replayRun = (id: string, additionalAttempts = 1) =>
   request<RunRead>(`/runs/${id}/replay`, { method: "POST", body: { additional_attempts: additionalAttempts } });
 export const cancelEvaluation = (id: string) =>
   request<EvaluationRead>(`/evaluations/${id}/cancel`, { method: "POST" });
+
+/**
+ * Launches carry an Idempotency-Key, generated once per form submission by the caller,
+ * so a double click or a retried request queues one batch, not two.
+ */
+export const createEvaluation = (body: EvaluationCreate, idempotencyKey?: string) =>
+  request<EvaluationRead>("/evaluations", {
+    method: "POST",
+    body,
+    headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+  });
+export const createRun = (body: RunCreate, idempotencyKey?: string) =>
+  request<RunRead>("/runs", {
+    method: "POST",
+    body,
+    headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+  });

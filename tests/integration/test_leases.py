@@ -51,6 +51,9 @@ FAST = LeaseTiming(
 async def lease_manager(settings: Settings) -> AsyncIterator[LeaseManager]:
     lm = LeaseManager(settings.database_url, FAST, f"w-{uuid.uuid4().hex[:8]}")
     await lm.start()
+    # FAST leaves 1.5 s from claim to self-stop: a keeper still starting on a loaded
+    # runner (a fresh interpreter, imports, a connection) would eat all of it.
+    await lm.wait_ready()
     yield lm
     await lm.stop()
 

@@ -375,4 +375,9 @@ async def test_health_ready_work_without_a_database_lookup(
 ) -> None:
     """Probes never touch api_keys (an empty table must not break them)."""
     async with make_client() as c:
-        assert (await c.get("/health")).json() == {"status": "ok"}
+        assert (await c.get("/health")).json() == {
+            "status": "ok",
+            "read_only": False,
+            "public_demo": False,
+            "demo_limits": None,
+        }

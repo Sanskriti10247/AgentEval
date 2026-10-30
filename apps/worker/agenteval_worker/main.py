@@ -32,6 +32,7 @@ from agenteval_worker.lease_manager import LeaseManager
 from agenteval_worker.providers import build_providers
 from agenteval_worker.reconciler import Reconciler
 from agenteval_worker.sandbox.docker_sandbox import DockerSandbox
+from agenteval_worker.sandbox.local import LocalSandbox
 
 log = get_logger(__name__)
 
@@ -54,16 +55,37 @@ async def main() -> None:
     settings.validate_artifact_timing()
     artifact_store = LocalArtifactStore(Path(settings.artifact_dir))
 
-    engine = create_engine(settings.database_url)
-    redis = redis_for_blocking_reads(settings.redis_url, settings.worker_block_ms)
-    docker_client = docker.from_env()
-    sandbox = DockerSandbox(
-        docker_client,
-        max_output_bytes=settings.max_output_bytes,
-        workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
-        pids_limit=settings.pids_limit,
-        image_allowlist=settings.image_allowlist,
+    engine = create_engine(
+        settings.database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
     )
+    redis = redis_for_blocking_reads(settings.redis_url, settings.worker_block_ms)
+    docker_client: docker.DockerClient | None = None
+    local_sandbox: LocalSandbox | None = None
+    sandbox: DockerSandbox | LocalSandbox
+    if settings.sandbox_backend == "local":
+        # No Docker daemon at all: tasks run as subprocesses of this worker (local.py).
+        local_sandbox = sandbox = LocalSandbox(
+            settings.local_sandbox_dir,
+            max_output_bytes=settings.max_output_bytes,
+            workspace_mb=settings.workspace_tmpfs_mb,
+            pids_limit=settings.pids_limit,
+        )
+        log.warning(
+            "local_sandbox_backend",
+            root=str(local_sandbox.root),
+            note="tasks run as this worker's user with no isolation; task images are ignored",
+        )
+    else:
+        docker_client = docker.from_env()
+        sandbox = DockerSandbox(
+            docker_client,
+            max_output_bytes=settings.max_output_bytes,
+            workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
+            pids_limit=settings.pids_limit,
+            image_allowlist=settings.image_allowlist,
+        )
     swept = await asyncio.to_thread(sandbox.sweep_orphans)
     queue = RunQueue(
         redis, settings.dispatch_stream, settings.consumer_group, maxlen=settings.stream_maxlen
@@ -86,6 +108,7 @@ async def main() -> None:
         workspace_tmpfs_mb=settings.workspace_tmpfs_mb,
         pids_limit=settings.pids_limit,
         image_allowlist=settings.image_allowlist,
+        local_sandbox=local_sandbox,
     )
     async with sessionmaker() as s:
         await WorkerRepository(s).register(
@@ -97,7 +120,9 @@ async def main() -> None:
         )
         await s.commit()
 
-    lease_manager = LeaseManager(settings.database_url, timing, worker_id)
+    lease_manager = LeaseManager(
+        settings.database_url, timing, worker_id, in_process=settings.lease_keeper == "thread"
+    )
     await lease_manager.start()
 
     evaluation_runner = EvaluationRunner(
@@ -113,6 +138,7 @@ async def main() -> None:
         lease_ttl_s=timing.ttl_s,
         kill_by_attempt_label=sandbox.kill_attempt,
         image_allowlist=settings.image_allowlist,
+        local_sandbox=local_sandbox,
     )
 
     executor = Executor(
@@ -174,6 +200,8 @@ async def main() -> None:
         "worker_started",
         worker_id=worker_id,
         concurrency=settings.worker_concurrency,
+        sandbox_backend=settings.sandbox_backend,
+        lease_keeper=settings.lease_keeper,
         orphans_swept=swept,
         providers=sorted(providers),
         lease_ttl_s=timing.ttl_s,

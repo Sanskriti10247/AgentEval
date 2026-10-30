@@ -74,7 +74,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import docker
 import docker.errors
@@ -95,7 +95,13 @@ from agenteval_core.evaluation.checks import (
 from agenteval_core.evaluation.classify import Verdict, classify, platform_category
 from agenteval_core.evaluation.integrity import assess, baseline
 from agenteval_core.evaluation.metrics import TrajectoryMetrics, compute
-from agenteval_core.evaluation.results import AttemptFacts, CheckResult, IntegrityResult
+from agenteval_core.evaluation.results import (
+    AttemptFacts,
+    CheckResult,
+    ExecPlan,
+    FileEvidence,
+    IntegrityResult,
+)
 from agenteval_core.evaluation.scoring import (
     DEFAULT_SCORING_CONFIG,
     ScoreResult,
@@ -126,8 +132,10 @@ from agenteval_core.reliability.taxonomy import (
 from agenteval_core.repositories.evaluations import ClaimedEvaluation, EvaluationRepository
 from agenteval_core.repositories.trajectory import TrajectoryRepository
 from agenteval_core.states import AttemptStatus, Outcome
+from agenteval_core.tools.workspace import ExecOutput
 from agenteval_core.tools.workspace import WorkspaceUnavailable as ToolWorkspaceUnavailable
 from agenteval_worker.sandbox.evaluation import EvaluationSession, WorkspaceSnapshot
+from agenteval_worker.sandbox.local import LocalSandbox
 from agenteval_worker.sandbox.session import ContainerSpec, SandboxError
 from agenteval_worker.sandbox.workspace import EvaluationWorkspace
 
@@ -175,6 +183,35 @@ def needs_workspace(spec: EvaluationSpec) -> bool:
     need the agent's workspace - and therefore a snapshot and a container.
     Final-answer-only specs are graded from the attempt row alone."""
     return bool(spec.protected_paths) or any(c.kind != "final_answer" for c in spec.checks)
+
+
+class _CheckWorkspace(Protocol):
+    """What grading drives: EvaluationWorkspace, or the local backend's counterpart."""
+
+    async def run_plan(self, plan: ExecPlan) -> ExecOutput: ...
+
+    async def collect_evidence(self, paths: list[str]) -> dict[str, FileEvidence]: ...
+
+
+class _EvaluationSandbox(Protocol):
+    @property
+    def workspace(self) -> _CheckWorkspace: ...
+
+    def close(self) -> None: ...
+
+
+class _DockerEvaluationSandbox:
+    def __init__(self, session: EvaluationSession) -> None:
+        self.session = session
+        self._workspace = EvaluationWorkspace(session)
+
+    @property
+    def workspace(self) -> _CheckWorkspace:
+        return self._workspace
+
+    def close(self) -> None:
+        # remove(force=True) also ends any exec still streaming in a thread.
+        self.session.close()
 
 
 @dataclass(frozen=True)
@@ -265,7 +302,7 @@ class EvaluationRunner:
         self,
         *,
         sessionmaker: async_sessionmaker[AsyncSession],
-        docker_client: docker.DockerClient,
+        docker_client: docker.DockerClient | None,
         artifact_store: ArtifactStore,
         max_output_bytes: int = 64 * 1024,
         workspace_tmpfs_mb: int = 64,
@@ -277,11 +314,15 @@ class EvaluationRunner:
         lease_ttl_s: float = 30.0,
         kill_by_attempt_label: Callable[[str], int] | None = None,
         image_allowlist: Iterable[str] | None = None,
+        local_sandbox: LocalSandbox | None = None,
     ) -> None:
+        if (docker_client is None) == (local_sandbox is None):
+            raise ValueError("pass exactly one of docker_client and local_sandbox")
         self._allowlist = None if image_allowlist is None else frozenset(image_allowlist)
         self._sm = sessionmaker
         self._artifacts = artifact_store
         self._docker = docker_client
+        self._local = local_sandbox
         self._max_output = max_output_bytes
         self._workspace_mb = workspace_tmpfs_mb
         self._pids_limit = pids_limit
@@ -585,31 +626,19 @@ class EvaluationRunner:
         budget = spec.timeout_s + self._setup_grace_s
         opening = asyncio.ensure_future(
             asyncio.to_thread(
-                EvaluationSession.open,
-                self._docker,
-                ContainerSpec(
-                    image=task.image,
-                    lifetime_s=int(budget) + 60,  # sweep_orphans backstop
-                    memory_mb=task.memory_mb,
-                    cpu_limit=task.cpu_limit,
-                    labels={
-                        "agenteval.run_id": str(loaded.run_id),
-                        "agenteval.attempt_id": str(loaded.attempt_id),
-                    },
-                    image_allowlist=self._allowlist,
-                ),
+                self._open,
+                task,
+                loaded,
                 snapshot,
                 {**spec.hidden_files, **evaluator_files(spec)},
-                max_output_bytes=self._max_output,
-                workspace_tmpfs_mb=self._workspace_mb,
-                pids_limit=self._pids_limit,
+                int(budget) + 60,  # sweep_orphans backstop
             )
         )
-        session: EvaluationSession | None = None
+        session: _EvaluationSandbox | None = None
         try:
             async with asyncio.timeout(budget):
                 session = await asyncio.shield(opening)
-                ws = EvaluationWorkspace(session)
+                ws = session.workspace
                 evidence = await ws.collect_evidence(file_paths_needed(spec))
                 integrity = assess(
                     baseline(task.files, spec.protected_paths),
@@ -643,9 +672,50 @@ class EvaluationRunner:
         finally:
             await asyncio.shield(self._close(opening, session))
 
+    def _open(
+        self,
+        task: Task,
+        loaded: _Loaded,
+        snapshot: WorkspaceSnapshot,
+        eval_files: dict[str, str],
+        lifetime_s: int,
+    ) -> _EvaluationSandbox:
+        """A fresh evaluation sandbox: snapshot restored, /eval installed and locked.
+        Removes what it created on failure. Raises SandboxError."""
+        if self._local is not None:
+            return self._local.open_evaluation(
+                snapshot,
+                eval_files,
+                lifetime_s=lifetime_s,
+                memory_mb=task.memory_mb,
+                attempt_id=str(loaded.attempt_id),
+            )
+        assert self._docker is not None
+        return _DockerEvaluationSandbox(
+            EvaluationSession.open(
+                self._docker,
+                ContainerSpec(
+                    image=task.image,
+                    lifetime_s=lifetime_s,
+                    memory_mb=task.memory_mb,
+                    cpu_limit=task.cpu_limit,
+                    labels={
+                        "agenteval.run_id": str(loaded.run_id),
+                        "agenteval.attempt_id": str(loaded.attempt_id),
+                    },
+                    image_allowlist=self._allowlist,
+                ),
+                snapshot,
+                eval_files,
+                max_output_bytes=self._max_output,
+                workspace_tmpfs_mb=self._workspace_mb,
+                pids_limit=self._pids_limit,
+            )
+        )
+
     @staticmethod
     async def _close(
-        opening: asyncio.Future[EvaluationSession], session: EvaluationSession | None
+        opening: asyncio.Future[_EvaluationSandbox], session: _EvaluationSandbox | None
     ) -> None:
         """Always remove the evaluation container: on success, error,
         timeout and cancellation. If open() is still running, wait for it
@@ -655,7 +725,6 @@ class EvaluationRunner:
                 session = await opening
             except Exception:
                 return  # open() removes its own container on failure
-        # remove(force=True) also ends any exec still streaming in a thread.
         await asyncio.to_thread(session.close)
 
     async def _capture_failure(self, loaded: _Loaded) -> EvaluationErrorReason | None:

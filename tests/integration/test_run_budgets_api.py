@@ -1,5 +1,5 @@
-"""Phase 5 Step 9: execution and grading budgets on the API (F6, F9, G1; PROGRESS.md
-section 21). A budget is pinned when the run (or batch) is created and is part of the
+"""Execution and grading budgets on the API (F6, F9, G1).
+A budget is pinned when the run (or batch) is created and is part of the
 Idempotency-Key comparison; a batch's budgets flow to its runs and their evaluations."""
 
 import uuid

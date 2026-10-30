@@ -113,8 +113,8 @@ describe("Agent detail", () => {
     });
     renderWithClient(<AgentDetailView id={F.IDS.agent} />);
     expect(await screen.findByRole("heading", { name: "coder-agent" })).toBeInTheDocument();
-    const versions = await screen.findByRole("table", { name: "Agent versions" });
-    expect(within(versions).getByText("anthropic")).toBeInTheDocument();
+    const versions = await screen.findByRole("list", { name: "Agent versions" });
+    expect(within(versions).getByText(/anthropic/)).toBeInTheDocument();
     expect(within(versions).getByText("python")).toBeInTheDocument();
     const evals = await screen.findByRole("table", { name: "Evaluations" });
     expect(await within(evals).findByText("75%")).toBeInTheDocument();
@@ -128,7 +128,7 @@ describe("Agent detail", () => {
       "/evaluations": { evaluations: [], next_after: null },
     });
     renderWithClient(<AgentDetailView id={F.IDS.agent} />);
-    expect(await screen.findByText("No evaluations for this agent yet.")).toBeInTheDocument();
+    expect(await screen.findByText(/No evaluations for this agent yet\./)).toBeInTheDocument();
   });
 
   it("shows an error state for an unknown agent", async () => {
@@ -157,7 +157,7 @@ describe("Tasks", () => {
   it("shows empty and error states", async () => {
     mockApi({ "/tasks": { tasks: [], next_after: null }, "/datasets": { datasets: [], next_after: null } });
     const first = renderWithClient(<TasksView />);
-    expect(await screen.findByText("No tasks match these filters.")).toBeInTheDocument();
+    expect(await screen.findByText(/No tasks match these filters\./)).toBeInTheDocument();
     first.unmount();
     apiDown();
     renderWithClient(<TasksView />);
@@ -316,9 +316,10 @@ describe("Runs list", () => {
   it("applies initial filters from the URL", async () => {
     const { calls } = mockApi({ "/runs": { runs: [], next_after: null } });
     renderWithClient(<RunsView initial={{ evaluation_id: F.IDS.eval1, dead_letter: true }} />);
-    expect(await screen.findByText("No runs match these filters.")).toBeInTheDocument();
-    expect(calls[0]!.url.searchParams.get("evaluation_id")).toBe(F.IDS.eval1);
-    expect(calls[0]!.url.searchParams.get("dead_letter")).toBe("true");
+    expect(await screen.findByText(/No runs match these filters\./)).toBeInTheDocument();
+    const runsCall = calls.find((c) => c.url.pathname.endsWith("/runs"))!;
+    expect(runsCall.url.searchParams.get("evaluation_id")).toBe(F.IDS.eval1);
+    expect(runsCall.url.searchParams.get("dead_letter")).toBe("true");
   });
 
   it("shows an error state", async () => {
@@ -344,7 +345,7 @@ describe("Run detail", () => {
     const timeline = await screen.findByRole("list", { name: "Attempt timeline" });
     expect(within(timeline).getAllByRole("listitem")).toHaveLength(2);
     expect(within(timeline).getByText("first try failed")).toBeInTheDocument();
-    const traj = await screen.findByRole("table", { name: "Trajectory events" });
+    const traj = await screen.findByRole("list", { name: "Trajectory events" });
     expect(within(traj).getByText("run_tests")).toBeInTheDocument();
     expect(within(traj).getByText("ToolTimeout")).toBeInTheDocument();
     expect(within(traj).getByText("842 ms")).toBeInTheDocument();
@@ -396,7 +397,7 @@ describe("Run detail", () => {
     });
     renderWithClient(<RunDetailView id={id} />);
     expect(await screen.findByRole("button", { name: "Replay" })).toBeDisabled();
-    expect(await screen.findByText("No attempts yet.")).toBeInTheDocument();
+    expect(await screen.findByText(/No attempts yet\./)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(calls.some((c) => c.url.pathname.endsWith("/cancel") && c.init?.method === "POST")).toBe(true));
   });
@@ -456,7 +457,7 @@ describe("Workers", () => {
   it("shows empty and error states", async () => {
     mockApi({ "/workers": { workers: [], next_after: null } });
     const first = renderWithClient(<WorkersView />);
-    expect(await screen.findByText("No workers have registered yet.")).toBeInTheDocument();
+    expect(await screen.findByText(/No workers have registered yet\./)).toBeInTheDocument();
     first.unmount();
     apiDown();
     renderWithClient(<WorkersView />);

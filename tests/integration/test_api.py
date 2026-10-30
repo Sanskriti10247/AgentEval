@@ -16,7 +16,12 @@ async def stream_run_ids(redis: Redis, settings: Settings) -> list[str]:
 
 
 async def test_health_and_ready(client: httpx.AsyncClient) -> None:
-    assert (await client.get("/health")).json() == {"status": "ok"}
+    assert (await client.get("/health")).json() == {
+        "status": "ok",
+        "read_only": False,
+        "public_demo": False,
+        "demo_limits": None,
+    }
     resp = await client.get("/ready")
     assert resp.status_code == 200
     assert resp.json() == {"ready": True, "checks": {"postgres": "ok", "redis": "ok"}}

@@ -8,8 +8,10 @@ from sqlalchemy.ext.asyncio import (
 )
 
 
-def create_engine(database_url: str) -> AsyncEngine:
-    return create_async_engine(database_url, pool_pre_ping=True)
+def create_engine(database_url: str, *, pool_size: int = 5, max_overflow: int = 10) -> AsyncEngine:
+    return create_async_engine(
+        database_url, pool_pre_ping=True, pool_size=pool_size, max_overflow=max_overflow
+    )
 
 
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

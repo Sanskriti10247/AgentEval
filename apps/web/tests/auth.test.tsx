@@ -88,10 +88,14 @@ describe("the client and the key", () => {
   });
 });
 
+// A deployment that wants a key: /health answers, with neither demo flag.
+const PRIVATE = { "/health": { status: "ok", read_only: false } };
+
 describe("AuthGate", () => {
   const page = <AuthGate><div>secret page</div></AuthGate>;
 
   it("asks for a key first, then shows the page and keeps the key in sessionStorage", async () => {
+    mockApi(PRIVATE);
     renderWithClient(page);
     expect(await screen.findByRole("form", { name: "API key" })).toBeInTheDocument();
     expect(screen.queryByText("secret page")).not.toBeInTheDocument();
@@ -122,6 +126,7 @@ describe("AuthGate", () => {
   });
 
   it("Sign out clears the key and shows the form again", async () => {
+    mockApi(PRIVATE);
     setApiKey(KEY);
     renderWithClient(
       <>
@@ -139,4 +144,14 @@ describe("AuthGate", () => {
     rejectApiKey();
     expect(getAuthState()).toEqual({ key: null, rejected: false });
   });
+});
+
+describe("AuthGate while the API is unreachable", () => {
+  it("says it is waking the API instead of asking for a key", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    renderWithClient(<AuthGate><div>secret page</div></AuthGate>);
+    expect(await screen.findByText(/takes about a minute to start/, {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Waking the API");
+    expect(screen.queryByRole("form", { name: "API key" })).not.toBeInTheDocument();
+  }, 10_000);
 });

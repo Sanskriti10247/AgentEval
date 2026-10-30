@@ -1,14 +1,26 @@
+from typing import Any
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+
+from agenteval_api import demo
 
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
-async def health() -> dict[str, str]:
-    """Liveness: the process is up."""
-    return {"status": "ok"}
+async def health(request: Request) -> dict[str, Any]:
+    """Liveness: the process is up. For the dashboard: `read_only` (no writes at all, no
+    API key needed to browse), `public_demo` (no API key; only launching evaluations and
+    runs, cancel and replay are accepted) and `demo_limits` (that mode's caps, else null)."""
+    settings = request.app.state.settings
+    return {
+        "status": "ok",
+        "read_only": settings.read_only,
+        "public_demo": demo.is_public_demo(settings),
+        "demo_limits": demo.limits(settings),
+    }
 
 
 @router.get("/ready")

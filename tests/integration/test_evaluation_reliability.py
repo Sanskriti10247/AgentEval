@@ -1,4 +1,4 @@
-"""Phase 5 Step 7 (PROGRESS.md section 19): evaluation reliability against real
+"""Evaluation reliability against real
 Postgres and Redis. Every evaluation transition (E1-E9b), the pinned grading
 budget and G9, fencing of a stale grader, lease loss, A1 recovery, dispatch and
 consumption on the evaluations stream, and a SIGKILLed grader recovered by
