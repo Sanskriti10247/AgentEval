@@ -30,9 +30,12 @@ async def submit_run(
 ) -> RunRead:
     """Queue a run of a task. 202 for a new run, 200 when the key is replayed.
 
-    Agent tasks need `agent_version_id`; command tasks must not have one. In a public
-    demo, 429 while the demo's cap on queued + running runs is reached.
+    Agent tasks need `agent_version_id`; command tasks must not have one. 422 when the
+    version's provider is not enabled here. In a public demo, 403 for a version that is
+    not fake-model and 429 while the demo's cap on queued + running runs is reached.
     """
+    if body.agent_version_id is not None:
+        await demo.check_agent_version(request, body.agent_version_id)
     await demo.check_capacity(request, 1)
     result = await runs.submit(
         body.task_id, idempotency_key, body.agent_version_id, body.max_attempts

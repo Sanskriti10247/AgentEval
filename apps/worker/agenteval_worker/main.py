@@ -156,6 +156,7 @@ async def main() -> None:
         artifact_insert_timeout_s=settings.artifact_insert_timeout_s,
         artifact_save_deadline_s=settings.artifact_save_deadline_s,
         evaluation_queue=evaluation_queue,
+        real_provider_concurrency=settings.real_provider_concurrency,
     )
     consumer = Consumer(
         queue,
@@ -204,6 +205,7 @@ async def main() -> None:
         lease_keeper=settings.lease_keeper,
         orphans_swept=swept,
         providers=sorted(providers),
+        real_provider_concurrency=settings.real_provider_concurrency,
         lease_ttl_s=timing.ttl_s,
     )
     try:

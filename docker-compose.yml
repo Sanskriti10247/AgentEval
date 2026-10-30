@@ -13,6 +13,9 @@ x-app-env: &app-env
   AGENTEVAL_LOG_LEVEL: ${AGENTEVAL_LOG_LEVEL:-INFO}
   # Real model calls are opt-in (the API validates, the worker calls).
   AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER: ${AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER:-false}
+  # Default USD cap per real-model evaluation (API), real-model runs per worker process (worker).
+  AGENTEVAL_REAL_EVAL_MAX_COST_USD: ${AGENTEVAL_REAL_EVAL_MAX_COST_USD:-2.00}
+  AGENTEVAL_REAL_PROVIDER_CONCURRENCY: ${AGENTEVAL_REAL_PROVIDER_CONCURRENCY:-1}
 
 services:
   postgres:

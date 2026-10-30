@@ -8,17 +8,21 @@ import type {
   Compare,
   DatasetPage,
   EvaluationCreate,
+  EvaluationEstimate,
+  EvaluationEstimateRequest,
   EvaluationFilters,
   EvaluationPage,
   EvaluationRead,
   EvaluationSummary,
   PageParams,
+  ProvidersRead,
   ResultPage,
   RunAttemptRead,
   RunCreate,
   RunFilters,
   RunPage,
   RunRead,
+  StatsActivity,
   StatsOverview,
   TaskFilters,
   TaskPage,
@@ -158,6 +162,15 @@ export async function getHealth(signal?: AbortSignal): Promise<ApiHealth> {
 
 export const getOverview = (windowH = 24, signal?: AbortSignal) =>
   request<StatsOverview>("/stats/overview", { params: { window_h: windowH }, signal });
+
+export const getActivity = (windowH = 24, signal?: AbortSignal) =>
+  request<StatsActivity>("/stats/activity", { params: { window_h: windowH }, signal });
+
+export const getProviders = (signal?: AbortSignal) => request<ProvidersRead>("/providers", { signal });
+
+/** A read despite the POST: the API computes upper bounds and stores nothing. */
+export const estimateEvaluation = (body: EvaluationEstimateRequest, signal?: AbortSignal) =>
+  request<EvaluationEstimate>("/evaluations/estimate", { method: "POST", body, signal });
 
 export const listAgents = (p?: PageParams, signal?: AbortSignal) =>
   request<AgentPage>("/agents", { params: page(p), signal });

@@ -3,6 +3,8 @@
 auth.py decides which routes the visitor reaches at all; this module bounds the work those
 routes queue, so one visitor can't fill a small single-worker host:
 
+- only fake-model agent versions run: an evaluation or run of any other version is a 403,
+  so a demo never calls (or pays for) a real model, whatever providers are enabled;
 - an evaluation asks for at most `demo_max_repetitions` repetitions (422);
 - queued + running runs across the whole deployment stay at or under
   `demo_max_active_runs`, counting the runs the request would add (429 + Retry-After).
@@ -19,11 +21,13 @@ from sqlalchemy import func, select
 
 from agenteval_api.errors import ApiError
 from agenteval_core.config import Settings
-from agenteval_core.models import Run, Task
+from agenteval_core.models import AgentVersion, Run, Task
+from agenteval_core.services.providers import is_simulated
 from agenteval_core.states import RunStatus
 
 ACTIVE = (RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.RUNNING, RunStatus.RETRYING)
 RETRY_AFTER_S = 30
+SIMULATED_ONLY_DETAIL = "The public demo only runs simulated (fake-model) agents"
 
 
 def limits(settings: Settings) -> dict[str, int] | None:
@@ -42,6 +46,20 @@ def limits(settings: Settings) -> dict[str, int] | None:
 
 def is_public_demo(settings: Settings) -> bool:
     return settings.public_demo and not settings.read_only
+
+
+async def check_agent_version(request: Request, agent_version_id: uuid.UUID) -> None:
+    """403 for a version whose provider is not the fake one. A version that does not
+    exist passes: the service answers 404 for it."""
+    settings: Settings = request.app.state.settings
+    if not is_public_demo(settings):
+        return
+    async with request.app.state.sessionmaker() as s:
+        provider = await s.scalar(
+            select(AgentVersion.model_provider).where(AgentVersion.id == agent_version_id)
+        )
+    if provider is not None and not is_simulated(provider):
+        raise ApiError(403, "Forbidden", SIMULATED_ONLY_DETAIL)
 
 
 async def check_evaluation(request: Request, dataset_id: uuid.UUID, repetitions: int) -> None:

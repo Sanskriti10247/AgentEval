@@ -69,7 +69,7 @@ Every failure is a reason from a closed enum (`reliability/taxonomy.py`). Retrya
 |---|---|---|
 | model, transient | `model_rate_limited`, `model_overloaded`, `model_server_error`, `model_timeout`, `model_connection`, `model_conflict` | yes |
 | model, permanent | `model_bad_request`, `model_authentication`, `model_permission`, `model_not_found`, `model_request_too_large`, `model_protocol` | no |
-| configuration | `config_provider_disabled`, `config_model_unpriced`, `config_invalid` | no |
+| configuration | `config_provider_disabled`, `config_model_unpriced`, `config_invalid`, `evaluation_budget_exhausted` (migration 0011: the run's evaluation had spent its `max_cost_usd`) | no |
 | sandbox | `sandbox_create_failed`, `sandbox_exec_failed`, `sandbox_reaper_failed`, `sandbox_lost` | yes |
 | sandbox | `sandbox_image_not_found` | no |
 | worker, internal | `worker_capability`, `worker_backstop`, `internal_unexpected`, `persistence_trajectory`, `worker_shutdown` | yes |

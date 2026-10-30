@@ -53,6 +53,7 @@ Examples are trimmed from real responses of the README walkthrough (FakeProvider
 ```
 
 - **`scoring_config` is optional** and defaults to scoring v1. The weights must be ≥ 0 and sum to exactly 1.
+- **`max_cost_usd`** (optional, > 0 and at most 1000, at most 6 decimal places) caps what all of the batch's attempts may cost together. When it is omitted, a real-model version (any provider but `fake`) gets `AGENTEVAL_REAL_EVAL_MAX_COST_USD` (default 2.00), and a fake-model version gets no cap (null). Before a run of a capped batch starts its agent loop, the worker sums `cost_usd` over every attempt of the batch's runs; once the sum reaches the cap, the run is not started: its attempt finishes `INTERNAL_ERROR` with failure reason `evaluation_budget_exhausted`, which is not retried (the run is FAILED, dead-letter reason `non_retryable`) and is a platform failure (`platform_internal`), so it never counts against the pass rate. Runs already past that check keep going, each bounded by its version's own `limits.max_cost_usd` per attempt, so the batch total can exceed the cap by what those in-flight runs spend.
 - **`run_max_attempts` and `eval_max_attempts`** (both optional, 1–10) pin the batch's budgets (F6, F9). The first is copied onto every run of the batch as its `max_attempts` (attempts before it is dead-lettered); the second is the grading budget of every evaluation of the batch. Omitted, they default to `AGENTEVAL_RUN_MAX_ATTEMPTS` and `AGENTEVAL_EVAL_MAX_ATTEMPTS` (both 3). Both are returned by `GET /evaluations/{id}`.
 - **Header `Idempotency-Key`** (optional, 1–255 characters).
 - **One transaction** creates the batch row and one QUEUED run per (task, repetition). Each run's `idempotency_key` is `eval:{evaluation}:{task}:{repetition}`. The runs are then dispatched.
@@ -60,10 +61,11 @@ Examples are trimmed from real responses of the README walkthrough (FakeProvider
 | Status | When |
 |---|---|
 | **202** | a new batch |
-| **200** | a replay of the same key with the same request (name, dataset, agent version, repetitions, scoring hash, `run_max_attempts`, `eval_max_attempts`; an omitted budget compares as its default). Runs that are still QUEUED are re-dispatched |
+| **200** | a replay of the same key with the same request (name, dataset, agent version, repetitions, scoring hash, `run_max_attempts`, `eval_max_attempts`, `max_cost_usd`; an omitted budget compares as its default). Runs that are still QUEUED are re-dispatched |
 | **409** | the dataset isn't FROZEN; or the key was already used for a different request |
 | **404** | unknown dataset or agent version |
-| **422** | an invalid scoring config, repetitions (1–10) or budget (1–10); or more than 1000 runs (tasks × repetitions) |
+| **422** | an invalid scoring config, repetitions (1–10), budget (1–10) or `max_cost_usd`; more than 1000 runs (tasks × repetitions); or the version's provider is not enabled on this server (`"Provider 'anthropic' is not enabled on this server"`) |
+| **403** | public demo only: the version is not a fake-model one (`"The public demo only runs simulated (fake-model) agents"`). The same applies to `POST /runs` with an `agent_version_id` |
 | **503** + `Retry-After: 1` | the batch is stored but dispatch failed. Retry with the **same key** and the runs are re-dispatched |
 
 **Concurrency and duplicates:**
@@ -72,16 +74,44 @@ Examples are trimmed from real responses of the README walkthrough (FakeProvider
 - A duplicate stream message is harmless: the claim is conditional, and each attempt has at most one evaluation.
 - **A batch created without a key whose dispatch fails can't be re-dispatched** (a known limitation, the same as `POST /runs`).
 
+### `POST /evaluations/estimate`
+
+What an evaluation would use at most, before launching it. It needs only the `read` scope and writes nothing, so a read-only key and an anonymous visitor of the public demo can call it.
+
+```json
+{"agent_version_id": "…", "dataset_id": "…", "repetitions": 2, "run_max_attempts": 1}
+```
+
+`run_max_attempts` is optional (default `AGENTEVAL_RUN_MAX_ATTEMPTS`, as for `POST /evaluations`).
+
+```json
+{"tasks": 5, "repetitions": 2, "runs": 10, "provider": "fake", "model": "fake-model",
+ "simulated": true, "available": true, "max_steps_per_run": 30, "run_max_attempts": 1,
+ "max_model_requests": 300, "pricing_known": true, "pricing_version": "2026-09-28",
+ "max_cost_usd_per_run": "1.00", "max_cost_usd": "10.00", "default_budget_usd": null,
+ "sequential": false}
+```
+
+- **These are upper bounds, not predictions.** `max_model_requests` = runs × the version's `limits.max_steps` × `run_max_attempts`: every attempt of every run uses every step. `max_cost_usd` = runs × the version's `limits.max_cost_usd` (`max_cost_usd_per_run`, a per-attempt cap) × `run_max_attempts`; null when the model has no price (`pricing_known` false). Model retries inside a step and the at-most-one-call overshoot of a cost cap are not included. A real-model evaluation is also bounded by its own `max_cost_usd`, whichever is lower.
+- **`available`** says whether this server would run the version: its provider is enabled, and in a public demo it is `fake`. An unavailable provider is not an error here.
+- **`default_budget_usd`** is the cap a real-model evaluation gets when the request names none (`AGENTEVAL_REAL_EVAL_MAX_COST_USD`); null for a fake-model version.
+- **`sequential`** is true for a real-model version: each worker process runs at most `AGENTEVAL_REAL_PROVIDER_CONCURRENCY` (default 1) real-model runs at a time.
+- **Errors** are those of `POST /evaluations`: **404** unknown version or dataset, **409** dataset not FROZEN, **422** a bad body or more than 1000 runs.
+
 ### `GET /evaluations/{id}`
 
-The batch, plus **derived** progress (never stored):
+The batch, its spending cap and what it evaluated, plus **derived** progress (never stored):
 
 ```json
 {"id": "…", "name": "calc-demo", "dataset_id": "…", "agent_version_id": "…", "repetitions": 2,
  "scoring_config": {"version": "v1", "weights": {"task_success": "0.60", "test_score": "0.20",
                                                 "reliability": "0.10", "efficiency": "0.10"}},
  "scoring_config_hash": "6a5118ea…", "created_at": "…", "cancel_requested_at": null,
- "run_max_attempts": 3, "eval_max_attempts": 3,
+ "run_max_attempts": 3, "eval_max_attempts": 3, "max_cost_usd": null,
+ "context": {"agent_id": "…", "agent_name": "coder", "agent_version": 2, "agent_config_hash": "…",
+             "provider": "fake", "model": "fake-model", "simulated": true,
+             "dataset_name": "calc-bench", "dataset_version": "1", "task_count": 2,
+             "evaluator_version": "phase4.1", "pricing_version": "2026-09-28"},
  "progress": {"runs_total": 4,
               "runs_by_status": {"QUEUED": 0, "CLAIMED": 0, "RUNNING": 0, "RETRYING": 0,
                                  "COMPLETED": 4, "FAILED": 0, "CANCELLED": 0},
@@ -90,6 +120,8 @@ The batch, plus **derived** progress (never stored):
 ```
 
 - **`scoring_config` and its hash are exposed** as benchmark policy (R3).
+- **`max_cost_usd`** is the batch's spending cap (string, 6 decimal places) or null for none.
+- **`context`** is resolved from the batch's agent version and dataset: the agent's id and name, the version number and config hash, provider and model, `simulated` (provider `fake`), the dataset's name, version and task count, and the evaluator and pricing versions this server grades and prices with. It is null only if those rows are missing.
 - **`runs_by_status`** has a key for every run status, including `RETRYING` and `CANCELLED` (it had only the five Phase 4 keys before Step 9).
 - **`complete`** means every run is terminal (COMPLETED, FAILED or CANCELLED) and none awaits evaluation. A RETRYING or replayed (QUEUED) run is not terminal, so the batch stays open.
 - **Each run is read by its latest attempt and its current status (F13).** `evaluations_by_status` counts the evaluation of a COMPLETED or FAILED run's latest attempt only; the earlier, failed attempt of a run that is being retried or replayed, and the attempt of a cancelled run, are history, not results.
@@ -128,10 +160,14 @@ One row per run, ordered by (task, repetition). It's keyset-paged: `limit` 1–5
  "platform_failures": 0, "platform_failure_rate": 0.0, "evaluation_errors": 0, "ungraded": 0, "in_progress": 0,
  "mean_score": {"overall": "0.98497", "task_success": "1.00000", "test_score": "1.00000",
                 "reliability": "1.00000", "efficiency": "0.84970"},
- "latency_ms": {"p50": …, "p95": …}, "cost_usd": {"total": "0.002400", "mean_per_attempt": "0.000600"},
+ "latency_ms": {"p50": 120, "p95": 900, "p99": 950, "mean": 300.5, "count": 4},
+ "cost_usd": {"total": "0.002400", "mean_per_attempt": "0.000600"},
  "tokens": {"tokens_in": 1200, "tokens_out": 240}, "failure_categories": {"passed": 4},
  "per_task": [{"task_id": "…", "task_name": "hidden-tests", "difficulty": null, "attempts": 2, "graded": 2,
-               "passed": 2, "success_rate": 1.0, "mean_overall": "0.98497"}, …]}
+               "passed": 2, "success_rate": 1.0, "mean_overall": "0.98497"}, …],
+ "rates": {"scheduled": 4, "finished": 4, "completed": 4, "failed": 0, "timed_out": 0, "retried": 0,
+           "completion_rate": 1.0, "failure_rate": 0.0, "timeout_rate": 0.0, "retry_rate": 0.0},
+ "simulated": true}
 ```
 
 **How the counts are defined (D7):**
@@ -140,7 +176,9 @@ One row per run, ordered by (task, repetition). It's keyset-paged: `limit` 1–5
 - **`in_progress`** runs aren't counted yet: runs not terminal (including RETRYING and replayed ones, whatever their earlier attempts say) and terminal runs whose latest attempt is not evaluated yet. A CANCELLED run is neither counted nor in progress: it has no result, so a cancelled batch's summary is `complete`.
 - **A retried run counts once, by its latest attempt** (`success_rate`, categories, latency, cost and tokens never include its earlier failed attempts).
 - **`mean_score`** averages graded attempts under the batch's config.
-- **`latency_ms`** is the nearest-rank p50/p95 of attempt `duration_ms`.
+- **`latency_ms`** is over the `duration_ms` of finished runs' latest attempts: nearest-rank `p50`, `p95` and `p99` (the value at rank ceil(p × count), 1-based), the arithmetic `mean` and the sample size `count`; null when there is no such attempt.
+- **`rates`** are run-level: `scheduled` is runs not CANCELLED, `finished` is COMPLETED plus FAILED runs, and `completion_rate`, `failure_rate`, `timeout_rate` (outcome TIMEOUT) and `retry_rate` (latest attempt number above 1) are fractions of `finished`, null while nothing has finished. Conventions are in [read.md](read.md#metric-conventions).
+- **`simulated`** is true when the batch's version uses the fake provider: `cost_usd` is then computed from the fake price row and is not money spent.
 - **`failure_categories`** uses only the closed `FailureCategory` vocabulary.
 
 Exact definitions are in the [architecture doc](../architecture/evaluation.md#5-success-rate-semantics-d7).
@@ -151,11 +189,20 @@ Takes 2–5 distinct batch ids. **They must share a dataset and a scoring-config
 
 ```json
 {"dataset_id": "…", "scoring_config_hash": "6a5118ea…",
- "evaluations": [{"evaluation_id": "E1", "agent_version_id": "…", "summary": {…}}, …],
- "per_task": [{"task_id": "…", "success_rate": {"E1": 1.0, "E2": 0.0}, "delta_vs_first": {"E1": 0.0, "E2": -1.0}}]}
+ "evaluations": [{"evaluation_id": "E1", "agent_version_id": "…", "summary": {…}, "context": {…},
+                  "distinguishable_from_first": null},
+                 {"evaluation_id": "E2", …, "distinguishable_from_first": false}],
+ "per_task": [{"task_id": "…", "success_rate": {"E1": 1.0, "E2": 0.0}, "delta_vs_first": {"E1": 0.0, "E2": -1.0}}],
+ "differences": [{"field": "model", "values": {"E1": "fake-model", "E2": "claude-haiku-4-5"}}],
+ "warnings": ["Mixes simulated (fake-model) and real-model evaluations; their scores and costs are not comparable",
+              "calc-demo has only 4 graded attempts; treat differences as indicative"]}
 ```
 
-A task with nothing graded has a null rate and a null delta.
+- A task with nothing graded has a null rate and a null delta.
+- **`context`** is the same object as in `GET /evaluations/{id}`.
+- **`distinguishable_from_first`** is true when this entry's Wilson 95% interval (`summary.ci95`) and the first entry's do not overlap, false when they do, and null for the first entry or when either interval is null (nothing graded). Non-overlapping intervals are a conservative test; overlapping ones do not prove the two are the same.
+- **`differences`** lists, among `provider`, `model`, `agent_config_hash`, `agent_name` and `repetitions`, the fields whose values are not all equal, with every entry's value.
+- **`warnings`** are fixed sentences: one when simulated and real-model evaluations are mixed; one per entry with fewer than 30 graded attempts; one per entry that is not `complete`.
 
 ## Runs and attempts (additions)
 
@@ -172,6 +219,8 @@ A task with nothing graded has a null rate and a null delta.
 | `GET /runs/{id}/attempts/{n}/evaluation` | the attempt's `PublicEvaluation` + `{attempt_no, created_at, finished_at}`, scored under the run's batch config (or scoring v1 for ad-hoc runs). **404** when no evaluation is recorded (command tasks, not yet evaluated, or the run failed before an attempt) |
 
 `GET /evaluations/{id}` also returns `cancel_requested_at`, `run_max_attempts` and `eval_max_attempts`.
+
+`POST /runs` with an `agent_version_id` whose provider is not enabled on this server is **422** (`"Provider 'anthropic' is not enabled on this server"`), and in a public demo a version that is not fake-model is **403**, as for `POST /evaluations`.
 
 ### `POST /runs/{id}/cancel`
 

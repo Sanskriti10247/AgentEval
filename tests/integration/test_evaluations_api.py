@@ -176,7 +176,15 @@ async def test_summary_follows_d7_and_r7(client: httpx.AsyncClient, sessionmaker
         "platform_sandbox": 1, "tampering": 1, "tests_failed": 1,
     }  # fmt: skip
     assert Decimal(summary["mean_score"]["overall"]) == Decimal("0.40000")
-    assert summary["latency_ms"] == {"p50": 300, "p95": 600}  # nearest rank over 6 attempts
+    # Nearest rank over 6 attempts (100..600 ms; C2's evaluation is still RUNNING).
+    assert summary["latency_ms"] == {"p50": 300, "p95": 600, "p99": 600, "mean": 350.0, "count": 6}
+    # 9 runs, none cancelled; 8 finished (6 COMPLETED, B1 and B3 FAILED), all on attempt 1.
+    assert summary["rates"] == {
+        "scheduled": 9, "finished": 8, "completed": 6, "failed": 2, "timed_out": 0,
+        "retried": 0, "completion_rate": 0.75, "failure_rate": 0.25, "timeout_rate": 0.0,
+        "retry_rate": 0.0,
+    }  # fmt: skip
+    assert summary["simulated"] is True  # a fake-model version
     assert Decimal(summary["cost_usd"]["total"]) == Decimal("0.06")
     assert summary["tokens"] == {"tokens_in": 600, "tokens_out": 120}
     per_task = {t["task_id"]: t for t in summary["per_task"]}

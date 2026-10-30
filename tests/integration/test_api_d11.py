@@ -42,8 +42,20 @@ RESPONSE_MODELS: dict[str, list[str]] = {
         "attempt_no", "checks", "created_at", "failure_category", "finished_at", "metrics",
         "score", "status", "tags", "task_success",
     ],
-    "Compare": ["dataset_id", "evaluations", "per_task", "scoring_config_hash"],
-    "CompareEntry": ["agent_version_id", "evaluation_id", "summary"],
+    "ActivityBucket": [
+        "cancelled", "completed", "failed", "finished", "graded", "p95_ms", "passed", "start",
+    ],
+    "ActivityEvaluation": [
+        "agent_name", "agent_version", "created_at", "graded", "id", "model", "name", "p95_ms",
+        "passed", "provider", "runs_total", "simulated", "success_rate",
+    ],
+    "Compare": [
+        "dataset_id", "differences", "evaluations", "per_task", "scoring_config_hash", "warnings",
+    ],
+    "CompareDifference": ["field", "values"],
+    "CompareEntry": [
+        "agent_version_id", "context", "distinguishable_from_first", "evaluation_id", "summary",
+    ],
     "CostTotals": ["mean_per_attempt", "total"],
     "DatasetPage": ["datasets", "next_after"],
     "DatasetSummary": [
@@ -55,20 +67,43 @@ RESPONSE_MODELS: dict[str, list[str]] = {
     ],
     "EvaluationCounts": ["cancel_requested", "total"],
     "EvaluationPage": ["evaluations", "next_after"],
-    "EvaluationRead": [
-        "agent_version_id", "cancel_requested_at", "created_at", "dataset_id",
-        "eval_max_attempts", "id", "name", "progress", "repetitions", "run_max_attempts",
-        "scoring_config", "scoring_config_hash",
+    "EvaluationContext": [
+        "agent_config_hash", "agent_id", "agent_name", "agent_version", "dataset_name",
+        "dataset_version", "evaluator_version", "model", "pricing_version", "provider",
+        "simulated", "task_count",
     ],
-    "Latency": ["p50", "p95"],
-    "LatencyStats": ["count", "p50", "p95"],
+    "EvaluationEstimate": [
+        "available", "default_budget_usd", "max_cost_usd", "max_cost_usd_per_run",
+        "max_model_requests", "max_steps_per_run", "model", "pricing_known", "pricing_version",
+        "provider", "repetitions", "run_max_attempts", "runs", "sequential", "simulated",
+        "tasks",
+    ],
+    "EvaluationRead": [
+        "agent_version_id", "cancel_requested_at", "context", "created_at", "dataset_id",
+        "eval_max_attempts", "id", "max_cost_usd", "name", "progress", "repetitions",
+        "run_max_attempts", "scoring_config", "scoring_config_hash",
+    ],
+    "FinishRates": [
+        "completed", "completion_rate", "failed", "failure_rate", "finished", "retried",
+        "retry_rate", "timed_out", "timeout_rate",
+    ],
+    "Latency": ["count", "mean", "p50", "p95", "p99"],
+    "LatencyStats": ["count", "mean", "p50", "p95", "p99"],
     "LatestVersion": ["id", "model", "model_provider", "tools", "version"],
     "MeanScore": ["efficiency", "overall", "reliability", "task_success", "test_score"],
     "Progress": [
         "awaiting_evaluation", "complete", "evaluations_by_status", "runs_by_status",
         "runs_total",
     ],
-    "QueueDepth": ["evaluations_pending", "runs_queued", "runs_retrying", "total"],
+    "ProviderCatalog": [
+        "default_real_budget_usd", "pricing_version", "providers", "real_provider_concurrency",
+    ],
+    "ProviderInfo": ["available", "models", "name", "reason", "simulated"],
+    "ProviderModel": ["id", "input_usd_per_mtok", "output_usd_per_mtok", "priced"],
+    "ProviderUsage": ["attempts", "cost_usd", "simulated", "tokens_in", "tokens_out"],
+    "QueueDepth": [
+        "evaluations_pending", "oldest_queued_s", "runs_queued", "runs_retrying", "total",
+    ],
     "PublicCheck": ["duration_ms", "passed", "position", "score"],
     "PublicEvaluation": [
         "checks", "failure_category", "metrics", "score", "status", "tags", "task_success",
@@ -98,16 +133,21 @@ RESPONSE_MODELS: dict[str, list[str]] = {
     ],
     "ScoringConfig": ["version", "weights"],
     "ScoringWeights": ["efficiency", "reliability", "task_success", "test_score"],
+    "RunRates": [
+        "completed", "completion_rate", "failed", "failure_rate", "finished", "retried",
+        "retry_rate", "scheduled", "timed_out", "timeout_rate",
+    ],
+    "StatsActivity": ["bucket_s", "buckets", "evaluations", "generated_at", "window_h"],
     "StatsOverview": [
-        "active_workers", "evaluations", "generated_at", "queue", "run_latency_ms", "runs",
-        "success", "usage", "window_h",
+        "active_workers", "evaluations", "generated_at", "queue", "rates", "run_latency_ms",
+        "runs", "success", "usage", "window_h", "workers",
     ],
     "SuccessStats": ["graded", "passed", "success_rate"],
     "Summary": [
         "attempts", "ci95", "complete", "cost_usd", "evaluation_errors", "evaluation_id",
         "failure_categories", "graded", "in_progress", "latency_ms", "mean_score", "passed",
-        "per_task", "platform_failure_rate", "platform_failures", "success_rate", "tokens",
-        "ungraded",
+        "per_task", "platform_failure_rate", "platform_failures", "rates", "simulated",
+        "success_rate", "tokens", "ungraded",
     ],
     "TaskPage": ["next_after", "tasks"],
     "TaskListItem": [
@@ -125,7 +165,8 @@ RESPONSE_MODELS: dict[str, list[str]] = {
         "task_id", "task_name",
     ],
     "TokenTotals": ["tokens_in", "tokens_out"],
-    "UsageStats": ["attempts", "cost_usd", "tokens_in", "tokens_out"],
+    "UsageStats": ["attempts", "by_provider", "cost_usd", "tokens_in", "tokens_out"],
+    "WorkerLiveness": ["alive", "stale"],
     "WorkerPage": ["next_after", "workers"],
     "WorkerRead": [
         "alive", "concurrency", "hostname", "id", "last_heartbeat_at", "started_at", "stop_reason",
@@ -209,6 +250,10 @@ async def test_no_route_returns_hidden_evaluation_data(
         ("GET", "/api/v1/evaluations", "/api/v1/evaluations", {}),
         ("GET", "/api/v1/workers", "/api/v1/workers", {}),
         ("GET", "/api/v1/stats/overview", "/api/v1/stats/overview", {}),
+        ("GET", "/api/v1/stats/activity", "/api/v1/stats/activity", {}),
+        ("GET", "/api/v1/providers", "/api/v1/providers", {}),
+        ("POST", "/api/v1/evaluations/estimate", "/api/v1/evaluations/estimate",
+         {"json": {"dataset_id": s.dataset_id, "agent_version_id": str(s.version_id)}}),
         ("GET", "/api/v1/agents/{agent_id}", f"/api/v1/agents/{agent['id']}", {}),
         ("POST", "/api/v1/agents/{agent_id}/versions",
          f"/api/v1/agents/{agent['id']}/versions", {"json": version_body}),

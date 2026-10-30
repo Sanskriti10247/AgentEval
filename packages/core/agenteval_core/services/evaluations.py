@@ -12,14 +12,18 @@ Success-rate semantics are Step 3's success_stats() (D7), unchanged.
 import math
 import uuid
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agenteval_core.agent.limits import AgentLimits
+from agenteval_core.agent.pricing import PRICING_VERSION, is_priced
 from agenteval_core.config import Settings
+from agenteval_core.evaluation import EVALUATOR_VERSION
 from agenteval_core.evaluation.classify import Verdict, platform_category
 from agenteval_core.evaluation.metrics import TrajectoryMetrics
 from agenteval_core.evaluation.public import PublicEvaluation, public_view
@@ -34,11 +38,16 @@ from agenteval_core.evaluation.scoring import (
 from agenteval_core.evaluation.stats import success_stats
 from agenteval_core.evaluation.taxonomy import DatasetStatus, EvaluationStatus, FailureCategory
 from agenteval_core.logging import get_logger
-from agenteval_core.models import Evaluation, Run
+from agenteval_core.models import AgentVersion, Evaluation, Run
 from agenteval_core.queue.streams import RunQueue
 from agenteval_core.reliability.taxonomy import FailureReason
 from agenteval_core.repositories.agents import AgentVersionRepository
-from agenteval_core.repositories.batches import BatchRepository, ResultRecord, TaskMeta
+from agenteval_core.repositories.batches import (
+    BatchRepository,
+    ContextRecord,
+    ResultRecord,
+    TaskMeta,
+)
 from agenteval_core.repositories.datasets import DatasetRepository
 from agenteval_core.repositories.runs import RunRepository
 from agenteval_core.schemas.evaluation import (
@@ -46,15 +55,20 @@ from agenteval_core.schemas.evaluation import (
     MAX_COMPARE,
     AttemptEvaluationRead,
     Compare,
+    CompareDifference,
     CompareEntry,
     CostTotals,
+    EvaluationContext,
     EvaluationCreate,
+    EvaluationEstimate,
+    EvaluationEstimateRequest,
     EvaluationRead,
     Latency,
     MeanScore,
     Progress,
     ResultPage,
     ResultRow,
+    RunRates,
     Summary,
     TaskComparison,
     TaskSummary,
@@ -68,6 +82,7 @@ from agenteval_core.services.errors import (
     InvalidEvaluation,
     NotFound,
 )
+from agenteval_core.services.providers import availability, is_simulated
 from agenteval_core.states import Outcome, RunStatus
 
 log = get_logger(__name__)
@@ -161,8 +176,61 @@ def _result_of(r: ResultRecord) -> tuple[EvaluationStatus, FailureCategory | Non
     return None
 
 
-def _nearest_rank(sorted_values: Sequence[int], p: float) -> int:
+def nearest_rank(sorted_values: Sequence[int], p: float) -> int:
+    """The p-th percentile by nearest rank: the value at rank ceil(p x n), 1-based, of
+    the ascending values (SQL's percentile_disc). Needs at least one value."""
     return sorted_values[max(0, math.ceil(p * len(sorted_values)) - 1)]
+
+
+def _ratio(n: int, d: int) -> float | None:
+    return n / d if d else None
+
+
+def finish_rates(
+    *, finished: int, completed: int, failed: int, timed_out: int, retried: int
+) -> dict[str, Any]:
+    """FinishRates fields from counts over finished (COMPLETED or FAILED) runs; every
+    rate is None when nothing finished. Shared with the overview."""
+    return {
+        "finished": finished,
+        "completed": completed,
+        "failed": failed,
+        "timed_out": timed_out,
+        "retried": retried,
+        "completion_rate": _ratio(completed, finished),
+        "failure_rate": _ratio(failed, finished),
+        "timeout_rate": _ratio(timed_out, finished),
+        "retry_rate": _ratio(retried, finished),
+    }
+
+
+def run_rates(records: Sequence[ResultRecord]) -> RunRates:
+    """Run-level rates of a batch. A run's attempt_no here is its latest attempt's, so
+    `retried` counts runs that finished on attempt 2 or later (a retry or a replay)."""
+    done = [r for r in records if r.run_status in _HAS_RESULT]
+    return RunRates(
+        scheduled=sum(r.run_status != RunStatus.CANCELLED for r in records),
+        **finish_rates(
+            finished=len(done),
+            completed=sum(r.run_status == RunStatus.COMPLETED for r in done),
+            failed=sum(r.run_status == RunStatus.FAILED for r in done),
+            timed_out=sum(r.run_outcome == Outcome.TIMEOUT for r in done),
+            retried=sum((r.attempt_no or 0) > 1 for r in done),
+        ),
+    )
+
+
+def latency(durations: Sequence[int]) -> Latency | None:
+    """Nearest-rank p50/p95/p99, mean and count of ascending `durations`."""
+    if not durations:
+        return None
+    return Latency(
+        p50=nearest_rank(durations, 0.50),
+        p95=nearest_rank(durations, 0.95),
+        p99=nearest_rank(durations, 0.99),
+        mean=sum(durations) / len(durations),
+        count=len(durations),
+    )
 
 
 def _mean(values: Iterable[Decimal]) -> Decimal | None:
@@ -178,6 +246,8 @@ def summarize(
     evaluation_id: uuid.UUID,
     records: Sequence[ResultRecord],
     tasks: dict[uuid.UUID, TaskMeta],
+    *,
+    simulated: bool = False,
 ) -> Summary:
     finished = [(r, res) for r in records if (res := _result_of(r)) is not None]
     stats = success_stats(res for _, res in finished)
@@ -250,11 +320,7 @@ def summarize(
         ungraded=stats.ungraded,
         in_progress=in_progress,
         mean_score=mean_score,
-        latency_ms=(
-            Latency(p50=_nearest_rank(durations, 0.50), p95=_nearest_rank(durations, 0.95))
-            if durations
-            else None
-        ),
+        latency_ms=latency(durations),
         cost_usd=CostTotals(
             total=sum(costs, Decimal(0)),
             mean_per_attempt=(sum(costs, Decimal(0)) / len(costs)).quantize(Decimal("0.000001"))
@@ -267,6 +333,83 @@ def summarize(
         ),
         failure_categories=dict(sorted(histogram.items())),
         per_task=per_task,
+        rates=run_rates(records),
+        simulated=simulated,
+    )
+
+
+def upper_bounds(
+    runs: int, limits: AgentLimits, run_max_attempts: int, *, priced: bool
+) -> tuple[int, Decimal | None]:
+    """(model requests, cost in USD) an evaluation can use at most: every run takes
+    every attempt it may get, and each attempt every step and its whole cost cap. The
+    cost is None when the model has no price (cost could not be tracked)."""
+    requests = runs * limits.max_steps * run_max_attempts
+    cost = runs * limits.max_cost_usd * run_max_attempts if priced else None
+    return requests, cost
+
+
+# -- comparison (pure) ---------------------------------------------------------------------------
+
+# Fewer graded attempts than this and a comparison carries a warning.
+MIN_GRADED_FOR_COMPARE = 30
+DIFFERENCE_FIELDS = ("provider", "model", "agent_config_hash", "agent_name", "repetitions")
+
+
+def intervals_disjoint(a: tuple[float, float] | None, b: tuple[float, float] | None) -> bool | None:
+    """True when two 95% intervals do not overlap; None when either is missing."""
+    if a is None or b is None:
+        return None
+    return a[1] < b[0] or b[1] < a[0]
+
+
+def compare_differences(
+    facts: Sequence[tuple[uuid.UUID, Mapping[str, str | int | None]]],
+) -> list[CompareDifference]:
+    """The DIFFERENCE_FIELDS whose values are not all equal, with every entry's value."""
+    out = []
+    for name in DIFFERENCE_FIELDS:
+        values = {eid: f.get(name) for eid, f in facts}
+        if len(set(values.values())) > 1:
+            out.append(CompareDifference(field=name, values=values))
+    return out
+
+
+def compare_warnings(entries: Sequence[tuple[str, Summary]]) -> list[str]:
+    """Reasons to read a comparison with care, from (evaluation name, summary) pairs."""
+    warnings = []
+    if len({s.simulated for _, s in entries}) > 1:
+        warnings.append(
+            "Mixes simulated (fake-model) and real-model evaluations; their scores and "
+            "costs are not comparable"
+        )
+    for name, s in entries:
+        if s.graded < MIN_GRADED_FOR_COMPARE:
+            warnings.append(
+                f"{name} has only {s.graded} graded attempts; treat differences as indicative"
+            )
+    for name, s in entries:
+        if not s.complete:
+            warnings.append(f"{name} is not complete; its numbers can still change")
+    return warnings
+
+
+def context_of(record: ContextRecord | None) -> EvaluationContext | None:
+    if record is None:
+        return None
+    return EvaluationContext(
+        agent_id=record.agent_id,
+        agent_name=record.agent_name,
+        agent_version=record.agent_version,
+        agent_config_hash=record.agent_config_hash,
+        provider=record.provider,
+        model=record.model,
+        simulated=is_simulated(record.provider),
+        dataset_name=record.dataset_name,
+        dataset_version=record.dataset_version,
+        task_count=record.task_count,
+        evaluator_version=EVALUATOR_VERSION,
+        pricing_version=PRICING_VERSION,
     )
 
 
@@ -284,19 +427,19 @@ class EvaluationService:
         """Batch row + every (task, repetition) run in ONE transaction, then
         dispatch. A replay (same key, same request) returns the batch and
         re-dispatches runs still QUEUED; a different request is a 409."""
-        dataset = await DatasetRepository(self._s).get(data.dataset_id)
-        if dataset is None:
-            raise NotFound(f"dataset {data.dataset_id} not found")
-        if dataset.status != DatasetStatus.FROZEN:
-            raise Conflict(f"dataset {data.dataset_id} is not frozen")
-        if await AgentVersionRepository(self._s).get(data.agent_version_id) is None:
-            raise NotFound(f"agent version {data.agent_version_id} not found")
-        task_ids = await DatasetRepository(self._s).task_ids(data.dataset_id)
-        if len(task_ids) * data.repetitions > MAX_BATCH_RUNS:
-            raise InvalidEvaluation(f"an evaluation can have at most {MAX_BATCH_RUNS} runs")
+        version, task_ids = await self._launchable(
+            data.dataset_id, data.agent_version_id, data.repetitions
+        )
+        provider = version.model_provider
+        if provider not in self._settings.enabled_providers():
+            raise InvalidEvaluation(f"Provider '{provider}' is not enabled on this server")
         config = data.scoring_config or DEFAULT_SCORING_CONFIG
         run_budget = data.run_max_attempts or self._settings.run_max_attempts
         eval_budget = data.eval_max_attempts or self._settings.eval_max_attempts
+        # A real model always runs under a cap; a fake one only if the request names one.
+        max_cost = data.max_cost_usd
+        if max_cost is None and not is_simulated(provider):
+            max_cost = self._settings.real_eval_max_cost_usd
         values = {
             "name": data.name,
             "dataset_id": data.dataset_id,
@@ -307,6 +450,7 @@ class EvaluationService:
             "idempotency_key": idempotency_key,
             "run_max_attempts": run_budget,  # F6, G1
             "eval_max_attempts": eval_budget,  # F9, G1
+            "max_cost_usd": max_cost,
         }
 
         batch = await self._batches.create(**values)
@@ -323,6 +467,7 @@ class EvaluationService:
                 batch.scoring_config_hash,
                 batch.run_max_attempts,
                 batch.eval_max_attempts,
+                batch.max_cost_usd,
             ) == (
                 data.name,
                 data.dataset_id,
@@ -331,6 +476,7 @@ class EvaluationService:
                 values["scoring_config_hash"],
                 run_budget,
                 eval_budget,
+                max_cost,
             )
             if not same:
                 raise IdempotencyConflict(
@@ -356,6 +502,39 @@ class EvaluationService:
             replay=not created,
         )
         return CreateResult(await self._read(batch), created)
+
+    async def estimate(self, data: EvaluationEstimateRequest) -> EvaluationEstimate:
+        """Upper bounds for an evaluation that POST /evaluations would accept; the same
+        404 / 409 / 422 for a missing version or dataset, an unfrozen dataset or too
+        many runs. An unavailable provider is not an error here: `available` says so."""
+        version, task_ids = await self._launchable(
+            data.dataset_id, data.agent_version_id, data.repetitions
+        )
+        provider, model = version.model_provider, version.model
+        limits = AgentLimits.model_validate(version.limits)
+        attempts = data.run_max_attempts or self._settings.run_max_attempts
+        runs = len(task_ids) * data.repetitions
+        priced = is_priced(provider, model)
+        simulated = is_simulated(provider)
+        max_requests, max_cost = upper_bounds(runs, limits, attempts, priced=priced)
+        return EvaluationEstimate(
+            tasks=len(task_ids),
+            repetitions=data.repetitions,
+            runs=runs,
+            provider=provider,
+            model=model,
+            simulated=simulated,
+            available=availability(self._settings, provider)[0],
+            max_steps_per_run=limits.max_steps,
+            run_max_attempts=attempts,
+            max_model_requests=max_requests,
+            pricing_known=priced,
+            pricing_version=PRICING_VERSION,
+            max_cost_usd_per_run=limits.max_cost_usd,
+            max_cost_usd=max_cost,
+            default_budget_usd=None if simulated else self._settings.real_eval_max_cost_usd,
+            sequential=not simulated,
+        )
 
     async def get(self, evaluation_id: uuid.UUID) -> EvaluationRead:
         return await self._read(await self._get(evaluation_id))
@@ -408,6 +587,8 @@ class EvaluationService:
                 "evaluations can only be compared on the same dataset and scoring config"
             )
         summaries = [await self._summary(b) for b in batches]
+        records = await self._batches.contexts([b.id for b in batches])
+        contexts = [context_of(records.get(b.id)) for b in batches]
         task_ids = await DatasetRepository(self._s).task_ids(first.dataset_id)
         rates = [{t.task_id: t.success_rate for t in s.per_task} for s in summaries]
         per_task = []
@@ -421,14 +602,39 @@ class EvaluationService:
                     delta_vs_first={i: _delta(rate, base) for i, rate in by_eval.items()},
                 )
             )
+        first_ci = summaries[0].ci95
+        names = [(b.name, s) for b, s in zip(batches, summaries, strict=True)]
+        facts = [
+            (
+                b.id,
+                {
+                    "provider": c.provider if c else None,
+                    "model": c.model if c else None,
+                    "agent_config_hash": c.agent_config_hash if c else None,
+                    "agent_name": c.agent_name if c else None,
+                    "repetitions": b.repetitions,
+                },
+            )
+            for b, c in zip(batches, contexts, strict=True)
+        ]
         return Compare(
             dataset_id=first.dataset_id,
             scoring_config_hash=first.scoring_config_hash,
             evaluations=[
-                CompareEntry(evaluation_id=b.id, agent_version_id=b.agent_version_id, summary=s)
-                for b, s in zip(batches, summaries, strict=True)
+                CompareEntry(
+                    evaluation_id=b.id,
+                    agent_version_id=b.agent_version_id,
+                    summary=s,
+                    context=c,
+                    distinguishable_from_first=(
+                        None if i == 0 else intervals_disjoint(first_ci, s.ci95)
+                    ),
+                )
+                for i, (b, s, c) in enumerate(zip(batches, summaries, contexts, strict=True))
             ],
             per_task=per_task,
+            differences=compare_differences(facts),
+            warnings=compare_warnings(names),
         )
 
     async def attempt_evaluation(self, run_id: uuid.UUID, attempt_no: int) -> AttemptEvaluationRead:
@@ -457,6 +663,24 @@ class EvaluationService:
             raise NotFound(f"evaluation {evaluation_id} not found")
         return batch
 
+    async def _launchable(
+        self, dataset_id: uuid.UUID, agent_version_id: uuid.UUID, repetitions: int
+    ) -> tuple[AgentVersion, list[uuid.UUID]]:
+        """The checks create and estimate share: a FROZEN dataset (404, 409), an existing
+        version (404) and at most MAX_BATCH_RUNS runs (422)."""
+        dataset = await DatasetRepository(self._s).get(dataset_id)
+        if dataset is None:
+            raise NotFound(f"dataset {dataset_id} not found")
+        if dataset.status != DatasetStatus.FROZEN:
+            raise Conflict(f"dataset {dataset_id} is not frozen")
+        version = await AgentVersionRepository(self._s).get(agent_version_id)
+        if version is None:
+            raise NotFound(f"agent version {agent_version_id} not found")
+        task_ids = await DatasetRepository(self._s).task_ids(dataset_id)
+        if len(task_ids) * repetitions > MAX_BATCH_RUNS:
+            raise InvalidEvaluation(f"an evaluation can have at most {MAX_BATCH_RUNS} runs")
+        return version, task_ids
+
     async def _config_hash_for(self, run: Run) -> str:
         if run.evaluation_id is None:
             return DEFAULT_SCORING_CONFIG.config_hash()
@@ -465,15 +689,22 @@ class EvaluationService:
     async def _summary(self, batch: Evaluation) -> Summary:
         records = await self._batches.result_records(batch)
         tasks = await self._batches.task_meta(sorted({r.task_id for r in records}, key=str))
-        return summarize(batch.id, records, tasks)
+        version = await AgentVersionRepository(self._s).get(batch.agent_version_id)
+        simulated = version is not None and is_simulated(version.model_provider)
+        return summarize(batch.id, records, tasks, simulated=simulated)
 
     async def _read(self, batch: Evaluation) -> EvaluationRead:
         runs, evals, awaiting = await self._batches.progress_counts(batch.id)
-        return evaluation_read(batch, runs, evals, awaiting)
+        contexts = await self._batches.contexts([batch.id])
+        return evaluation_read(batch, runs, evals, awaiting, context_of(contexts.get(batch.id)))
 
 
 def evaluation_read(
-    batch: Evaluation, runs: dict[str, int], evals: dict[str, int], awaiting: int
+    batch: Evaluation,
+    runs: dict[str, int],
+    evals: dict[str, int],
+    awaiting: int,
+    context: EvaluationContext | None = None,
 ) -> EvaluationRead:
     """The one place a batch row becomes API output (get, create, cancel, list)."""
     total = sum(runs.values())
@@ -497,6 +728,8 @@ def evaluation_read(
             awaiting_evaluation=awaiting,
             complete=terminal == total and awaiting == 0,
         ),
+        max_cost_usd=batch.max_cost_usd,
+        context=context,
     )
 
 

@@ -57,6 +57,8 @@ export AEC='docker compose --env-file /etc/agenteval/prod.env -f docker-compose.
    | `AGENTEVAL_WORKER_CONCURRENCY`, `AGENTEVAL_LOG_LEVEL` | no | Runs per worker (default 2), log level (default `INFO`) |
    | `AGENTEVAL_AUTH_ENABLED` | no | Default `true`; keep it on |
    | `AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER`, `ANTHROPIC_API_KEY` | no | Real model calls (off by default; the key reaches the worker only) |
+   | `AGENTEVAL_REAL_EVAL_MAX_COST_USD` | no | Spending cap in USD stored on a real-model evaluation whose request names no `max_cost_usd` (default `2.00`, see [Real model spend](#real-model-spend)) |
+   | `AGENTEVAL_REAL_PROVIDER_CONCURRENCY` | no | Real-model agent runs one worker process executes at once (default 1) |
 
    Compose reads these for substitution only. Other settings in `.env.example` keep their defaults unless you add them to a service's `environment` yourself. With `--env-file`, a `.env` in the repository is not read.
 
@@ -207,6 +209,16 @@ The limits in `docker-compose.prod.yml` are starting points for a 4 vCPU / 8 GB 
 - Add capacity with more worker replicas: `$AEC up -d --scale worker=3` (Prometheus discovers every replica). All workers share the one `artifacts` volume, so the replicas must run on the same host.
 - `AGENTEVAL_API_WORKERS` defaults to 1. `/metrics` reads a per-process registry, so with more than one uvicorn process each scrape returns one arbitrary process's counters. Raise it only if you accept that, or scrape elsewhere.
 - Leave the lease settings at their defaults. The short timings in `docker-compose.e2e.yml` are for the test suite only.
+
+## Real model spend
+
+Real model calls are off unless `AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER=true`, and three limits bound what an evaluation can spend once they are on:
+
+- Each agent version's `limits.max_cost_usd` caps a single attempt; the runtime checks it before every model call, so one attempt can overshoot it by at most one call.
+- Each evaluation of a real-model version stores a `max_cost_usd` (the request's, or `AGENTEVAL_REAL_EVAL_MAX_COST_USD`, default 2.00). Before a run of that evaluation starts its agent loop, the worker adds up `cost_usd` over every attempt of the evaluation's runs. Once that sum reaches the cap, the run fails with `evaluation_budget_exhausted` without calling the model. Runs already in flight are not stopped, so the total can exceed the cap by what those runs spend, each bounded by its version's per-attempt cap. The failure is a platform failure: it is not retried and does not count against the pass rate.
+- `AGENTEVAL_REAL_PROVIDER_CONCURRENCY` (default 1) is a semaphore inside each worker process around real-model agent runs. It is per process, not global: three worker replicas with the default run up to three real-model runs at once. A run waiting for the semaphore holds its lease (the keeper keeps renewing it) and one of the process's `AGENTEVAL_WORKER_CONCURRENCY` slots. Fake-model runs never wait for it.
+
+`POST /api/v1/evaluations/estimate` returns the upper bounds (model requests and cost) for a planned evaluation before anything is queued; see [the evaluations API](api/evaluations.md).
 
 ## Free hosting (Vercel + Render)
 

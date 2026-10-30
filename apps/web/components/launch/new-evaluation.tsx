@@ -2,11 +2,20 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, type FormEvent } from "react";
-import { Button, Empty, Gate, Input, Loading, Notice, PageHeader, Select } from "@/components/ui";
-import { MAX_REPETITIONS, type DatasetSummary } from "@/lib/api/types";
-import { formatInt } from "@/lib/format";
-import { useCapabilities, useCreateEvaluation, useFrozenDatasets, useVersionIndex, type VersionInfo } from "@/lib/hooks";
+import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { Button, Empty, Gate, Input, isSimulated, Loading, Notice, PageHeader, ProviderMark, Select } from "@/components/ui";
+import { ApiError } from "@/lib/api/client";
+import { MAX_REPETITIONS, type DatasetSummary, type EvaluationEstimate, type ProvidersRead } from "@/lib/api/types";
+import { formatCost, formatInt } from "@/lib/format";
+import {
+  useCapabilities,
+  useCreateEvaluation,
+  useEvaluationEstimate,
+  useFrozenDatasets,
+  useProviders,
+  useVersionIndex,
+  type VersionInfo,
+} from "@/lib/hooks";
 import { FormRow, NextSteps, newIdempotencyKey } from "./form";
 import { describeWriteError } from "./write-error";
 
@@ -19,6 +28,28 @@ export function groupVersions(index: Map<string, VersionInfo>): { agent: string;
     .map(([agent, versions]) => ({ agent, versions: versions.sort((a, b) => b.version - a.version) }));
 }
 
+export interface Availability {
+  available: Map<string, VersionInfo>;
+  unavailable: { version: VersionInfo; reason: string }[];
+}
+
+/**
+ * Split versions by whether this server can run their provider. Without GET /providers
+ * (an older API) every version is offered and the API decides on submit.
+ */
+export function splitByProvider(index: Map<string, VersionInfo>, providers: ProvidersRead | undefined): Availability {
+  if (!providers) return { available: index, unavailable: [] };
+  const byName = new Map(providers.providers.map((p) => [p.name, p]));
+  const available = new Map<string, VersionInfo>();
+  const unavailable: Availability["unavailable"] = [];
+  for (const [id, v] of index) {
+    const p = byName.get(v.provider);
+    if (p?.available) available.set(id, v);
+    else unavailable.push({ version: v, reason: p ? (p.reason ?? "Not available on this server.") : `This server does not know the provider "${v.provider}".` });
+  }
+  return { available, unavailable };
+}
+
 const defaultName = (v: VersionInfo | undefined, d: DatasetSummary | undefined) =>
   v && d ? `${v.agentName} v${v.version} on ${d.name} v${d.version}` : "";
 
@@ -26,6 +57,8 @@ export function NewEvaluationView({ initialVersionId }: { initialVersionId?: str
   const caps = useCapabilities();
   const { index, isLoading } = useVersionIndex();
   const datasets = useFrozenDatasets();
+  const providers = useProviders();
+  const { available, unavailable } = useMemo(() => splitByProvider(index, providers.data), [index, providers.data]);
 
   return (
     <>
@@ -45,7 +78,7 @@ export function NewEvaluationView({ initialVersionId }: { initialVersionId?: str
         <Notice tone="info" title="This deployment is read-only">
           Browsing works, but the API refuses new evaluations here. Run AgentEval locally to launch your own.
         </Notice>
-      ) : isLoading ? (
+      ) : isLoading || providers.isLoading ? (
         <Loading label="Loading agents" />
       ) : (
         <Gate query={datasets} loadingLabel="Loading datasets">
@@ -53,6 +86,13 @@ export function NewEvaluationView({ initialVersionId }: { initialVersionId?: str
             <Empty title="Nothing to evaluate yet">
               There are no agent versions on this API. {caps.publicDemo ? "The demo is set up with a fixed set of agents; check back once they are loaded." : "Register an agent and a version through the API first."}
             </Empty>
+          ) : available.size === 0 ? (
+            <>
+              <Empty title="No agent version can run here">
+                Every registered version uses a model provider this server does not run. The reasons are listed below.
+              </Empty>
+              <UnavailableNote items={unavailable} />
+            </>
           ) : (datasets.data?.datasets ?? []).length === 0 ? (
             <Empty title="No frozen datasets">
               Evaluations only run on frozen datasets, so the task list cannot change halfway through a benchmark.{" "}
@@ -60,7 +100,9 @@ export function NewEvaluationView({ initialVersionId }: { initialVersionId?: str
             </Empty>
           ) : (
             <NewEvaluationForm
-              index={index}
+              index={available}
+              unavailable={unavailable}
+              providers={providers.data}
               datasets={datasets.data?.datasets ?? []}
               initialVersionId={initialVersionId}
               maxRepetitions={caps.demoLimits?.max_repetitions ?? MAX_REPETITIONS}
@@ -79,10 +121,32 @@ interface Errors {
   version?: string;
   dataset?: string;
   repetitions?: string;
+  budget?: string;
 }
+
+function UnavailableNote({ items }: { items: Availability["unavailable"] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="mt-4 text-[12.5px] leading-relaxed text-muted" role="note" aria-label="Versions not offered">
+      <div className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">Not offered here</div>
+      <ul className="space-y-0.5">
+        {items.map(({ version: v, reason }) => (
+          <li key={v.versionId}>
+            {v.agentName} v{v.version} <span className="font-mono text-[12px]">({v.provider}/{v.model})</span>: {reason}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** A budget as typed: a positive amount up to 1000 with at most six decimals. */
+const BUDGET_RE = /^\d{1,4}(\.\d{1,6})?$/;
 
 export function NewEvaluationForm({
   index,
+  unavailable = [],
+  providers,
   datasets,
   initialVersionId,
   maxRepetitions,
@@ -90,6 +154,8 @@ export function NewEvaluationForm({
   publicDemo,
 }: {
   index: Map<string, VersionInfo>;
+  unavailable?: Availability["unavailable"];
+  providers?: ProvidersRead;
   datasets: DatasetSummary[];
   initialVersionId?: string;
   maxRepetitions: number;
@@ -105,6 +171,7 @@ export function NewEvaluationForm({
   const [datasetId, setDatasetId] = useState(datasets[0]?.id ?? "");
   const [repetitions, setRepetitions] = useState("1");
   const [name, setName] = useState<string | null>(null); // null: follow the generated default
+  const [budget, setBudget] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [key, setKey] = useState(newIdempotencyKey);
 
@@ -113,14 +180,22 @@ export function NewEvaluationForm({
   const effectiveName = name ?? defaultName(version, dataset);
   const reps = Number(repetitions);
   const runCount = dataset && Number.isInteger(reps) && reps > 0 ? dataset.task_count * reps : null;
+  const real = !!version && !isSimulated(version.provider);
+  const repsValid = /^\d+$/.test(repetitions.trim()) && reps >= 1 && reps <= maxRepetitions;
+  const estimate = useEvaluationEstimate(
+    version && dataset && repsValid ? { agent_version_id: version.versionId, dataset_id: dataset.id, repetitions: reps } : null,
+  );
+  const defaultBudget = estimate.data?.default_budget_usd ?? providers?.default_real_budget_usd ?? null;
 
   const errors: Errors = {};
   if (!version) errors.version = "Pick an agent version.";
   if (!dataset) errors.dataset = "Pick a dataset.";
   if (!effectiveName.trim()) errors.name = "Give the evaluation a name.";
   else if (effectiveName.trim().length > 200) errors.name = "Keep the name to 200 characters or fewer.";
-  if (!/^\d+$/.test(repetitions.trim()) || reps < 1 || reps > maxRepetitions)
-    errors.repetitions = `Enter a whole number from 1 to ${maxRepetitions}.`;
+  if (!repsValid) errors.repetitions = `Enter a whole number from 1 to ${maxRepetitions}.`;
+  const budgetText = budget.trim();
+  if (real && budgetText && (!BUDGET_RE.test(budgetText) || Number(budgetText) <= 0 || Number(budgetText) > 1000))
+    errors.budget = "Enter an amount in dollars above 0 and at most 1000, for example 2.50.";
   const valid = Object.keys(errors).length === 0;
   const show = (k: keyof Errors) => (submitted ? (errors[k] ?? null) : null);
 
@@ -137,7 +212,14 @@ export function NewEvaluationForm({
     if (!valid || !version || !dataset) return;
     create.mutate(
       {
-        body: { name: effectiveName.trim(), agent_version_id: version.versionId, dataset_id: dataset.id, repetitions: reps },
+        body: {
+          name: effectiveName.trim(),
+          agent_version_id: version.versionId,
+          dataset_id: dataset.id,
+          repetitions: reps,
+          // Blank means the server's default budget for real providers; fake models need none.
+          ...(real && budgetText ? { max_cost_usd: budgetText } : {}),
+        },
         key,
       },
       { onSuccess: (created) => router.push(`/evaluations/${created.id}`) },
@@ -152,7 +234,17 @@ export function NewEvaluationForm({
         <FormRow
           label="Agent version"
           error={show("version")}
-          hint={version ? <>Model <span className="font-mono text-[12px] text-ink-2">{version.model}</span> from {version.provider}.</> : "Every version is immutable, so the result always points at exactly what ran."}
+          hint={
+            version ? (
+              <>
+                Model <span className="font-mono text-[12px] text-ink-2">{version.model}</span> from {version.provider}{" "}
+                <ProviderMark provider={version.provider} />
+                {real ? " Real model calls cost money." : " Deterministic; no model is called and nothing is spent."}
+              </>
+            ) : (
+              "Every version is immutable, so the result always points at exactly what ran."
+            )
+          }
         >
           {(p) => (
             <Select {...p} className="w-full" value={versionId} onChange={(e) => edit(setVersionId)(e.target.value)}>
@@ -169,6 +261,7 @@ export function NewEvaluationForm({
             </Select>
           )}
         </FormRow>
+        <UnavailableNote items={unavailable} />
 
         <FormRow
           label="Dataset"
@@ -224,6 +317,31 @@ export function NewEvaluationForm({
           )}
         </FormRow>
 
+        {real ? (
+          <FormRow
+            label="Budget (USD)"
+            error={show("budget")}
+            hint={
+              <>
+                Spending cap for the whole evaluation. Once it is reached, the remaining runs fail without calling the model.
+                {defaultBudget ? ` Leave blank to use this server's default of ${formatCost(defaultBudget)}.` : " Leave blank to use this server's default."}
+              </>
+            }
+          >
+            {(p) => (
+              <Input
+                {...p}
+                type="text"
+                inputMode="decimal"
+                placeholder={defaultBudget ?? ""}
+                className="w-32 font-mono"
+                value={budget}
+                onChange={(e) => edit(setBudget)(e.target.value)}
+              />
+            )}
+          </FormRow>
+        ) : null}
+
         <div className="space-y-4 py-5 sm:pl-[calc(11rem+2rem)]">
           <p className="text-[13px] text-ink-2" aria-live="polite">
             {runCount !== null ? (
@@ -239,6 +357,16 @@ export function NewEvaluationForm({
               "Pick a dataset and a number of repetitions to see how many runs this queues."
             )}
           </p>
+          {repsValid && version && dataset ? (
+            <EstimatePreview
+              estimate={estimate.data}
+              stale={estimate.isPlaceholderData || estimate.isFetching}
+              error={estimate.isError ? estimate.error : null}
+              budget={real ? (budgetText && !errors.budget ? budgetText : defaultBudget) : null}
+              budgetIsDefault={!budgetText}
+              concurrency={providers?.real_provider_concurrency ?? null}
+            />
+          ) : null}
           {failure ? <Notice title={failure.title}>{failure.body}</Notice> : null}
           {submitted && !valid ? <p className="text-[12.5px] text-bad">Fix the fields marked above, then launch again.</p> : null}
           <div className="flex items-center gap-3">
@@ -259,6 +387,79 @@ export function NewEvaluationForm({
           "You land on the evaluation page, which follows progress live until the last run is graded.",
         ]}
       />
+    </div>
+  );
+}
+
+/**
+ * Upper bounds from POST /evaluations/estimate. Every figure is a ceiling the platform
+ * enforces (step and cost caps per run), not a prediction of what the run will use.
+ */
+export function EstimatePreview({
+  estimate: e,
+  stale,
+  error,
+  budget,
+  budgetIsDefault,
+  concurrency,
+}: {
+  estimate: EvaluationEstimate | undefined;
+  stale: boolean;
+  error: unknown;
+  budget: string | null;
+  budgetIsDefault: boolean;
+  concurrency: number | null;
+}) {
+  if (error && !e) {
+    // An API without the endpoint: the run count above is all there is.
+    if (error instanceof ApiError && error.status === 404) return null;
+    return <p className="text-[12.5px] text-muted">Upper bounds are unavailable: {error instanceof Error ? error.message : "the estimate failed"}.</p>;
+  }
+  if (!e) return <p className="font-mono text-[12px] text-faint">Estimating upper bounds…</p>;
+  const cost = !e.pricing_known
+    ? `pricing unknown for ${e.model}`
+    : e.simulated
+      ? `${formatCost(e.max_cost_usd)} simulated, no real spend`
+      : `${formatCost(e.max_cost_usd)} upper bound`;
+  const rows: [string, ReactNode][] = [
+    ["Runs", `${e.tasks} tasks × ${e.repetitions} repetitions = ${formatInt(e.runs)}`],
+    [
+      "Model requests",
+      <>
+        at most {formatInt(e.max_model_requests)}{" "}
+        <span className="text-faint">
+          ({formatInt(e.runs)} runs × {e.max_steps_per_run} steps × {e.run_max_attempts} attempt{e.run_max_attempts === 1 ? "" : "s"})
+        </span>
+      </>,
+    ],
+    [
+      "Cost",
+      <>
+        {cost}
+        {e.pricing_known && e.max_cost_usd_per_run ? (
+          <span className="text-faint"> (per-run cap {formatCost(e.max_cost_usd_per_run)} × runs × attempts)</span>
+        ) : null}
+      </>,
+    ],
+  ];
+  if (!e.simulated && budget) rows.push(["Budget", `stops at ${formatCost(budget)}${budgetIsDefault ? " (server default)" : ""}`]);
+  return (
+    <div className={`max-w-[34rem] ${stale ? "opacity-60" : ""}`} aria-label="Estimate" role="group">
+      <dl className="grid grid-cols-[7.5rem_1fr] gap-x-4 gap-y-1 text-[12.5px]">
+        {rows.map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="text-muted">{k}</dt>
+            <dd className="font-mono text-[12px] tabular-nums text-ink-2">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {e.sequential ? (
+        <p className="mt-2 text-[12.5px] leading-relaxed text-muted">
+          Real-provider runs execute {concurrency && concurrency > 1 ? `at most ${concurrency} at a time` : "one at a time"} per worker process,
+          so this evaluation takes longer than a simulated one of the same size.
+        </p>
+      ) : null}
+      {!e.available ? <p className="mt-2 text-[12.5px] text-bad">This server cannot run {e.provider} right now; the launch will be refused.</p> : null}
     </div>
   );
 }

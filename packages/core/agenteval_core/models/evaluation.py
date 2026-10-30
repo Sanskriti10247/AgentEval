@@ -53,6 +53,8 @@ class Evaluation(UUIDPk, CreatedAt, Base):
         CheckConstraint(
             f"eval_max_attempts BETWEEN 1 AND {MAX_ATTEMPTS_CAP}", name="eval_max_attempts"
         ),
+        # Migration 0011: an optional spending cap for all of the batch's runs together.
+        CheckConstraint("max_cost_usd > 0", name="max_cost_usd"),
     )
 
     name: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -68,6 +70,8 @@ class Evaluation(UUIDPk, CreatedAt, Base):
     cancel_reason: Mapped[str | None] = mapped_column(String(16))
     run_max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
     eval_max_attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="1")
+    # USD over every attempt of every run of the batch; NULL means no cap.
+    max_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
 
 
 class AttemptArtifact(UUIDPk, CreatedAt, Base):

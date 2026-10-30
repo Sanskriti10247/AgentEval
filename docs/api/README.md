@@ -4,11 +4,11 @@ The interactive OpenAPI docs are served at <http://localhost:8000/docs> on a run
 
 - [auth.md](auth.md): keys, scopes, rate limits and key management.
 - [evaluations.md](evaluations.md): datasets, evaluation specs, benchmark evaluations, results, summaries, compare, and run cancel, replay and listing.
-- [read.md](read.md): the list endpoints and `/stats/overview` that the dashboard reads.
+- [read.md](read.md): the list endpoints, `/stats/overview` and `/stats/activity` that the dashboard reads, and the metric conventions (percentiles, rate denominators, simulated cost).
 
 ## Conventions
 
-Errors are RFC 7807-style `application/problem+json`. Every `/api/v1` route needs an API key with the route's scope: `read` for `GET`, `write` for creating, cancelling, replaying and freezing, and `admin` for `/keys`. A missing, invalid, revoked or expired key gets 401 with `WWW-Authenticate: Bearer`, a key without the scope gets 403, and a key over its per-minute budget gets 429 with `Retry-After` and `X-RateLimit-*`.
+Errors are RFC 7807-style `application/problem+json`. Every `/api/v1` route needs an API key with the route's scope: `read` for `GET` (and for `POST /evaluations/estimate`, which writes nothing), `write` for creating, cancelling, replaying and freezing, and `admin` for `/keys`. A missing, invalid, revoked or expired key gets 401 with `WWW-Authenticate: Bearer`, a key without the scope gets 403, and a key over its per-minute budget gets 429 with `Retry-After` and `X-RateLimit-*`.
 
 Request bodies are capped at `AGENTEVAL_MAX_REQUEST_BYTES` (default 5 MiB); a larger body gets 413 before it is parsed. A value Postgres cannot store, such as a NUL character, is a 422 with fixed text. Validation errors (422) never echo the submitted input, and errors inside an evaluation spec get a fixed message and a truncated location, so no hidden content comes back ([ADR-007](../decisions/ADR-007-evaluation-secrecy.md)).
 
@@ -41,15 +41,18 @@ CORS allows only the origins in `AGENTEVAL_CORS_ORIGINS` (default `http://localh
 | GET | `/api/v1/datasets` | Newest first, keyset-paged; filter `status`; `task_count` per dataset; `{datasets, next_after}` |
 | GET | `/api/v1/datasets/{id}` | Includes `task_ids` |
 | POST | `/api/v1/datasets/{id}/freeze` | DRAFT → FROZEN (idempotent); 409 if it has no tasks |
-| POST | `/api/v1/evaluations` | A benchmark evaluation: agent version × frozen dataset × repetitions, with optional budgets `run_max_attempts` / `eval_max_attempts` (1–10, default 3); optional `Idempotency-Key`; 202 new / 200 replay / 409 / 503 |
+| POST | `/api/v1/evaluations` | A benchmark evaluation: agent version × frozen dataset × repetitions, with optional budgets `run_max_attempts` / `eval_max_attempts` (1–10, default 3) and spending cap `max_cost_usd` (default `AGENTEVAL_REAL_EVAL_MAX_COST_USD` for real models); optional `Idempotency-Key`; 202 new / 200 replay / 409 / 422 provider not enabled / 403 real model in the public demo / 503 |
+| POST | `/api/v1/evaluations/estimate` | `read` scope. Upper bounds (runs, model requests, cost) and availability for a planned evaluation; writes nothing; 404 / 409 / 422 as for create |
 | GET | `/api/v1/evaluations` | Newest first, keyset-paged; filters `agent_version_id`, `dataset_id`; each batch with its progress; `{evaluations, next_after}` |
-| GET | `/api/v1/evaluations/{id}` | The batch, scoring config and hash, derived progress |
+| GET | `/api/v1/evaluations/{id}` | The batch, scoring config and hash, spending cap, `context` (agent, model, dataset, evaluator and pricing versions), derived progress |
 | POST | `/api/v1/evaluations/{id}/cancel` | Cancel the batch and its unfinished runs; finished runs and scores are untouched; 202 / 200 repeat / 404 |
 | GET | `/api/v1/evaluations/{id}/results` | Public per-run results, keyset-paged |
-| GET | `/api/v1/evaluations/{id}/summary` | Success rate and confidence interval, failure categories, score means, latency, cost, per task |
-| GET | `/api/v1/evaluations/compare?ids=a,b` | 2–5 batches on the same dataset and scoring config (else 422) |
+| GET | `/api/v1/evaluations/{id}/summary` | Success rate and confidence interval, failure categories, score means, latency (p50/p95/p99, mean), run rates, cost (labelled `simulated` for fake models), per task |
+| GET | `/api/v1/evaluations/compare?ids=a,b` | 2–5 batches on the same dataset and scoring config (else 422); each with its context and whether its interval separates from the first; config differences and warnings |
+| GET | `/api/v1/providers` | Model providers, whether this server runs them (and why not), models with list prices, `real_provider_concurrency`, `default_real_budget_usd` |
 | GET | `/api/v1/workers` | Live workers first, keyset-paged; each has an `alive` flag (not stopped, heartbeat within 3 × lease TTL); `{workers, next_after}` |
-| GET | `/api/v1/stats/overview` | `window_h` 1–720 (default 24): evaluation and run counts, success rate, run latency p50/p95, cost and tokens, active workers, queue depth |
+| GET | `/api/v1/stats/overview` | `window_h` 1–720 (default 24): evaluation and run counts, success rate, run rates, run latency p50/p95/p99/mean, cost and tokens (also per provider), active and stale workers, queue depth and oldest queued age |
+| GET | `/api/v1/stats/activity` | `window_h` 1–720 (default 24): finished runs per time bucket, zero-filled, and the evaluations created in the window |
 
 `POST /tasks` also accepts `dataset_id`, `difficulty` and a write-only `evaluation` spec; responses only say `has_evaluation`. Runs carry `evaluation_id` and `repetition`, and attempts carry `sandbox_image_id`.
 

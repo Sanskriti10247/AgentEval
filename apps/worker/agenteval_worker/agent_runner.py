@@ -1,6 +1,7 @@
 """AgentRunner: one agent attempt, from agent version to finish_attempt fields.
 
     validate config (provider enabled, model priced, limits, tools)
+    check the evaluation's spending cap (max_cost_usd), if the run has one
     open the sandbox: a SandboxSession (task files copied, keepalive recorded),
         or a LocalSandbox session when the worker runs without Docker
     start a model session (system prompt + tool specs + task instructions)
@@ -32,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from agenteval_core.agent.context import AgentContext, CancelToken
 from agenteval_core.agent.events import SinkFailed
-from agenteval_core.agent.limits import AgentLimits
+from agenteval_core.agent.limits import AgentLimits, evaluation_budget_exhausted
 from agenteval_core.agent.pricing import ModelPrice, price_for
 from agenteval_core.agent.prompts import build_system_prompt
 from agenteval_core.agent.result import AgentResult
@@ -43,6 +44,7 @@ from agenteval_core.logging import get_logger
 from agenteval_core.models import AgentVersion, RunAttempt, Task
 from agenteval_core.providers.base import ModelProvider
 from agenteval_core.reliability.taxonomy import FailureReason, WorkspaceCapture
+from agenteval_core.repositories.batches import BatchRepository
 from agenteval_core.states import COMPLETED_OUTCOMES, FAILED_OUTCOMES, Outcome
 from agenteval_core.tools.base import ToolContext
 from agenteval_core.tools.registry import ToolSet
@@ -192,6 +194,15 @@ class AgentRunner:
             setup = self._prepare(task, version)
         except _SetupError as exc:
             return _failed(Outcome.INTERNAL_ERROR, str(exc), started, reason=exc.reason)
+        exhausted = await self._budget_exhausted(attempt)
+        if exhausted is not None:
+            log.warning("evaluation_budget_exhausted", detail=exhausted)
+            return _failed(
+                Outcome.INTERNAL_ERROR,
+                exhausted,
+                started,
+                reason=FailureReason.EVALUATION_BUDGET_EXHAUSTED,
+            )
 
         try:
             session = await asyncio.to_thread(self._open, task, attempt)
@@ -261,6 +272,21 @@ class AgentRunner:
         finally:
             # Shielded: the container must go even if this task is being cancelled.
             await asyncio.shield(asyncio.to_thread(session.close))
+
+    async def _budget_exhausted(self, attempt: RunAttempt) -> str | None:
+        """Why the run must not start its agent loop, or None. A run of an evaluation
+        with max_cost_usd starts only while the cost of all of that evaluation's
+        attempts so far is below it; a run already past this point is bounded by its
+        version's own per-attempt cap, so concurrent runs can overshoot the evaluation
+        cap by at most what they spend."""
+        async with self._sm() as s:
+            spend = await BatchRepository(s).evaluation_spend(attempt.run_id)
+        if spend is None:
+            return None
+        cap, spent = spend
+        if not evaluation_budget_exhausted(spent, cap):
+            return None
+        return f"evaluation budget exhausted: {spent} USD spent of max_cost_usd {cap}"
 
     @staticmethod
     def _wants_workspace(task: Task) -> bool:
