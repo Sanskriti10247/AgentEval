@@ -182,9 +182,11 @@ export function Section({
 export const Panel = Section;
 
 /** A strip of instrument readouts separated by hairlines. */
-export function Readouts({ children, className = "" }: { children: ReactNode; className?: string }) {
+const READOUT_COLS = { 2: "sm:grid-cols-2", 3: "sm:grid-cols-3", 4: "sm:grid-cols-4" } as const;
+
+export function Readouts({ children, className = "", cols = 4 }: { children: ReactNode; className?: string; cols?: 2 | 3 | 4 }) {
   return (
-    <dl className={`grid grid-cols-2 gap-px overflow-hidden border-y border-rule bg-rule sm:grid-cols-4 ${className}`}>
+    <dl className={`grid grid-cols-2 gap-px overflow-hidden border-y border-rule bg-rule ${READOUT_COLS[cols]} ${className}`}>
       {children}
     </dl>
   );
@@ -322,12 +324,17 @@ interface GateQuery {
   isError: boolean;
   error: unknown;
   refetch: () => unknown;
+  data?: unknown;
 }
 
-/** Loading / error handling shared by every data view. Renders children only with data. */
+/**
+ * Loading / error handling shared by every data view. Renders children only with data.
+ * A failed background refetch keeps the last good data on screen; views that poll say
+ * so themselves (see StaleBanner) rather than blanking the page.
+ */
 export function Gate({ query, children, loadingLabel }: { query: GateQuery; children: ReactNode; loadingLabel?: string }) {
   if (query.isLoading) return <Loading label={loadingLabel} />;
-  if (query.isError) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.isError && query.data === undefined) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   return <>{children}</>;
 }
 
@@ -436,6 +443,21 @@ export function KeyValue({ items, columns = 1 }: { items: [string, ReactNode][];
         </div>
       ))}
     </dl>
+  );
+}
+
+/** Provider "fake" is the built-in simulated model: no tokens are bought and costs are notional. */
+export const isSimulated = (provider: string | null | undefined) => provider === "fake";
+
+/** "Simulated" or "Real model", so a reader never mistakes a fake-model number for a real one. */
+export function ProviderMark({ provider, simulated }: { provider: string | null | undefined; simulated?: boolean }) {
+  const sim = simulated ?? isSimulated(provider);
+  return (
+    <Tag className={sim ? "text-muted" : "border-rule-strong text-ink"}>
+      <span title={sim ? "Fake model provider: deterministic, no real model calls, no spend" : `Calls ${provider ?? "a real provider"}; costs real money`}>
+        {sim ? "Simulated" : "Real model"}
+      </span>
+    </Tag>
   );
 }
 

@@ -28,6 +28,10 @@
   --tone-warn: #9a6a12;
   --tone-neutral: #7b8189;
   --tone-muted: #a3a8ae;
+
+  /* Two categorical chart hues, checked for colour-blind separation on --paper. */
+  --chart-1: #2c67a6;
+  --chart-2: #c4501a;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -52,6 +56,8 @@
     --tone-warn: #d1a24f;
     --tone-neutral: #8f9296;
     --tone-muted: #5d6065;
+    --chart-1: #5b8fd0;
+    --chart-2: #d9692f;
   }
 }
 
@@ -76,6 +82,8 @@
   --tone-warn: #d1a24f;
   --tone-neutral: #8f9296;
   --tone-muted: #5d6065;
+  --chart-1: #5b8fd0;
+  --chart-2: #d9692f;
 }
 
 @theme inline {
