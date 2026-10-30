@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AuthGate } from "@/components/auth-gate";
@@ -21,11 +21,15 @@ const PUBLIC_DEMO = {
 const olderVersion = { ...F.version, id: "b0000000-0000-4000-8000-000000000000", version: 1, model: "older-model" };
 const commandTask = { ...F.task, id: "c0000000-0000-4000-8000-000000000009", name: "echo-hello", task_type: "command", difficulty: "easy" };
 
+const estimate = (_u: URL, init?: RequestInit) => F.estimateFor(JSON.parse(String(init?.body)));
+
 const catalogue = {
   "/agents": { agents: [F.agent], next_after: null },
   [`/agents/${F.IDS.agent}/versions`]: [olderVersion, F.version],
   "/datasets": { datasets: [{ ...F.dataset, task_count: 5 }], next_after: null },
   "/tasks": { tasks: [F.task, commandTask], next_after: null },
+  "/providers": F.providers,
+  "/evaluations/estimate": estimate,
 };
 
 function postTo(calls: { url: URL; init?: RequestInit }[], path: string) {
@@ -135,6 +139,101 @@ describe("New evaluation", () => {
     expect(alert).toHaveTextContent(title);
     expect(alert).toHaveTextContent(detail);
     expect(push).not.toHaveBeenCalled();
+  });
+});
+
+describe("New evaluation: providers, estimate and budget", () => {
+  const withFake = {
+    ...catalogue,
+    [`/agents/${F.IDS.agent}/versions`]: [olderVersion, F.version, F.fakeVersion],
+  };
+
+  it("previews a simulated evaluation: no spend, no budget field", async () => {
+    const { calls } = mockApi({ ...PUBLIC_DEMO, ...withFake });
+    renderWithClient(<NewEvaluationView />);
+    await screen.findByRole("form", { name: "New evaluation" });
+    expect(screen.getByLabelText("Agent version")).toHaveValue(F.fakeVersion.id); // v3 is the latest
+    const preview = await screen.findByRole("group", { name: "Estimate" });
+    await waitFor(() => expect(preview).toHaveTextContent("$5.00 simulated, no real spend"));
+    expect(preview).toHaveTextContent("5 tasks × 1 repetitions = 5");
+    expect(preview).toHaveTextContent("at most 150");
+    expect(preview).not.toHaveTextContent("one at a time");
+    expect(screen.queryByLabelText("Budget (USD)")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Repetitions"), { target: { value: "2" } });
+    await waitFor(() => expect(preview).toHaveTextContent("at most 300"));
+    const asked = calls.filter((c) => c.url.pathname.endsWith("/evaluations/estimate")).at(-1)!;
+    expect(asked.init?.method).toBe("POST");
+    expect(JSON.parse(String(asked.init?.body))).toEqual({ agent_version_id: F.fakeVersion.id, dataset_id: F.IDS.dataset, repetitions: 2 });
+  });
+
+  it("previews a real-provider evaluation and sends the budget typed in", async () => {
+    push.mockClear();
+    const { calls } = mockApi({ ...PUBLIC_DEMO, ...withFake, "/evaluations": respond(202, F.evaluation) });
+    renderWithClient(<NewEvaluationView initialVersionId={F.IDS.version} />);
+    const budget = await screen.findByLabelText("Budget (USD)");
+    expect(budget).toHaveAttribute("placeholder", "2.00");
+    const preview = await screen.findByRole("group", { name: "Estimate" });
+    await waitFor(() => expect(preview).toHaveTextContent("$5.00 upper bound"));
+    expect(preview).toHaveTextContent("per-run cap $1.00");
+    expect(preview).toHaveTextContent("stops at $2.00 (server default)");
+    expect(preview).toHaveTextContent("one at a time per worker process");
+
+    await userEvent.type(budget, "abc");
+    await userEvent.click(screen.getByRole("button", { name: "Launch evaluation" }));
+    expect(await screen.findByText(/Enter an amount in dollars/)).toBeInTheDocument();
+    expect(postTo(calls, "/evaluations")).toBeUndefined();
+
+    await userEvent.clear(budget);
+    await userEvent.type(budget, "0.75");
+    expect(preview).toHaveTextContent("stops at $0.7500");
+    await userEvent.click(screen.getByRole("button", { name: "Launch evaluation" }));
+    await waitFor(() => expect(postTo(calls, "/evaluations")).toBeDefined());
+    expect(JSON.parse(String(postTo(calls, "/evaluations")!.init?.body))).toMatchObject({
+      agent_version_id: F.IDS.version,
+      max_cost_usd: "0.75",
+    });
+  });
+
+  it("says so when pricing is unknown", async () => {
+    mockApi({
+      ...PUBLIC_DEMO,
+      ...catalogue,
+      "/evaluations/estimate": (u: URL, init?: RequestInit) => ({ ...estimate(u, init), pricing_known: false, max_cost_usd: null, max_cost_usd_per_run: null }),
+    });
+    renderWithClient(<NewEvaluationView />);
+    const preview = await screen.findByRole("group", { name: "Estimate" });
+    await waitFor(() => expect(preview).toHaveTextContent("pricing unknown for claude-test-model"));
+  });
+
+  it("offers only versions whose provider this server runs, and explains the rest", async () => {
+    mockApi({ ...PUBLIC_DEMO, ...withFake, "/providers": F.providersFakeOnly });
+    renderWithClient(<NewEvaluationView initialVersionId={F.IDS.version} />);
+    const select = await screen.findByLabelText("Agent version");
+    expect(select).toHaveValue(F.fakeVersion.id);
+    expect(within(select).getAllByRole("option")).toHaveLength(1);
+    const note = screen.getByRole("note", { name: "Versions not offered" });
+    expect(note).toHaveTextContent("coder-agent v2");
+    expect(note).toHaveTextContent("Not enabled on this server (AGENTEVAL_ENABLE_ANTHROPIC_PROVIDER)");
+  });
+
+  it("explains when no version can run here", async () => {
+    mockApi({ ...PUBLIC_DEMO, ...catalogue, "/providers": F.providersFakeOnly });
+    renderWithClient(<NewEvaluationView />);
+    expect(await screen.findByText("No agent version can run here")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "New evaluation" })).not.toBeInTheDocument();
+  });
+
+  it("still works against an API without /providers or /evaluations/estimate", async () => {
+    const older: Record<string, unknown> = { ...catalogue };
+    delete older["/providers"];
+    delete older["/evaluations/estimate"];
+    mockApi({ ...PUBLIC_DEMO, ...older });
+    renderWithClient(<NewEvaluationView />);
+    const form = await screen.findByRole("form", { name: "New evaluation" });
+    expect(form).toHaveTextContent("This queues 5 runs");
+    await waitFor(() => expect(screen.queryByText(/Estimating/)).not.toBeInTheDocument());
+    expect(screen.queryByRole("group", { name: "Estimate" })).not.toBeInTheDocument();
   });
 });
 
