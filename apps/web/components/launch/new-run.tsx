@@ -29,7 +29,7 @@ export function NewRunView({ initialVersionId, initialTaskId }: { initialVersion
           </>
         }
         title="Start a run"
-        subtitle="One agent version on one task, once. Useful for watching a single trajectory unfold; to measure an agent, launch an evaluation instead."
+        subtitle="One agent version on one task, once. To measure an agent, launch an evaluation instead."
       />
       {caps.readOnly ? (
         <Notice tone="info" title="This deployment is read-only">

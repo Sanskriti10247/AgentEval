@@ -33,7 +33,6 @@ export function RunsView({ initial = {} }: { initial?: RunsInitialFilters }) {
   return (
     <>
       <PageHeader
-        eyebrow="Execution"
         title="Runs"
         subtitle={
           filtered ? (
@@ -42,7 +41,7 @@ export function RunsView({ initial = {} }: { initial?: RunsInitialFilters }) {
               <Link href="/runs">Show all runs</Link>
             </>
           ) : (
-            "Every run of a task by an agent, newest first, whether it came from an evaluation or was started on its own. Dead-letter runs are the FAILED ones that used up their retries or hit an error not worth retrying."
+            "Newest first, from evaluations and standalone launches. Dead-letter runs failed for good: retries used up or not worth retrying."
           )
         }
         actions={
@@ -57,7 +56,7 @@ export function RunsView({ initial = {} }: { initial?: RunsInitialFilters }) {
                 ))}
               </Select>
             </Field>
-            <label className="flex h-[30px] items-center gap-2 text-[13px] text-ink-2">
+            <label className="flex h-8 items-center gap-2 text-[13px] text-ink-2">
               <input type="checkbox" checked={deadLetter} onChange={(e) => setDeadLetter(e.target.checked)} />
               Dead-letter only
             </label>

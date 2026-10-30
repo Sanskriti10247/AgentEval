@@ -53,15 +53,12 @@ export function FormRow({
 export function NextSteps({ steps }: { steps: ReactNode[] }) {
   return (
     <aside className="text-[12.5px] leading-relaxed text-muted">
-      <div className="mb-2 border-b border-rule pb-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-muted">
+      <div className="mb-2 border-b border-rule pb-1.5 text-[13.5px] font-semibold text-ink">
         What happens next
       </div>
-      <ol className="space-y-2">
+      <ol className="list-decimal space-y-1.5 pl-4 marker:text-faint">
         {steps.map((s, i) => (
-          <li key={i} className="grid grid-cols-[1.5rem_1fr]">
-            <span className="font-mono text-[11px] text-faint">{String(i + 1).padStart(2, "0")}</span>
-            <span>{s}</span>
-          </li>
+          <li key={i}>{s}</li>
         ))}
       </ol>
     </aside>
