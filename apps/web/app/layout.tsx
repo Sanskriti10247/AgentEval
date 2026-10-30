@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import type { ReactNode } from "react";
 import { AuthGate } from "@/components/auth-gate";
 import { Nav } from "@/components/nav";
@@ -7,17 +7,17 @@ import { THEME_BOOT_SCRIPT } from "@/lib/theme-boot";
 import { Providers } from "./providers";
 import "./globals.css";
 
-// Self-hosted by next/font at build time: no request to Google from the reader's browser.
+// Variable fonts committed under app/fonts (SIL OFL), so builds never fetch from Google.
 // Hanken Grotesk for reading, JetBrains Mono for ids, numbers in tables and trajectories.
-const sans = Hanken_Grotesk({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
+const sans = localFont({
+  src: "./fonts/HankenGrotesk.ttf",
+  weight: "100 900",
   variable: "--font-ui",
   display: "swap",
 });
-const mono = JetBrains_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500"],
+const mono = localFont({
+  src: "./fonts/JetBrainsMono.ttf",
+  weight: "100 800",
   variable: "--font-data",
   display: "swap",
 });
