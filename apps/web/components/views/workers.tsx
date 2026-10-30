@@ -15,9 +15,8 @@ export function WorkersView() {
   return (
     <>
       <PageHeader
-        eyebrow="Execution"
         title="Workers"
-        subtitle={`${live} live of ${workers.length} listed. A worker counts as live while it has not stopped and its heartbeat is recent; a stale one has gone quiet without saying goodbye, and its runs get picked up by the others.`}
+        subtitle={`${live} live of ${workers.length} listed. Live means not stopped, with a recent heartbeat; a stale worker's runs are picked up by the others.`}
       />
       <Gate query={query}>
         {workers.length === 0 ? (

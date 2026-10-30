@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { IBM_Plex_Mono, IBM_Plex_Sans, IBM_Plex_Sans_Condensed } from "next/font/google";
+import localFont from "next/font/local";
 import type { ReactNode } from "react";
 import { AuthGate } from "@/components/auth-gate";
 import { Nav } from "@/components/nav";
@@ -7,23 +7,18 @@ import { THEME_BOOT_SCRIPT } from "@/lib/theme-boot";
 import { Providers } from "./providers";
 import "./globals.css";
 
-// Self-hosted by next/font at build time: no request to Google from the reader's browser.
-const sans = IBM_Plex_Sans({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  variable: "--font-plex-sans",
+// Variable fonts committed under app/fonts (SIL OFL), so builds never fetch from Google.
+// Hanken Grotesk for reading, JetBrains Mono for ids, numbers in tables and trajectories.
+const sans = localFont({
+  src: "./fonts/HankenGrotesk.ttf",
+  weight: "100 900",
+  variable: "--font-ui",
   display: "swap",
 });
-const mono = IBM_Plex_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500"],
-  variable: "--font-plex-mono",
-  display: "swap",
-});
-const condensed = IBM_Plex_Sans_Condensed({
-  subsets: ["latin"],
-  weight: ["500", "600"],
-  variable: "--font-plex-condensed",
+const mono = localFont({
+  src: "./fonts/JetBrainsMono.ttf",
+  weight: "100 800",
+  variable: "--font-data",
   display: "swap",
 });
 
@@ -34,8 +29,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f3f4f5" },
-    { media: "(prefers-color-scheme: dark)", color: "#161718" },
+    { media: "(prefers-color-scheme: light)", color: "#f6f5f1" },
+    { media: "(prefers-color-scheme: dark)", color: "#151413" },
   ],
 };
 
@@ -43,7 +38,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html
       lang="en"
-      className={`${sans.variable} ${mono.variable} ${condensed.variable}`}
+      className={`${sans.variable} ${mono.variable}`}
       suppressHydrationWarning
     >
       <head>
@@ -52,10 +47,13 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       </head>
       <body>
         <Providers>
+          <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:bg-surface focus:px-3 focus:py-2">
+            Skip to content
+          </a>
           <div className="min-h-screen md:flex">
             <Nav />
-            <main className="min-w-0 flex-1 px-4 pb-16 pt-5 sm:px-6 md:px-8 md:pt-7 lg:px-10">
-              <div className="mx-auto max-w-[1180px]">
+            <main id="main" className="min-w-0 flex-1 px-4 pb-16 pt-5 sm:px-6 md:px-8 md:pt-6 lg:px-10">
+              <div className="mx-auto max-w-[1240px]">
                 <AuthGate>{children}</AuthGate>
               </div>
             </main>

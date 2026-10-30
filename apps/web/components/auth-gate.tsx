@@ -44,7 +44,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 function Unreachable({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="mt-10 max-w-[34rem] space-y-4 md:mt-20">
-      <h1 className="font-display text-[26px] font-semibold leading-tight">The API is not answering</h1>
+      <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.015em]">The API is not answering</h1>
       <Notice title={`No response from ${apiBaseUrl()}/health`}>
         Either it is down, the address is wrong, or it does not allow requests from this site. The address comes
         from NEXT_PUBLIC_API_URL at build time, and the API must list this site in AGENTEVAL_CORS_ORIGINS.
@@ -70,8 +70,8 @@ export function KeyForm({ rejected }: { rejected: boolean }) {
   return (
     <form onSubmit={submit} aria-label="API key" className="mt-10 max-w-[30rem] space-y-5 md:mt-20">
       <div>
-        <div className="mb-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-faint">Sign in</div>
-        <h1 className="font-display text-[26px] font-semibold leading-tight">API key</h1>
+        <div className="mb-1.5 text-[12.5px] text-muted">Sign in</div>
+        <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.015em]">API key</h1>
       </div>
       {rejected ? (
         <Notice title="The API rejected the key">
@@ -91,7 +91,7 @@ export function KeyForm({ rejected }: { rejected: boolean }) {
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder="ae_…"
-          className="h-9 rounded-[3px] border border-rule-strong bg-surface px-2.5 font-mono text-[13px] text-ink"
+          className="h-9 rounded-[5px] border border-rule-strong bg-surface px-2.5 font-mono text-[13px] text-ink"
         />
       </label>
       <Button type="submit" variant="primary" disabled={!value.trim()}>
@@ -103,7 +103,7 @@ export function KeyForm({ rejected }: { rejected: boolean }) {
           out, forgets it.
         </p>
         <p>Create one on the API host:</p>
-        <pre className="overflow-x-auto rounded-[3px] bg-sunken px-3 py-2 font-mono text-[11.5px] text-ink-2">
+        <pre className="overflow-x-auto rounded-[5px] bg-sunken px-3 py-2 font-mono text-[11.5px] text-ink-2">
           docker compose exec api python -m agenteval_api.keys create --name dashboard --scopes read,write
         </pre>
         <p>A read-scoped key can browse. Launching, cancelling and replaying need the write scope.</p>

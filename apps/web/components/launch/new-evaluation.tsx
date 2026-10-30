@@ -72,7 +72,7 @@ export function NewEvaluationView({ initialVersionId }: { initialVersionId?: str
           </>
         }
         title="New evaluation"
-        subtitle="Run one agent version over every task of a frozen dataset and grade each attempt. The numbers you get are comparable with any other evaluation on the same dataset."
+        subtitle="One agent version over every task of a frozen dataset, each attempt graded. Comparable with any evaluation on the same dataset."
       />
       {caps.readOnly ? (
         <Notice tone="info" title="This deployment is read-only">
@@ -128,7 +128,7 @@ function UnavailableNote({ items }: { items: Availability["unavailable"] }) {
   if (items.length === 0) return null;
   return (
     <div className="mt-4 text-[12.5px] leading-relaxed text-muted" role="note" aria-label="Versions not offered">
-      <div className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">Not offered here</div>
+      <div className="mb-1 text-[12px] text-muted">Not offered here</div>
       <ul className="space-y-0.5">
         {items.map(({ version: v, reason }) => (
           <li key={v.versionId}>

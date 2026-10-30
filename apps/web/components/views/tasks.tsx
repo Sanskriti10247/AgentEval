@@ -40,9 +40,8 @@ export function TasksView() {
   return (
     <>
       <PageHeader
-        eyebrow="Registry"
         title="Tasks"
-        subtitle="The units an agent is measured on. The API never hands out a task's instructions, files or hidden checks here, so a dashboard cannot leak the answers."
+        subtitle="What agents are measured on. Instructions, files and hidden checks are never served here."
         actions={
           <>
             <Field label="Dataset">

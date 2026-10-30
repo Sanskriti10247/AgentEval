@@ -29,7 +29,7 @@ export function Wordmark({ className = "" }: { className?: string }) {
   return (
     <span className={`inline-flex items-center gap-2 text-ink ${className}`}>
       <Mark />
-      <span className="font-display text-[17px] font-semibold leading-none tracking-[-0.01em]">
+      <span className="text-[16px] font-semibold leading-none tracking-[-0.015em]">
         Agent<span className="text-muted">Eval</span>
       </span>
     </span>

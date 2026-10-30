@@ -40,9 +40,8 @@ export function AgentsView() {
   return (
     <>
       <PageHeader
-        eyebrow="Registry"
         title="Agents"
-        subtitle="An agent is a name for a series of immutable versions. Changing the model, prompt, tools or limits makes a new version, so results always point at exactly what ran."
+        subtitle="Each agent is a series of immutable versions; results always point at the exact version that ran."
       />
       <Gate query={query}>
         {agents.length === 0 ? (
@@ -191,7 +190,7 @@ function VersionSpec({ v, latest }: { v: AgentVersionRead; latest: boolean }) {
         <div className="font-mono text-[20px] leading-none text-ink" title={v.id}>
           v{v.version}
         </div>
-        {latest ? <div className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-accent sm:mt-1.5">latest</div> : null}
+        {latest ? <div className="text-[11.5px] font-medium text-accent sm:mt-1.5">latest</div> : null}
       </div>
       <dl className="grid min-w-0 gap-x-8 gap-y-3 text-[13px] md:grid-cols-2">
         <Spec label="Model">
@@ -219,7 +218,7 @@ function VersionSpec({ v, latest }: { v: AgentVersionRead; latest: boolean }) {
           <div className="md:col-span-2">
             <details>
               <summary className="cursor-pointer text-[12px] text-muted hover:text-ink">System prompt ({v.system_prompt.length} characters)</summary>
-              <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-[3px] bg-sunken p-3 font-mono text-[11.5px] leading-relaxed text-ink-2">
+              <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-[5px] bg-sunken p-3 font-mono text-[11.5px] leading-relaxed text-ink-2">
                 {v.system_prompt}
               </pre>
             </details>
@@ -333,7 +332,7 @@ function VersionDiff({ versions }: { versions: AgentVersionRead[] }) {
 function Spec({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">{label}</dt>
+      <dt className="text-[12px] text-muted">{label}</dt>
       <dd className="mt-0.5 min-w-0 break-words">{children}</dd>
     </div>
   );

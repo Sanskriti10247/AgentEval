@@ -11,8 +11,11 @@ import {
   Field,
   Gate,
   IdLink,
+  Live,
   Loading,
   Meter,
+  Metric,
+  MetricGroup,
   Notice,
   Num,
   PageHeader,
@@ -72,9 +75,8 @@ export function DashboardView() {
   return (
     <>
       <PageHeader
-        eyebrow="Overview"
         title="Dashboard"
-        subtitle="How the fleet has been doing. Rates, latency and cost cover runs that finished in the window you pick; queue and worker counts are as of now, refreshed every ten seconds."
+        subtitle="Rates, latency and cost cover runs that finished in the window. Queue and workers are live."
         actions={
           <>
             <Field label="Window">
@@ -97,8 +99,7 @@ export function DashboardView() {
       <Gate query={query}>
         {o ? (
           <div className={`space-y-10 ${query.isPlaceholderData ? "opacity-60" : ""}`}>
-            <WindowKpis o={o} windowLabel={windowLabel} />
-            <NowKpis o={o} />
+            <WindowKpis o={o} />
             <ActivitySection windowH={windowH} windowLabel={windowLabel} />
 
             <Section title="Runs by status" note={`${formatInt(o.runs.total)} runs, all time`}>
@@ -125,8 +126,8 @@ export function DashboardView() {
                           </Td>
                           <Td className="text-right font-mono tabular-nums">{formatInt(n)}</Td>
                           <Td>
-                            <div className="flex items-center gap-3">
-                              <div className="relative h-[3px] flex-1 bg-sunken" aria-hidden="true">
+                            <div className="flex items-baseline gap-3">
+                              <div className="relative h-[3px] flex-1 self-center overflow-hidden rounded-full bg-sunken" aria-hidden="true">
                                 <div className="absolute inset-y-0 left-0" style={{ width: `${share * 100}%`, background: RUN_STATUS_COLOR[s] }} />
                               </div>
                               <span className="w-12 text-right font-mono text-[11.5px] text-faint tabular-nums">{formatPercent(share)}</span>
@@ -146,103 +147,104 @@ export function DashboardView() {
   );
 }
 
-function WindowKpis({ o, windowLabel }: { o: StatsOverview; windowLabel: string }) {
+function WindowKpis({ o }: { o: StatsOverview }) {
   const r = o.rates;
   const lat = o.run_latency_ms;
   const cost = splitCost(o.usage);
+  const oldest = o.queue.oldest_queued_s;
+  const workers = o.workers;
+  const p50 = <Metric label="Latency p50" value={formatDuration(lat.p50)} hint={`n = ${formatInt(lat.count)} finished runs`} />;
+  const tokens = (
+    <Metric
+      label="Tokens in / out"
+      value={`${formatCompact(o.usage.tokens_in)} / ${formatCompact(o.usage.tokens_out)}`}
+      hint={`${formatInt(o.usage.tokens_in)} in, ${formatInt(o.usage.tokens_out)} out`}
+    />
+  );
   return (
-    <Section title={`In the ${windowLabel}`}>
-      <div className="space-y-px">
-        <Readouts>
+    <div className="space-y-8">
+      <Readouts>
+        <Stat
+          label="Success rate"
+          value={formatPercent(o.success.success_rate)}
+          meter={<Meter value={o.success.success_rate} tone="good" />}
+          hint={`${o.success.passed} of ${o.success.graded} graded attempts passed`}
+        />
+        {r ? (
+          <Stat label="Completion rate" value={formatPercent(r.completion_rate)} hint={ofHint(r.completed, r.finished, "finished runs completed")} />
+        ) : (
+          <Stat label="Latency p50" value={formatDuration(lat.p50)} hint={`over ${lat.count} finished runs`} />
+        )}
+        <Stat label="Latency p95" value={formatDuration(lat.p95)} hint={r ? "nearest rank" : "the slow tail"} />
+        {cost ? (
+          <Stat label="Real cost" value={formatCost(cost.real)} hint={`${formatInt(cost.realAttempts)} attempts on real providers`} />
+        ) : (
           <Stat
-            label="Success rate"
-            value={formatPercent(o.success.success_rate)}
-            meter={<Meter value={o.success.success_rate} tone="good" />}
-            hint={`${o.success.passed} of ${o.success.graded} graded attempts passed`}
+            label="Total cost"
+            value={formatCost(o.usage.cost_usd)}
+            hint={r ? `${o.usage.attempts} attempts; real and simulated not split` : `${o.usage.attempts} attempts`}
           />
-          {r ? (
-            <>
-              <Stat label="Completion rate" value={formatPercent(r.completion_rate)} hint={ofHint(r.completed, r.finished, "finished runs completed")} />
-              <Stat label="Failure rate" value={formatPercent(r.failure_rate)} hint={ofHint(r.failed, r.finished, "finished runs failed")} />
-              <Stat
+        )}
+      </Readouts>
+
+      <div className="grid gap-x-8 gap-y-7 md:grid-cols-2 xl:grid-cols-4">
+        {r ? (
+          <>
+            <MetricGroup title="Reliability">
+              <Metric label="Failure rate" value={formatPercent(r.failure_rate)} hint={ofHint(r.failed, r.finished, "finished runs failed")} />
+              <Metric
                 label="Timeouts / retries"
                 value={`${formatPercent(r.timeout_rate)} / ${formatPercent(r.retry_rate)}`}
                 hint={r.finished ? `${r.timed_out} timed out, ${r.retried} needed a retry, of ${r.finished}` : "no finished runs yet"}
               />
-            </>
-          ) : (
-            <>
-              <Stat label="Latency p50" value={formatDuration(lat.p50)} hint={`over ${lat.count} finished runs`} />
-              <Stat label="Latency p95" value={formatDuration(lat.p95)} hint="the slow tail" />
-              <Stat label="Total cost" value={formatCost(o.usage.cost_usd)} hint={`${o.usage.attempts} attempts`} />
-            </>
-          )}
-        </Readouts>
-        {r ? (
-          <Readouts>
-            <Stat label="Latency p50" value={formatDuration(lat.p50)} hint={`n = ${formatInt(lat.count)} finished runs`} />
-            <Stat label="Latency p95" value={formatDuration(lat.p95)} hint="nearest rank" />
-            <Stat label="Latency p99" value={formatDuration(lat.p99)} hint="nearest rank" />
-            <Stat label="Latency mean" value={formatDuration(lat.mean)} hint="pulled up by the slow tail" />
-          </Readouts>
+              <Metric label="Attempts" value={formatInt(o.usage.attempts)} hint="including retries" />
+            </MetricGroup>
+            <MetricGroup title="Latency">
+              {p50}
+              <Metric label="Latency p99" value={formatDuration(lat.p99)} hint="nearest rank" />
+              <Metric label="Latency mean" value={formatDuration(lat.mean)} />
+            </MetricGroup>
+          </>
         ) : null}
-        <Readouts cols={cost ? 4 : r ? 3 : 2}>
+        <MetricGroup title="Usage">
           {cost ? (
-            <>
-              <Stat label="Real cost" value={formatCost(cost.real)} hint={`${formatInt(cost.realAttempts)} attempts on real providers`} />
-              <Stat
-                label="Simulated cost"
-                value={formatCost(cost.simulated)}
-                hint={`${formatInt(cost.simulatedAttempts)} fake-model attempts; priced for comparison, nothing was spent`}
-              />
-            </>
-          ) : r ? (
-            <Stat label="Total cost" value={formatCost(o.usage.cost_usd)} hint={`${o.usage.attempts} attempts; this API does not split real from simulated`} />
+            <Metric
+              label="Simulated cost"
+              value={formatCost(cost.simulated)}
+              hint={`${formatInt(cost.simulatedAttempts)} fake-model attempts; nothing was spent`}
+            />
           ) : null}
-          <Stat
-            label="Tokens in / out"
-            value={`${formatCompact(o.usage.tokens_in)} / ${formatCompact(o.usage.tokens_out)}`}
-            hint={`${formatInt(o.usage.tokens_in)} in, ${formatInt(o.usage.tokens_out)} out`}
+          {tokens}
+          {r ? null : <Metric label="Attempts" value={formatInt(o.usage.attempts)} hint="including retries" />}
+        </MetricGroup>
+        <MetricGroup title="Right now" aside={<Live />}>
+          <Metric
+            label="Queue depth"
+            value={formatInt(o.queue.total)}
+            hint={`${o.queue.runs_queued} queued, ${o.queue.runs_retrying} retrying, ${o.queue.evaluations_pending} grading`}
           />
-          <Stat label="Attempts" value={formatInt(o.usage.attempts)} hint="including retries" />
-        </Readouts>
+          <Metric
+            label="Oldest queued run"
+            value={oldest === undefined ? "–" : oldest === null ? "none" : formatAge(oldest)}
+            hint={oldest === undefined ? "not reported by this API" : undefined}
+          />
+          <Metric
+            label="Workers alive"
+            value={formatInt(workers?.alive ?? o.active_workers)}
+            hint={
+              workers
+                ? workers.stale
+                  ? `${workers.stale} stale: not stopped, but no recent heartbeat`
+                  : undefined
+                : o.active_workers
+                  ? undefined
+                  : "nothing is picking up work"
+            }
+          />
+          <Metric label="Evaluations" value={formatInt(o.evaluations.total)} hint={o.evaluations.cancel_requested ? `${o.evaluations.cancel_requested} cancelled` : undefined} />
+        </MetricGroup>
       </div>
-    </Section>
-  );
-}
-
-function NowKpis({ o }: { o: StatsOverview }) {
-  const oldest = o.queue.oldest_queued_s;
-  const workers = o.workers;
-  return (
-    <Section title="Right now">
-      <Readouts>
-        <Stat
-          label="Queue depth"
-          value={formatInt(o.queue.total)}
-          hint={`${o.queue.runs_queued} queued, ${o.queue.runs_retrying} retrying, ${o.queue.evaluations_pending} grading`}
-        />
-        <Stat
-          label="Oldest queued run"
-          value={oldest === undefined ? "–" : oldest === null ? "none" : formatAge(oldest)}
-          hint={oldest === undefined ? "not reported by this API" : oldest === null ? "nothing is waiting" : "time since it was queued"}
-        />
-        <Stat
-          label="Workers alive"
-          value={formatInt(workers?.alive ?? o.active_workers)}
-          hint={
-            workers
-              ? workers.stale
-                ? `${workers.stale} stale: not stopped, but no recent heartbeat`
-                : "none stale"
-              : o.active_workers
-                ? "with a recent heartbeat"
-                : "nothing is picking up work"
-          }
-        />
-        <Stat label="Evaluations" value={formatInt(o.evaluations.total)} hint={`${o.evaluations.cancel_requested} cancelled`} />
-      </Readouts>
-    </Section>
+    </div>
   );
 }
 
@@ -280,7 +282,7 @@ function ActivitySection({ windowH, windowLabel }: { windowH: number; windowLabe
   const graded = a ? a.evaluations.reduce((n, e) => n + e.graded, 0) : 0;
 
   return (
-    <div className={`grid gap-x-10 gap-y-10 xl:grid-cols-2 ${query.isPlaceholderData ? "opacity-60" : ""}`}>
+    <div className={`grid gap-x-10 gap-y-10 lg:grid-cols-2 ${query.isPlaceholderData ? "opacity-60" : ""}`}>
       <Section
         title="Finished runs over time"
         note={a && finished ? `${formatInt(finished)} runs, one bar per ${bucketWord(a.bucket_s)}, UTC` : undefined}
@@ -311,7 +313,7 @@ function ActivitySection({ windowH, windowLabel }: { windowH: number; windowLabe
 
 const ACTIVITY_SERIES = [
   { key: "completed", label: "completed", color: "var(--chart-1)" },
-  { key: "failed", label: "failed", color: "var(--chart-2)" },
+  { key: "failed", label: "failed", color: "var(--tone-bad)" },
   { key: "cancelled", label: "cancelled", color: "var(--tone-muted)" },
 ] as const;
 
@@ -322,7 +324,7 @@ export function ActivityChart({ buckets, bucketS }: { buckets: ActivityBucket[];
       <ChartLegend items={ACTIVITY_SERIES.map((s) => ({ color: s.color, label: s.label }))} />
       <div style={{ height: 220 }} aria-hidden="true">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={data} margin={{ top: 4, right: 8, bottom: 18, left: 4 }} barCategoryGap="18%">
+          <BarChart data={data} margin={{ top: 6, right: 4, bottom: 0, left: -8 }} barCategoryGap="18%">
             <CartesianGrid stroke={GRID_STROKE} vertical={false} />
             <XAxis
               dataKey="label"
@@ -330,15 +332,13 @@ export function ActivityChart({ buckets, bucketS }: { buckets: ActivityBucket[];
               tick={AXIS_TICK}
               tickLine={false}
               minTickGap={18}
-              label={{ value: "Finished at (UTC)", position: "insideBottom", offset: -12, style: AXIS_LABEL }}
             />
             <YAxis
               allowDecimals={false}
-              width={44}
+              width={40}
               stroke={AXIS_STROKE}
               tick={AXIS_TICK}
               tickLine={false}
-              label={{ value: "Runs", angle: -90, position: "insideLeft", offset: 12, style: AXIS_LABEL }}
             />
             <Tooltip
               cursor={{ fill: "var(--sunken)" }}
@@ -428,24 +428,24 @@ export function RecentEvaluationsChart({ evaluations }: { evaluations: ActivityE
       />
       <div style={{ height: 220 }} aria-hidden="true">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={data} margin={{ top: 4, right: 8, bottom: 18, left: 4 }} barCategoryGap="18%">
+          <BarChart data={data} margin={{ top: 6, right: 4, bottom: 0, left: -8 }} barCategoryGap="18%">
             <CartesianGrid stroke={GRID_STROKE} vertical={false} />
             <XAxis
               dataKey="id"
               tick={false}
               stroke={AXIS_STROKE}
               tickLine={false}
-              label={{ value: "Evaluations, oldest to newest", position: "insideBottom", offset: -4, style: AXIS_LABEL }}
+              height={22}
+              label={{ value: "oldest → newest", position: "insideBottom", offset: 2, style: AXIS_LABEL }}
             />
             <YAxis
               domain={[0, 1]}
               ticks={[0, 0.25, 0.5, 0.75, 1]}
               tickFormatter={(v: number) => `${Math.round(v * 100)}%`}
-              width={44}
+              width={40}
               stroke={AXIS_STROKE}
               tick={AXIS_TICK}
               tickLine={false}
-              label={{ value: "Success", angle: -90, position: "insideLeft", offset: 12, style: AXIS_LABEL }}
             />
             <Tooltip
               cursor={{ fill: "var(--sunken)" }}
@@ -466,7 +466,7 @@ export function RecentEvaluationsChart({ evaluations }: { evaluations: ActivityE
                 );
               }}
             />
-            <Bar dataKey="rate" name="success" maxBarSize={24} radius={[4, 4, 0, 0]} isAnimationActive={false} onClick={open} cursor="pointer">
+            <Bar dataKey="rate" name="success" maxBarSize={24} radius={[2, 2, 0, 0]} isAnimationActive={false} onClick={open} cursor="pointer">
               {data.map((e) => (
                 <Cell key={e.id} fill={e.simulated ? SIM_COLOR : REAL_COLOR} />
               ))}
@@ -519,7 +519,9 @@ export function StatusStrip({ byStatus, total, height = 6 }: { byStatus: Record<
       {total
         ? RUN_STATUSES.map((s) => {
             const n = byStatus[s] ?? 0;
-            return n ? <div key={s} title={`${s}: ${n}`} style={{ flexGrow: n, background: RUN_STATUS_COLOR[s] }} /> : null;
+            return n ? (
+                <div key={s} title={`${s}: ${n}`} className="transition-[flex-grow] duration-500" style={{ flexGrow: n, background: RUN_STATUS_COLOR[s] }} />
+              ) : null;
           })
         : null}
     </div>
