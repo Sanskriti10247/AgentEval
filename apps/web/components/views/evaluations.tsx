@@ -17,6 +17,8 @@ import {
   Live,
   LoadMore,
   Meter,
+  Metric,
+  MetricGroup,
   Mono,
   Notice,
   Num,
@@ -197,9 +199,8 @@ export function EvaluationsView() {
   return (
     <>
       <PageHeader
-        eyebrow="Benchmarks"
         title="Evaluations"
-        subtitle="Each evaluation runs one agent version over every task of a frozen dataset, a set number of times, and grades every attempt. Tick two to five rows on the same dataset to compare them."
+        subtitle="One agent version over every task of a frozen dataset, graded per attempt. Tick 2 to 5 rows on the same dataset to compare."
         actions={
           <>
             <Button disabled={!canCompare} onClick={() => router.push(`/evaluations/compare?ids=${selected.join(",")}`)}>
@@ -347,28 +348,31 @@ export function EvaluationDetailView({ id }: { id: string }) {
                     <Stat
                       label={`Cost / task${costLabel}`}
                       value={formatCost(s.cost_usd.mean_per_attempt)}
-                      hint={simulated ? `${formatCost(s.cost_usd.total)} total, priced from the fake model's table; nothing was spent` : `${formatCost(s.cost_usd.total)} total`}
+                      hint={simulated ? `${formatCost(s.cost_usd.total)} total, at list price; nothing was spent` : `${formatCost(s.cost_usd.total)} total`}
                     />
                   </Readouts>
-                  <LatencyReadouts latency={s.latency_ms} />
-                  {s.rates ? <RateReadouts rates={s.rates} /> : null}
-                  <Readouts>
-                    <Stat label="Platform failures" value={formatInt(s.platform_failures)} hint="sandbox or model trouble; not counted against the agent" />
-                    <Stat label="Evaluation errors" value={formatInt(s.evaluation_errors)} hint="the grader itself failed" />
-                    <Stat label="Ungraded / in progress" value={`${s.ungraded} / ${s.in_progress}`} />
-                    <Stat label="Tokens in / out" value={`${formatInt(s.tokens.tokens_in)} / ${formatInt(s.tokens.tokens_out)}`} />
-                  </Readouts>
+                  <div className="grid gap-x-8 gap-y-7 md:grid-cols-2 xl:grid-cols-3">
+                    <LatencyGroup latency={s.latency_ms} />
+                    {s.rates ? <RateGroup rates={s.rates} /> : null}
+                    <MetricGroup title="Grading">
+                      <Metric label="Platform failures" value={formatInt(s.platform_failures)} hint="sandbox or model trouble; not counted against the agent" />
+                      <Metric label="Evaluation errors" value={formatInt(s.evaluation_errors)} hint="the grader itself failed" />
+                      <Metric label="Ungraded / in progress" value={`${s.ungraded} / ${s.in_progress}`} />
+                      <Metric label="Tokens in / out" value={`${formatInt(s.tokens.tokens_in)} / ${formatInt(s.tokens.tokens_out)}`} />
+                    </MetricGroup>
+                  </div>
                 </div>
               ) : null}
             </Gate>
 
+            <div className="grid gap-x-10 gap-y-10 lg:grid-cols-2">
             <Section title="What ran">
               <ContextBlock e={e} info={info} dataset={dataset} spent={s?.cost_usd.total ?? null} simulated={simulated} />
             </Section>
 
             <Section title="Progress" note={`${progressSummary(e).done} of ${e.progress.runs_total} runs finished`}>
               <ProgressBar e={e} />
-              <div className="mt-5 grid gap-x-10 gap-y-6 md:grid-cols-2">
+              <div className="mt-5 grid gap-x-8 gap-y-6 sm:grid-cols-2">
                 <Table caption="Runs by status">
                   <thead>
                     <tr>
@@ -382,7 +386,7 @@ export function EvaluationDetailView({ id }: { id: string }) {
                         <Td>
                           <RunStatusBadge status={st} />
                         </Td>
-                        <Num>{e.progress.runs_by_status[st] ?? 0}</Num>
+                        <Num className={e.progress.runs_by_status[st] ? "" : "text-faint"}>{e.progress.runs_by_status[st] ?? 0}</Num>
                       </tr>
                     ))}
                   </tbody>
@@ -398,7 +402,7 @@ export function EvaluationDetailView({ id }: { id: string }) {
                     {Object.entries(e.progress.evaluations_by_status).map(([k, v]) => (
                       <tr key={k}>
                         <Td className="font-mono text-[12px] text-ink-2">{k}</Td>
-                        <Num>{v}</Num>
+                        <Num className={v ? "" : "text-faint"}>{v}</Num>
                       </tr>
                     ))}
                     <tr>
@@ -409,7 +413,9 @@ export function EvaluationDetailView({ id }: { id: string }) {
                 </Table>
               </div>
             </Section>
+            </div>
 
+            <div className="grid gap-x-10 gap-y-10 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
             {s && s.per_task.length > 0 ? (
               <Section title="Per task">
                 <Table caption="Per-task results">
@@ -448,8 +454,8 @@ export function EvaluationDetailView({ id }: { id: string }) {
             ) : null}
 
             {s && categoryTotal > 0 ? (
-              <Section title="Outcomes by category" note="every graded attempt lands in exactly one category">
-                <div className="max-w-2xl">
+              <Section title="Outcomes by category" note="one per graded attempt">
+                <div>
                   <Table caption="Failure categories">
                     <thead>
                       <tr>
@@ -479,8 +485,9 @@ export function EvaluationDetailView({ id }: { id: string }) {
                 </div>
               </Section>
             ) : null}
+            </div>
 
-            <Section title="Results" note={live ? "updates every five seconds while runs are in flight" : undefined}>
+            <Section title="Results" note={live ? <Live label="updating" /> : rows.length ? `${rows.length} runs` : undefined}>
               <Gate query={results} loadingLabel="Loading results">
                 {rows.length === 0 ? (
                   <Empty>No runs in this evaluation.</Empty>
@@ -562,28 +569,28 @@ export function EvaluationDetailView({ id }: { id: string }) {
   );
 }
 
-function LatencyReadouts({ latency }: { latency: EvaluationSummary["latency_ms"] }) {
+function LatencyGroup({ latency }: { latency: EvaluationSummary["latency_ms"] }) {
   const n = latency?.count;
   const nHint = n !== undefined ? `n = ${formatInt(n)} attempts` : undefined;
   return (
-    <Readouts>
-      <Stat label="Latency p50" value={formatDuration(latency?.p50)} hint={latency ? nHint : "no finished attempts yet"} />
-      <Stat label="Latency p95" value={formatDuration(latency?.p95)} hint="nearest rank" />
-      <Stat label="Latency p99" value={formatDuration(latency?.p99)} hint={latency && latency.p99 === undefined ? "not reported by this API" : "nearest rank"} />
-      <Stat label="Latency mean" value={formatDuration(latency?.mean)} hint={latency && latency.mean === undefined ? "not reported by this API" : undefined} />
-    </Readouts>
+    <MetricGroup title="Latency">
+      <Metric label="Latency p50" value={formatDuration(latency?.p50)} hint={latency ? nHint : "no finished attempts yet"} />
+      <Metric label="Latency p95" value={formatDuration(latency?.p95)} />
+      <Metric label="Latency p99" value={formatDuration(latency?.p99)} hint={latency && latency.p99 === undefined ? "not reported by this API" : undefined} />
+      <Metric label="Latency mean" value={formatDuration(latency?.mean)} hint={latency && latency.mean === undefined ? "not reported by this API" : undefined} />
+    </MetricGroup>
   );
 }
 
-function RateReadouts({ rates: r }: { rates: SummaryRates }) {
+function RateGroup({ rates: r }: { rates: SummaryRates }) {
   const of = (n: number) => (r.finished ? `${n} of ${r.finished} finished runs` : "no finished runs yet");
   return (
-    <Readouts>
-      <Stat label="Completion rate" value={formatPercent(r.completion_rate)} hint={`${of(r.completed)}; ${r.scheduled} scheduled`} />
-      <Stat label="Failure rate" value={formatPercent(r.failure_rate)} hint={of(r.failed)} />
-      <Stat label="Timeout rate" value={formatPercent(r.timeout_rate)} hint={of(r.timed_out)} />
-      <Stat label="Retry rate" value={formatPercent(r.retry_rate)} hint={`${of(r.retried)} needed more than one attempt`} />
-    </Readouts>
+    <MetricGroup title="Reliability">
+      <Metric label="Completion rate" value={formatPercent(r.completion_rate)} hint={`${of(r.completed)}; ${r.scheduled} scheduled`} />
+      <Metric label="Failure rate" value={formatPercent(r.failure_rate)} hint={of(r.failed)} />
+      <Metric label="Timeout rate" value={formatPercent(r.timeout_rate)} hint={of(r.timed_out)} />
+      <Metric label="Retry rate" value={formatPercent(r.retry_rate)} hint={r.finished ? `${of(r.retried)} needed more than one attempt` : of(r.retried)} />
+    </MetricGroup>
   );
 }
 
@@ -660,7 +667,7 @@ function ContextBlock({
       </span>,
     ],
   ];
-  return <KeyValue columns={2} items={items} />;
+  return <KeyValue items={items} />;
 }
 
 function ProgressBar({ e }: { e: EvaluationRead }) {
@@ -703,7 +710,7 @@ export function CompareView({ ids }: { ids: string[] }) {
   if (ids.length < 2) {
     return (
       <>
-        <PageHeader eyebrow="Benchmarks" title="Compare evaluations" />
+        <PageHeader eyebrow={<Link href="/evaluations">Evaluations</Link>} title="Compare evaluations" />
         <Empty>
           Pick 2 to 5 evaluations on the <Link href="/evaluations">Evaluations</Link> page, or open
           /evaluations/compare?ids=a,b,c. They need the same dataset and scoring settings, otherwise the numbers would

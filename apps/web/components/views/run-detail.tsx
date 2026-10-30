@@ -19,8 +19,10 @@ import {
   Num,
   PageHeader,
   ProviderMark,
+  Readouts,
   RunStatusBadge,
   Section,
+  Stat,
   StatusMark,
   Table,
   Tag,
@@ -156,7 +158,7 @@ export function RunDetailView({ id }: { id: string }) {
                     {cancel.isPending ? "Cancelling…" : "Cancel"}
                   </Button>
                   <div className="inline-flex">
-                    <label className="inline-flex h-[30px] items-center gap-1 rounded-l-[3px] border border-r-0 border-rule-strong bg-surface pl-2 font-mono text-[11.5px] text-faint">
+                    <label className="inline-flex h-8 items-center gap-1 rounded-l-[5px] border border-r-0 border-rule-strong bg-surface pl-2 font-mono text-[11.5px] text-faint">
                       +
                       <input
                         type="number"
@@ -193,85 +195,78 @@ export function RunDetailView({ id }: { id: string }) {
             {cancel.isError ? <WriteError error={cancel.error} /> : null}
             {replay.isError ? <WriteError error={replay.error} /> : null}
 
-            <Section title="Run">
-              <KeyValue
-                columns={2}
-                items={[
-                  ["Status", <RunStatusBadge key="s" status={r.status} />],
-                  ["Outcome", <Mono key="o" className="text-[12.5px]">{r.outcome ?? "–"}</Mono>],
-                  [
-                    "Attempts",
-                    <Mono key="b" className="text-[12.5px]">
-                      {r.attempt_count} used of {r.max_attempts}
-                      {r.replay_count ? `, replayed ${r.replay_count}×` : ""}
-                    </Mono>,
-                  ],
-                  [
-                    live ? "Elapsed" : "Wall time",
-                    <Mono key="d" className="text-[12.5px]">
-                      {r.started_at ? formatDuration(runDuration) : live ? "not started" : "–"}
-                    </Mono>,
-                  ],
-                  ["Dead letter", r.dead_letter_reason ? <StatusMark key="dl" tone="bad">{humanize(r.dead_letter_reason)}</StatusMark> : "–"],
-                  ["Failure reason", humanize(r.failure_reason)],
-                  ...(r.error_message ? ([["Error", <span key="e" className="text-bad">{r.error_message}</span>]] as [string, ReactNode][]) : []),
-                  ...(r.next_attempt_at
-                    ? ([
-                        [
-                          "Next attempt",
-                          <span key="n">
-                            <Timestamp value={formatTimestamp(r.next_attempt_at)} />
-                            {live ? <NextAttemptIn at={r.next_attempt_at} now={now} /> : null}
-                          </span>,
-                        ],
-                      ] as [string, ReactNode][])
-                    : []),
-                  ...(r.cancel_requested_at
-                    ? ([
-                        [
-                          "Cancel requested",
-                          <span key="c">
-                            <Timestamp value={formatTimestamp(r.cancel_requested_at)} /> <span className="text-faint">({r.cancel_reason})</span>
-                          </span>,
-                        ],
-                      ] as [string, ReactNode][])
-                    : []),
-                  ["Run id", <Mono key="id" className="break-all text-[12px] text-ink-2">{r.id}</Mono>],
-                  ["Task", <IdLink key="t" id={r.task_id} label={task.data ? `${task.data.name} · ${shortId(r.task_id)}` : r.task_id} />],
-                  ["Worker", <Mono key="w" className="text-[12.5px]">{r.worker_id ?? "–"}</Mono>],
-                  ["Created", <Timestamp key="cr" value={formatTimestamp(r.created_at)} />],
-                  ["Started", <Timestamp key="st" value={formatTimestamp(r.started_at)} />],
-                  ["Finished", <Timestamp key="f" value={formatTimestamp(r.finished_at)} />],
-                ]}
+            <Readouts cols={3}>
+              <Stat label="Outcome" value={<span className="font-mono text-[15px] sm:text-[17px]">{r.outcome ?? "–"}</span>} />
+              <Stat
+                label="Attempts"
+                value={`${r.attempt_count} of ${r.max_attempts}`}
+                hint={r.replay_count ? `replayed ${r.replay_count}×` : undefined}
               />
-            </Section>
+              <Stat label={live ? "Elapsed" : "Wall time"} value={r.started_at ? formatDuration(runDuration) : live ? "not started" : "–"} />
+            </Readouts>
 
-            <Section title="Attempts" note={list.length > 1 ? "pick one to see its trajectory" : undefined}>
-              <Gate query={attempts} loadingLabel="Loading attempts">
-                {list.length === 0 ? (
-                  <Empty>No attempts yet. {live ? "The run is waiting for a worker to pick it up; this page refreshes on its own." : ""}</Empty>
-                ) : (
-                  <>
-                  <RetryHistory attempts={list} maxAttempts={r.max_attempts} />
-                  <ol aria-label="Attempt timeline" className="border-t border-rule">
-                    {list.map((a) => (
-                      <AttemptRow key={a.id} a={a} selected={a.attempt_no === selectedNo} onSelect={() => setPicked(a.attempt_no)} />
-                    ))}
-                  </ol>
-                  </>
-                )}
-              </Gate>
-            </Section>
-
-            {selectedNo !== null ? (
-              <div className="grid gap-10 xl:grid-cols-[minmax(0,1fr)_300px]">
-                <EventsPanel runId={id} attempt={selected} attemptNo={selectedNo} live={live} />
-                <div className="space-y-10">
-                  <EvaluationPanel runId={id} attemptNo={selectedNo} />
-                  <AttemptDetail attempt={selected} />
-                </div>
+            <div className="grid gap-x-10 gap-y-10 xl:grid-cols-[minmax(0,1fr)_320px]">
+              <div className="min-w-0 space-y-10">
+                <Section title="Attempts" note={list.length > 1 ? "pick one to see its trajectory" : undefined}>
+                  <Gate query={attempts} loadingLabel="Loading attempts">
+                    {list.length === 0 ? (
+                      <Empty>No attempts yet. {live ? "The run is waiting for a worker; this page refreshes on its own." : ""}</Empty>
+                    ) : (
+                      <>
+                        <RetryHistory attempts={list} maxAttempts={r.max_attempts} />
+                        <ol aria-label="Attempt timeline" className="overflow-hidden rounded-[6px] border border-rule bg-surface">
+                          {list.map((a) => (
+                            <AttemptRow key={a.id} a={a} selected={a.attempt_no === selectedNo} onSelect={() => setPicked(a.attempt_no)} />
+                          ))}
+                        </ol>
+                      </>
+                    )}
+                  </Gate>
+                </Section>
+                {selectedNo !== null ? <EventsPanel runId={id} attempt={selected} attemptNo={selectedNo} live={live} /> : null}
               </div>
-            ) : null}
+              <div className="min-w-0 space-y-10">
+                {selectedNo !== null ? <EvaluationPanel runId={id} attemptNo={selectedNo} /> : null}
+                {selectedNo !== null ? <AttemptDetail attempt={selected} /> : null}
+                <Section title="Run details">
+            <KeyValue
+            
+            items={[
+              ["Dead letter", r.dead_letter_reason ? <StatusMark key="dl" tone="bad">{humanize(r.dead_letter_reason)}</StatusMark> : "–"],
+              ["Failure reason", humanize(r.failure_reason)],
+              ...(r.error_message ? ([["Error", <span key="e" className="text-bad">{r.error_message}</span>]] as [string, ReactNode][]) : []),
+              ...(r.next_attempt_at
+                ? ([
+                    [
+                      "Next attempt",
+                      <span key="n">
+                        <Timestamp value={formatTimestamp(r.next_attempt_at)} />
+                        {live ? <NextAttemptIn at={r.next_attempt_at} now={now} /> : null}
+                      </span>,
+                    ],
+                  ] as [string, ReactNode][])
+                : []),
+              ...(r.cancel_requested_at
+                ? ([
+                    [
+                      "Cancel requested",
+                      <span key="c">
+                        <Timestamp value={formatTimestamp(r.cancel_requested_at)} /> <span className="text-faint">({r.cancel_reason})</span>
+                      </span>,
+                    ],
+                  ] as [string, ReactNode][])
+                : []),
+              ["Run id", <Mono key="id" className="break-all text-[12px] text-ink-2">{r.id}</Mono>],
+              ["Task", <IdLink key="t" id={r.task_id} label={task.data ? `${task.data.name} · ${shortId(r.task_id)}` : r.task_id} />],
+              ["Worker", <Mono key="w" className="text-[12.5px]">{r.worker_id ?? "–"}</Mono>],
+              ["Created", <Timestamp key="cr" value={formatTimestamp(r.created_at)} />],
+              ["Started", <Timestamp key="st" value={formatTimestamp(r.started_at)} />],
+              ["Finished", <Timestamp key="f" value={formatTimestamp(r.finished_at)} />],
+            ]}
+              />
+                </Section>
+              </div>
+            </div>
           </div>
         ) : null}
       </Gate>
@@ -311,7 +306,7 @@ function RetryHistory({ attempts, maxAttempts }: { attempts: RunAttemptRead[]; m
   const sorted = [...attempts].sort((a, b) => a.attempt_no - b.attempt_no);
   return (
     <div className="mb-3 text-[12.5px] text-muted">
-      <div className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">
+      <div className="mb-1 text-[12px] font-medium text-muted">
         Retry history · {attempts.length} of {maxAttempts} attempts used
       </div>
       <ol aria-label="Retry history" className="space-y-0.5">
@@ -330,13 +325,13 @@ function RetryHistory({ attempts, maxAttempts }: { attempts: RunAttemptRead[]; m
 
 function AttemptRow({ a, selected, onSelect }: { a: RunAttemptRead; selected: boolean; onSelect: () => void }) {
   return (
-    <li className="border-b border-rule">
+    <li className="border-b border-rule last:border-b-0">
       <button
         type="button"
         onClick={onSelect}
         aria-pressed={selected}
         className={`relative grid w-full grid-cols-[2.5rem_1fr] items-baseline gap-x-3 gap-y-1 py-2 pl-3 pr-1 text-left text-[13px] sm:grid-cols-[2.5rem_9rem_1fr_auto] ${
-          selected ? "bg-sunken/70" : "hover:bg-sunken/40"
+          selected ? "bg-sunken/70" : "hover:bg-paper"
         }`}
       >
         <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-[2px] ${selected ? "bg-accent" : ""}`} />
@@ -371,8 +366,8 @@ function AttemptDetail({ attempt }: { attempt: RunAttemptRead | undefined }) {
       />
       {attempt.final_answer ? (
         <div className="mt-4">
-          <div className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">Final answer</div>
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-[3px] bg-sunken p-3 font-mono text-[12px] leading-relaxed text-ink">{attempt.final_answer}</pre>
+          <div className="mb-1 text-[12px] text-muted">Final answer</div>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-[5px] bg-sunken p-3 font-mono text-[12px] leading-relaxed text-ink">{attempt.final_answer}</pre>
         </div>
       ) : null}
       {(["stdout", "stderr"] as const).map((k) =>
@@ -382,7 +377,7 @@ function AttemptDetail({ attempt }: { attempt: RunAttemptRead | undefined }) {
               ▸ {k}
               {attempt[`${k}_truncated`] ? " (truncated)" : ""}
             </summary>
-            <pre className="mt-1 max-h-64 overflow-auto rounded-[3px] bg-sunken p-3 font-mono text-[11.5px] text-ink-2">{attempt[k]}</pre>
+            <pre className="mt-1 max-h-64 overflow-auto rounded-[5px] bg-sunken p-3 font-mono text-[11.5px] text-ink-2">{attempt[k]}</pre>
           </details>
         ) : null,
       )}
@@ -409,7 +404,7 @@ function EvaluationPanel({ runId, attemptNo }: { runId: string; attemptNo: numbe
           <div className="space-y-5">
             <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2">
               {ev.task_success === null ? null : (
-                <span className={`font-display text-[22px] font-semibold leading-none ${ev.task_success ? "text-good" : "text-bad"}`}>
+                <span className={`text-[20px] font-semibold leading-none tracking-[-0.01em] ${ev.task_success ? "text-good" : "text-bad"}`}>
                   {ev.task_success ? "Passed" : "Failed"}
                 </span>
               )}
@@ -635,7 +630,7 @@ function Payload({ label, value }: { label: string; value: unknown }) {
   return (
     <div className="mt-1.5 grid grid-cols-[2rem_minmax(0,1fr)] gap-2">
       <span className="pt-2 text-right text-[10.5px] uppercase text-faint">{label}</span>
-      <pre className="max-h-56 overflow-auto rounded-[3px] bg-sunken p-2.5 text-[11.5px] leading-relaxed text-ink-2">{compactJson(value)}</pre>
+      <pre className="max-h-56 overflow-auto rounded-[5px] bg-sunken p-2.5 text-[11.5px] leading-relaxed text-ink-2">{compactJson(value)}</pre>
     </div>
   );
 }
